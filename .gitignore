@@ -1,0 +1,19 @@
+# Project-local toolchains and QEMU (installed by scripts/bootstrap.sh)
+/.tools/
+
+# Rust
+/target/
+
+# Web
+node_modules/
+/web/dist/
+
+# Runtime state created by a dev run
+/var/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
