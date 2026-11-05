@@ -305,6 +305,13 @@ fn windows_uefi_secure_boot_cdrom_with_comma() {
         }),
     };
     let c = compile(&spec, &ctx).unwrap();
+    // Direct I/O is unavailable on Windows hosts: buffered fallback + warning.
+    assert!(
+        c.warnings
+            .iter()
+            .any(|w| w.rule == "disk.no-direct-io" && w.field == "disks[0].cache")
+    );
+    assert!(!c.args.iter().any(|a| a.contains(r#""direct":true"#)));
     // The comma in the ISO name lives inside JSON, never in keyval syntax.
     assert!(
         c.args

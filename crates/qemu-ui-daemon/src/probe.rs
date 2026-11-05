@@ -702,7 +702,7 @@ mod compile_smoke {
                 media: Media::Disk,
                 readonly: false,
                 boot_index: Some(1),
-                cache: CacheMode::Writeback,
+                cache: CacheMode::None, // the default; must work on Windows too
                 aio: None,
                 discard: true,
             }],

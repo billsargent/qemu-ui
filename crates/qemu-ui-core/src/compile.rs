@@ -594,6 +594,17 @@ fn cache_direct(c: CacheMode) -> bool {
 }
 
 /// `(direct, no_flush, write_cache)` for a cache mode, per QEMU's mapping.
+/// The cache mode actually used on `os`. QEMU on Windows hosts cannot open
+/// images with direct I/O (`cache.direct=on` makes qcow2 headers unreadable),
+/// so modes that need it fall back to their buffered equivalent.
+pub fn effective_cache(c: CacheMode, os: &str) -> CacheMode {
+    match (os, c) {
+        ("windows", CacheMode::None) => CacheMode::Writeback,
+        ("windows", CacheMode::Directsync) => CacheMode::Writethrough,
+        _ => c,
+    }
+}
+
 fn cache_flags(c: CacheMode) -> (bool, bool, bool) {
     match c {
         CacheMode::None => (true, false, true),
@@ -647,6 +658,29 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
             "firmware.smm",
             "this firmware requires smm=on",
         ));
+    }
+    for (i, disk) in spec.disks.iter().enumerate() {
+        let eff = effective_cache(disk.cache, ctx.os);
+        if eff != disk.cache {
+            diags.push(Diagnostic::warning(
+                format!("disks[{i}].cache"),
+                "disk.no-direct-io",
+                format!(
+                    "QEMU on Windows hosts does not support direct I/O; using '{}' instead",
+                    serde_json::to_value(eff)
+                        .ok()
+                        .and_then(|v| v.as_str().map(String::from))
+                        .unwrap_or_default()
+                ),
+            ));
+        }
+        if disk.aio.as_deref() == Some("native") && !cache_direct(eff) {
+            diags.push(Diagnostic::error(
+                format!("disks[{i}].aio"),
+                "disk.aio-native-direct",
+                "aio=native needs direct I/O, which this host does not support",
+            ));
+        }
     }
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(diags);
@@ -771,7 +805,7 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
     // Disks
     for (i, disk) in spec.disks.iter().enumerate() {
         let img = &ctx.images[&disk.image];
-        a.extend(disk_args(i, disk, img));
+        a.extend(disk_args(i, disk, img, ctx.os));
     }
 
     // NICs
@@ -880,8 +914,8 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
     })
 }
 
-fn disk_args(i: usize, disk: &DiskSpec, img: &ResolvedImage) -> Vec<String> {
-    let (direct, no_flush, write_cache) = cache_flags(disk.cache);
+fn disk_args(i: usize, disk: &DiskSpec, img: &ResolvedImage, os: &str) -> Vec<String> {
+    let (direct, no_flush, write_cache) = cache_flags(effective_cache(disk.cache, os));
     let readonly = disk.readonly || disk.media == Media::Cdrom;
     // `threads` works everywhere; io_uring/native are opt-in until the probe
     // checks host support.

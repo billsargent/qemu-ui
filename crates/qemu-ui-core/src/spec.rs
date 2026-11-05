@@ -100,7 +100,9 @@ pub enum FirmwareSpec {
     Descriptor { id: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS, JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS, JsonSchema,
+)]
 #[ts(export)]
 pub struct ImageRef {
     pub pool: String,
@@ -108,7 +110,9 @@ pub struct ImageRef {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, TS, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, TS, JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 #[ts(export)]
 pub enum DiskBus {
@@ -334,17 +338,21 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../data/schema")
             .join(format!("vm-spec.v{SPEC_VERSION}.json"));
-        let actual = serde_json::to_string_pretty(&json_schema()).unwrap() + "
-";
+        let actual = serde_json::to_string_pretty(&json_schema()).unwrap() + "\n";
         if std::env::var_os("UPDATE_GOLDEN").is_some() {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, &actual).unwrap();
             return;
         }
-        let expected = std::fs::read_to_string(&path).unwrap_or_default().replace("
-", "
-");
-        assert_eq!(actual, expected, "stale {}; run with UPDATE_GOLDEN=1", path.display());
+        let expected = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        assert_eq!(
+            actual,
+            expected,
+            "stale {}; run with UPDATE_GOLDEN=1",
+            path.display()
+        );
     }
 
     #[test]

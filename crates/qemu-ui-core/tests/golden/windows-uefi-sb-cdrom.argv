@@ -28,9 +28,9 @@ max
 -device
 {"driver":"qemu-xhci","id":"qui-usb"}
 -blockdev
-{"aio":"threads","cache":{"direct":true,"no-flush":false},"discard":"unmap","driver":"file","filename":"/var/lib/qemu-ui/pools/default/debian.qcow2","node-name":"qui-disk0-file","read-only":false}
+{"aio":"threads","cache":{"direct":false,"no-flush":false},"discard":"unmap","driver":"file","filename":"/var/lib/qemu-ui/pools/default/debian.qcow2","node-name":"qui-disk0-file","read-only":false}
 -blockdev
-{"cache":{"direct":true,"no-flush":false},"discard":"unmap","driver":"qcow2","file":"qui-disk0-file","node-name":"qui-disk0","read-only":false}
+{"cache":{"direct":false,"no-flush":false},"discard":"unmap","driver":"qcow2","file":"qui-disk0-file","node-name":"qui-disk0","read-only":false}
 -device
 {"bootindex":1,"drive":"qui-disk0","driver":"virtio-blk-pci","id":"qui-dev0","write-cache":"on"}
 -blockdev
