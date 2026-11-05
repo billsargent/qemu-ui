@@ -400,6 +400,19 @@ impl Store {
         })
     }
 
+    /// The most recent `limit` events of one VM, oldest first.
+    pub fn events_for_vm(&self, vm_id: &str, limit: u32) -> Result<Vec<EventRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT seq, vm_id, at_us, kind, data_json FROM                  (SELECT * FROM event WHERE vm_id = ?1 ORDER BY seq DESC LIMIT ?2) ORDER BY seq",
+            )?;
+            st.query_map(params![vm_id, limit], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64, r.get(3)?, r.get(4)?))
+            })?
+            .collect()
+        })
+    }
+
     /// Events after `seq`, oldest first.
     pub fn events_after(&self, seq: i64, limit: u32) -> Result<Vec<EventRow>> {
         self.with(|c| {

@@ -30,6 +30,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/vms/{id}", get(detail).put(update).delete(delete))
         .route("/vms/{id}/actions/{action}", post(action))
         .route("/vms/{id}/serial-log", get(serial_log))
+        .route("/vms/{id}/events", get(vm_events))
         .route("/pools/{pool}", get(pool))
         .route("/pools/{pool}/images", post(create_image))
         .route("/events", get(events))
@@ -188,6 +189,29 @@ async fn compile_preview(
             }],
         }),
     }
+}
+
+/// Recent events of one VM, oldest first.
+async fn vm_events(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<String>,
+) -> ApiResult<Vec<VmEvent>> {
+    let rows = app
+        .supervisor
+        .store
+        .events_for_vm(&id, 200)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(seq, vm_id, at_us, kind, data)| VmEvent {
+                seq,
+                vm_id,
+                at_us,
+                kind,
+                data: serde_json::from_str(&data).unwrap_or_default(),
+            })
+            .collect(),
+    ))
 }
 
 /// Serial output so far (from the persistent serial log), for scrollback.

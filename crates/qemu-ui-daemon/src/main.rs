@@ -2,6 +2,7 @@
 
 mod api;
 mod api_vms;
+mod consoles;
 mod discovery;
 mod images;
 mod probe;
