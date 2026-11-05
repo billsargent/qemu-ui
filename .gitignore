@@ -17,3 +17,7 @@ node_modules/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+*.tsbuildinfo
