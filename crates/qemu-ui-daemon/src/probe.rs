@@ -496,24 +496,8 @@ mod tests {
 /// on both Windows and Linux). Passes vacuously otherwise.
 #[cfg(test)]
 mod smoke {
+    use super::smoke_support::find;
     use super::*;
-    use std::path::PathBuf;
-
-    fn find(exe: &str) -> Option<PathBuf> {
-        let exe = if cfg!(windows) {
-            format!("{exe}.exe")
-        } else {
-            exe.to_string()
-        };
-        let mut dirs: Vec<PathBuf> = std::env::var_os("QEMU_UI_QEMU_DIR")
-            .map(PathBuf::from)
-            .into_iter()
-            .collect();
-        if let Some(p) = std::env::var_os("PATH") {
-            dirs.extend(std::env::split_paths(&p));
-        }
-        dirs.into_iter().map(|d| d.join(&exe)).find(|p| p.is_file())
-    }
 
     #[tokio::test]
     async fn probes_x86_64() {
@@ -552,5 +536,264 @@ mod smoke {
 
         let props = device_properties(&path, "virtio-blk-pci").await.unwrap();
         assert!(props.iter().any(|p| p.name == "drive"));
+    }
+}
+
+/// Compiler acceptance test: compile specs against *real* probed
+/// capabilities and start the real QEMU with the result (`-S`, then quit).
+/// Golden files prove the argv is stable; this proves QEMU accepts it.
+#[cfg(test)]
+mod compile_smoke {
+    use super::smoke_support::*;
+    use super::*;
+    use qemu_ui_core::compile::{
+        self, Context, ResolvedFirmware, ResolvedImage, RunPaths, VncListen,
+    };
+    use qemu_ui_core::spec::*;
+    use std::collections::BTreeMap;
+
+    async fn start_and_check(
+        caps: &BinaryCaps,
+        spec: &VmSpec,
+        images: &BTreeMap<ImageRef, ResolvedImage>,
+        fw: Option<ResolvedFirmware>,
+        dir: &Path,
+    ) {
+        let s = |n: &str| dir.join(n).display().to_string();
+        let vnc = if cfg!(windows) {
+            VncListen::Tcp { display: 77 }
+        } else {
+            VncListen::Unix(s("vnc.sock"))
+        };
+        let run = RunPaths {
+            qmp: s("q.sock"),
+            qmp_user: s("u.sock"),
+            serial: s("s.sock"),
+            serial_log: s("serial.log"),
+            pidfile: s("qemu.pid"),
+            vnc,
+        };
+        let ctx = Context {
+            caps,
+            os: std::env::consts::OS,
+            run,
+            images,
+            firmware: fw,
+        };
+        let c = compile::compile(spec, &ctx).unwrap_or_else(|d| panic!("compile failed: {d:#?}"));
+        let _ = std::fs::remove_file(dir.join("qemu.pid"));
+        let mut child = command(Path::new(&c.program))
+            .args(&c.args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let sock = dir.join("q.sock");
+        let mut qmp = None;
+        for _ in 0..100 {
+            if let Ok(q) = Qmp::connect_unix(&sock).await {
+                qmp = Some(q);
+                break;
+            }
+            if let Ok(Some(_)) = child.try_wait() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let Some(qmp) = qmp else {
+            panic!(
+                "QEMU rejected the argv: {}\nargv: {}",
+                failure_reason(&mut child, "no QMP").await,
+                compile::display_command(&c.program, &c.args)
+            );
+        };
+        let st = qmp.execute("query-status", None).await.unwrap();
+        assert_eq!(st["status"], "prelaunch");
+        let blocks = qmp.execute("query-named-block-nodes", None).await.unwrap();
+        let names: Vec<&str> = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| b["node-name"].as_str())
+            .collect();
+        for i in 0..spec.disks.len() {
+            assert!(
+                names.contains(&format!("qui-disk{i}").as_str()),
+                "{names:?}"
+            );
+        }
+        assert!(dir.join("qemu.pid").exists(), "pidfile");
+        quit(&qmp, child).await;
+    }
+
+    #[tokio::test]
+    async fn real_qemu_accepts_compiled_argv() {
+        let (Some(path), Some(img)) = (find("qemu-system-x86_64"), find("qemu-img")) else {
+            eprintln!("skipping: qemu not found");
+            return;
+        };
+        let host = crate::scan::host_info();
+        let binary = Binary {
+            id: "t".into(),
+            path: path.display().to_string(),
+            arch: Some("x86_64".into()),
+            version: String::new(),
+            sha256: String::new(),
+            source: "path".into(),
+        };
+        let caps = probe_binary(binary, &host).await.unwrap();
+        let dir = short_tmp("cs");
+
+        let disk = dir.join("d.qcow2");
+        let iso = dir.join("a, b.iso");
+        let ok = command(&img)
+            .args(["create", "-q", "-f", "qcow2"])
+            .arg(&disk)
+            .arg("64M")
+            .status()
+            .await
+            .unwrap();
+        assert!(ok.success());
+        std::fs::write(&iso, vec![0u8; 2048 * 16]).unwrap();
+        let r = |n: &str| ImageRef {
+            pool: "p".into(),
+            name: n.into(),
+        };
+        let mut images = BTreeMap::new();
+        images.insert(
+            r("d.qcow2"),
+            ResolvedImage {
+                path: disk.display().to_string(),
+                format: "qcow2".into(),
+            },
+        );
+        images.insert(
+            r("a, b.iso"),
+            ResolvedImage {
+                path: iso.display().to_string(),
+                format: "raw".into(),
+            },
+        );
+
+        let mut spec = VmSpec {
+            spec_version: SPEC_VERSION,
+            name: "smoke".into(),
+            arch: "x86_64".into(),
+            machine: MachineSpec {
+                type_name: compile::pin_machine("q35", &caps).unwrap(),
+                props: BTreeMap::new(),
+            },
+            accel: "tcg".into(),
+            cpu: CpuSpec {
+                model: Some("qemu64".into()),
+                props: BTreeMap::new(),
+                count: 2,
+                topology: Some(Topology {
+                    sockets: 1,
+                    cores: 2,
+                    threads: 1,
+                }),
+            },
+            memory: MemorySpec { size_mib: 128 },
+            firmware: FirmwareSpec::Default,
+            disks: vec![DiskSpec {
+                image: r("d.qcow2"),
+                bus: DiskBus::Virtio,
+                media: Media::Disk,
+                readonly: false,
+                boot_index: Some(1),
+                cache: CacheMode::Writeback,
+                aio: None,
+                discard: true,
+            }],
+            nics: vec![NicSpec {
+                backend: NicBackend::User { forwards: vec![] },
+                model: "virtio-net-pci".into(),
+                mac: Some("52:54:00:00:00:01".into()),
+            }],
+            display: DisplaySpec {
+                device: Some("virtio-vga".into()),
+                vnc: true,
+                vdagent: true,
+            },
+            input: InputSpec { usb_tablet: true },
+            passthrough: vec![],
+        };
+        start_and_check(&caps, &spec, &images, None, &dir).await;
+
+        // UEFI + Secure Boot with a qcow2 VARS copy, plus a SCSI CD-ROM whose
+        // file name contains a comma.
+        let fw_dir = path.parent().unwrap().join("share");
+        let code = fw_dir.join("edk2-x86_64-secure-code.fd");
+        let template = fw_dir.join("edk2-i386-vars.fd");
+        if code.exists() && template.exists() {
+            let vars = dir.join("VARS.qcow2");
+            let ok = command(&img)
+                .args(["convert", "-q", "-O", "qcow2"])
+                .arg(&template)
+                .arg(&vars)
+                .status()
+                .await
+                .unwrap();
+            assert!(ok.success());
+            spec.firmware = FirmwareSpec::Descriptor {
+                id: "50-edk2-x86_64-secure".into(),
+            };
+            spec.disks.push(DiskSpec {
+                image: r("a, b.iso"),
+                bus: DiskBus::Scsi,
+                media: Media::Cdrom,
+                readonly: true,
+                boot_index: Some(0),
+                cache: CacheMode::None,
+                aio: None,
+                discard: false,
+            });
+            let fw = ResolvedFirmware {
+                code: code.display().to_string(),
+                code_format: "raw".into(),
+                vars: Some(vars.display().to_string()),
+                vars_format: "qcow2".into(),
+                secure_boot: true,
+                requires_smm: true,
+            };
+            start_and_check(&caps, &spec, &images, Some(fw), &dir).await;
+        } else {
+            eprintln!("skipping UEFI case: firmware not next to the binary");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod smoke_support {
+    use std::path::PathBuf;
+
+    pub fn find(exe: &str) -> Option<PathBuf> {
+        let exe = if cfg!(windows) {
+            format!("{exe}.exe")
+        } else {
+            exe.to_string()
+        };
+        let mut dirs: Vec<PathBuf> = std::env::var_os("QEMU_UI_QEMU_DIR")
+            .map(PathBuf::from)
+            .into_iter()
+            .collect();
+        if let Some(p) = std::env::var_os("PATH") {
+            dirs.extend(std::env::split_paths(&p));
+        }
+        dirs.into_iter().map(|d| d.join(&exe)).find(|p| p.is_file())
+    }
+
+    /// A temp dir short enough for AF_UNIX socket paths.
+    pub fn short_tmp(tag: &str) -> PathBuf {
+        let base = if cfg!(windows) {
+            std::env::temp_dir()
+        } else {
+            PathBuf::from("/tmp")
+        };
+        let d = base.join(format!("qui-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
     }
 }

@@ -6,6 +6,8 @@
 
 pub mod arch;
 pub mod caps;
+pub mod compile;
 pub mod firmware;
 pub mod help;
 pub mod parity;
+pub mod spec;
