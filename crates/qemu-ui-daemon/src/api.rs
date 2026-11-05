@@ -1,5 +1,5 @@
-//! HTTP API (`/api/v1`). M0 surface: health, host capabilities, rescan, lazy
-//! device properties. Serves the built SPA from `--web-dir` when present.
+//! HTTP API (`/api/v1`): host capabilities (M0) and VMs (M1). VM routes
+//! live in `api_vms`. Serves the built SPA from `--web-dir` when present.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,22 +18,25 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::probe;
 use crate::scan::Scanner;
+use crate::supervisor::Supervisor;
 
 pub struct App {
     pub scanner: Arc<Scanner>,
+    pub supervisor: Arc<Supervisor>,
     props: Mutex<HashMap<(String, String), Vec<DeviceProperty>>>,
 }
 
 impl App {
-    pub fn new(scanner: Arc<Scanner>) -> Arc<Self> {
+    pub fn new(scanner: Arc<Scanner>, supervisor: Arc<Supervisor>) -> Arc<Self> {
         Arc::new(App {
             scanner,
+            supervisor,
             props: Mutex::default(),
         })
     }
 }
 
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub StatusCode, pub String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -41,7 +44,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-type ApiResult<T> = Result<Json<T>, ApiError>;
+pub type ApiResult<T> = Result<Json<T>, ApiError>;
 
 pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
     let api = Router::new()
@@ -52,6 +55,7 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
             "/host/binaries/{id}/devices/{device}/properties",
             get(device_properties),
         )
+        .merge(crate::api_vms::routes())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "no such endpoint".into()) })
         .with_state(app);
     let router = Router::new().nest("/api/v1", api);

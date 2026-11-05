@@ -11,3 +11,4 @@ pub mod firmware;
 pub mod help;
 pub mod parity;
 pub mod spec;
+pub mod vm;

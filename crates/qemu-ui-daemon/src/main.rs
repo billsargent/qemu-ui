@@ -1,10 +1,14 @@
 //! qemu-uid: the qemu-ui daemon (plan.md §3).
 
 mod api;
+mod api_vms;
 mod discovery;
+mod images;
 mod probe;
+mod procs;
 mod scan;
 mod store;
+mod supervisor;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -31,6 +35,11 @@ struct Args {
     /// Directory of the built web UI (web/dist).
     #[arg(long, env = "QEMU_UI_WEB_DIR")]
     web_dir: Option<PathBuf>,
+
+    /// Directory for per-VM sockets. Must be short: unix socket paths are
+    /// limited to 108 bytes. Defaults to `<data-dir>/r`.
+    #[arg(long, env = "QEMU_UI_RUN_DIR")]
+    run_dir: Option<PathBuf>,
 
     /// Re-probe every binary at startup even if a cached snapshot exists.
     #[arg(long)]
@@ -63,14 +72,19 @@ async fn main() -> Result<()> {
     let store = store::Store::open(&data_dir.join("qemu-ui.db"))?;
 
     let project_dirs = project_qemu_dirs();
-    let scanner = scan::Scanner::new(store, project_dirs, args.qemu_dirs);
+    let scanner = scan::Scanner::new(store.clone(), project_dirs, args.qemu_dirs);
     scanner.start(args.rescan).await;
+
+    let run_dir = args.run_dir.unwrap_or_else(|| data_dir.join("r"));
+    let supervisor = supervisor::Supervisor::new(store, scanner.clone(), &data_dir, run_dir)?;
+    // VMs kept running while the daemon was down: find them again.
+    supervisor.reattach_all().await;
 
     let web_dir = args.web_dir.or_else(|| {
         let d = std::env::current_dir().ok()?.join("web").join("dist");
         d.is_dir().then_some(d)
     });
-    let app = api::router(api::App::new(scanner), web_dir);
+    let app = api::router(api::App::new(scanner, supervisor), web_dir);
 
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await

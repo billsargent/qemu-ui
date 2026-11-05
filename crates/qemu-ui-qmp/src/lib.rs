@@ -95,6 +95,8 @@ struct Inner {
     /// this, QEMU (which serves one client per chardev) would never accept
     /// the next client.
     _close: oneshot::Sender<()>,
+    /// Becomes `true` when the connection ends (EOF, error, or drop).
+    closed: tokio::sync::watch::Receiver<bool>,
 }
 
 impl Qmp {
@@ -119,6 +121,7 @@ impl Qmp {
         .await
         .map_err(|_| QmpError::Timeout("QMP greeting".into()))??;
         let (close_tx, mut close_rx) = oneshot::channel::<()>();
+        let (closed_tx, closed_rx) = tokio::sync::watch::channel(false);
 
         let pending: Pending = Arc::default();
         let (events, _) = broadcast::channel(1024);
@@ -130,6 +133,7 @@ impl Qmp {
             greeting,
             timeout: DEFAULT_TIMEOUT,
             _close: close_tx,
+            closed: closed_rx,
         });
 
         tokio::spawn(async move {
@@ -146,6 +150,7 @@ impl Qmp {
             for (_, tx) in pending.lock().unwrap().drain() {
                 let _ = tx.send(Err(QmpError::Closed));
             }
+            let _ = closed_tx.send(true);
         });
 
         let qmp = Qmp { inner };
@@ -179,6 +184,16 @@ impl Qmp {
             .take()
             .ok_or_else(|| QmpError::Protocol("child stdout not piped".into()))?;
         Self::connect(stdout, stdin).await
+    }
+
+    /// Resolves when the connection has ended (QEMU exited, socket closed).
+    pub async fn closed(&self) {
+        let mut rx = self.inner.closed.clone();
+        let _ = rx.wait_for(|c| *c).await;
+    }
+
+    pub fn is_closed(&self) -> bool {
+        *self.inner.closed.borrow()
     }
 
     pub fn greeting(&self) -> &Greeting {
@@ -374,6 +389,24 @@ mod tests {
         });
         let results = futures_join(calls).await;
         assert_eq!(results, (0..20).map(Some).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn closed_resolves_when_server_goes_away() {
+        let (a, b) = duplex(4096);
+        let server = tokio::spawn(fake_server(b));
+        let (r, w) = tokio::io::split(a);
+        let q = Qmp::connect(r, w).await.unwrap();
+        assert!(!q.is_closed());
+        server.abort();
+        tokio::time::timeout(std::time::Duration::from_secs(5), q.closed())
+            .await
+            .unwrap();
+        assert!(q.is_closed());
+        assert!(matches!(
+            q.execute("echo", None).await,
+            Err(QmpError::Closed | QmpError::Io(_))
+        ));
     }
 
     #[tokio::test]
