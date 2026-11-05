@@ -1,93 +1,102 @@
-# qemu-ui — Specification & Design Discussion
+# qemu-ui — Specification
 
 A browser-based control plane for QEMU: every architecture, every machine type, every
 command-line option, real disk/network/display management, and VM sessions that survive
 closing the browser.
 
-Status: **draft v2** — five product decisions locked (see §15). Nothing implemented yet.
+Status: **v3** — revision of the v2 draft. Corrects several factual errors (mostly about
+Windows hosts), collapses the API/supervisor split into one daemon, makes `-blockdev` and
+JSON-syntax argv the compiler's output format, and adds a numbered work breakdown (§16)
+that maps 1:1 to GitHub issues. Changes from v2 are summarised in §0.
+
+---
+
+## 0. What changed from v2, and why
+
+| Area | v2 said | v3 says | Why |
+|---|---|---|---|
+| Process layout | browser → web/api → supervisor → QEMU (three tiers) | browser → **one daemon** → QEMU, plus a small privileged helper | QEMU already outlives the supervisor and is re-attached on start, so a separate web tier protects nothing and doubles RPC/auth/service work. Module boundary kept, process boundary dropped. |
+| Daemonizing | `-daemonize` | Supervisor spawns QEMU detached itself; never `-daemonize` | `-daemonize` does not exist on Windows and loses the child handle on Linux. |
+| Process survival | assumed | Explicit rules: systemd `KillMode`/per-VM scope, job objects without kill-on-close, stdio to files, pid identity check | Without these, "survives everything" is false on both OSes. |
+| Disk argv | `-drive if=none` | `-blockdev` with node names | Snapshots, block jobs, mirror/backup, hotplug and `query-named-block-nodes` all key on node names. Cheap now, very expensive to retrofit. |
+| Option syntax | keyval (`a=b,c=d`) | JSON for `-blockdev`/`-device`/`-object`/`-netdev`; keyval only where JSON is not accepted, with comma doubling | A comma in a file name injects options in keyval syntax. This is the real injection vector, not the shell. |
+| Machine type | stored as entered | Alias resolved to versioned machine (`q35` → `pc-q35-X.Y`) at create time and pinned | Guest ABI stability across QEMU upgrades. |
+| Lint run | separate spawn with `-nodefaults`, small `-m` | "Save & Start" *is* the lint: spawn real argv with `-S`, check, `cont`. Separate dry lint only for "Check config"/CI, with side-effecting backends rewritten | v2's lint validated a different config and could collide with locks/ports of running VMs. |
+| L2 rules | forbid/warn/auto-fix | **warn by default**; forbid only with a citation *and* a lint-run reproduction | Several v2 rules were wrong (NVMe, virtio-scsi-pci, virtio-vga-gl and vmport all work on i440fx). |
+| QMP monitors | one | two per VM: supervisor-owned + expert/console | Raw user commands must not desync the supervisor's state machine or swallow events. |
+| VNC/SPICE | loopback TCP, no password | Unix socket where available; otherwise loopback TCP + per-run password via `set_password` | Any local process could otherwise attach. |
+| vdagent | `-device qemu-vdagent` | `-chardev qemu-vdagent` + `virtserialport` | qemu-vdagent is a chardev backend, not a device. |
+| Suspend to disk | `migrate exec:cat > …` | `migrate file:` (+ `mapped-ram`) | `exec:` is unavailable on Windows and blocked by `-sandbox spawn=deny`. |
+| Internal snapshots | `savevm` | `snapshot-save` QMP job; UEFI VARS stored as qcow2 | `savevm` fails when any writable drive (classically raw pflash VARS) is not qcow2. |
+| slirp port forwards | creation-time only | Live add/remove via HMP `hostfwd_add`/`hostfwd_remove` | Those commands exist; no restart needed. |
+| Windows NAT | "passt is the recommended Windows answer" | slirp on Windows; passt is Linux-only | passt does not run on Windows. |
+| Windows TPM | Win11 lane with swtpm on a WHPX host | TPM availability is *probed*; `impossible` on Windows hosts today | Verified: the QEMU 11.1 Windows build rejects `-tpmdev` as an invalid option, and swtpm has no mainstream Windows build. The probe decides, not the spec. |
+| Multiqueue NIC | `mq` with `-netdev user` | `mq` only with tap/vhost backends | slirp has no multiqueue. |
+| guacd / SPICE | committed for M5 on both OSes | Gated on a spike (M0-15) | SPICE support in guacamole-server and a native Windows guacd both need verification. |
+| Recording | proxy tap → WebM | Record raw RFB stream, replay in noVNC; transcode only on export | Avoids an RFB decoder + video encoder in the daemon. |
+| Data model | `spec_json` *and* normalised `disk`/`nic` tables | spec is canonical; tables are derived indexes; adds `event` log | One source of truth; event replay needs storage. |
+| Privilege | "low-priv service account" that also does TAP/physical disks | Unprivileged daemon + narrow, audited privileged helper | The two goals contradict without a broker. |
+| Toolchain | unspecified | All required binaries (Rust, C toolchain on Windows, QEMU on Windows) installed into project-local `.tools/` by `scripts/bootstrap.sh` | Reproducible, nothing installed system-wide. |
 
 ---
 
 ## 1. Problem statement
 
-Existing web UIs for QEMU fall into two camps, and both are unsatisfying:
+Existing web UIs for QEMU fall into two camps:
 
 | Camp | Examples | What you get | What you don't |
 |---|---|---|---|
-| Libvirt front-ends | virt-manager, Cockpit Machines, WebVirtMgr | Great lifecycle UX, good validation | Only what libvirt's XML models. Unknown/rare QEMU flags are rejected or silently dropped. Mostly x86/KVM-centric. |
-| Thin wrappers | raw `-monitor` / shell scripts / bespoke panels | Anything QEMU can do | No validation, no state, no multi-VM, brittle |
+| Libvirt front-ends | virt-manager, Cockpit Machines, WebVirtMgr | Lifecycle UX, validation | Only what libvirt's XML models; rare QEMU flags rejected or dropped; mostly x86/KVM-centric |
+| Thin wrappers | shell scripts, bespoke panels, raw monitor | Anything QEMU can do | No validation, no state, no multi-VM, brittle |
 
-The gap: **a UI that is as expressive as the QEMU command line, but as safe as a form.**
-
-That is the whole product thesis. Every design decision below serves it.
+**Thesis: a UI that is as expressive as the QEMU command line, but as safe as a form.**
 
 ### Non-goals (v1)
-- Not a Type-1 hypervisor / cluster manager (no live migration between hosts in v1).
-- Not a gaming/GPU-acceleration streaming stack (console is a management console, not GeForce Now).
-- Not a replacement for libvirt on servers that already standardised on it — but it must be
-  able to *import* from it.
-- Not multi-tenant hostile-user safe by default (see §12 — this is root-equivalent software).
+- Cluster management, live migration between hosts.
+- GPU-accelerated remote desktop. The console is a management console.
+- Replacing libvirt where it is already standard — but we import/export its XML.
+- Multi-tenant hostile-user safety (§13: this is root-equivalent software).
+- Internet exposure. LAN only; document how to put it behind a VPN.
+- macOS hosts are not excluded by design but are not in the CI matrix or parity ledger.
 
 ---
 
-## 2. Opinionated design principles
+## 2. Design principles
 
-These are the calls I'd make, with reasoning. Push back on any of them.
+**P1 — Talk to QEMU directly, not through libvirt.** QMP introspection
+(`query-machines`, `query-cpu-definitions`, `qom-list-types`, `device-list-properties`,
+`qom-list-properties`, `query-qmp-schema`, …) makes QEMU self-describing. libvirt is lossy on
+purpose, which is incompatible with "every option". We borrow libvirt's capabilities-probing
+idea and ship an XML importer/exporter.
 
-### P1 — Talk to QEMU directly, not through libvirt
-`query-machines`, `query-cpu-definitions`, `device-list-properties`, `qom-list-properties`,
-`query-command-line-options`, `query-qmp-schema`, `query-hotpluggable-cpus`,
-`query-memdev`, `query-block`, `query-named-block-nodes`, `query-netdev` give you a
-*self-describing* hypervisor. libvirt is a lossy abstraction *on purpose*; "support every
-command-line option" and "route through libvirt domain XML" are mutually exclusive goals.
-We borrow libvirt's best idea (capabilities probing → compatibility matrix) without the
-schema tax, and we ship an XML importer/exporter for coexistence.
+**P2 — Declarative spec → deterministic compiler → argv.** The spec (JSON, versioned) is
+desired state. The compiler is a pure function of `(spec, capability snapshot, platform)`
+and its output is golden-tested. Anything the model does not cover lives in an ordered
+`passthrough` list that is preserved across edits and clearly labelled in the UI.
 
-### P2 — Declarative VM spec → compiler → argv. Raw argv is an escape hatch, not the model.
-The database holds a JSON "VM spec" (desired state). A compiler renders it to argv.
-Two hard requirements on the compiler:
-- **Deterministic and diffable** (pure function of spec + host capabilities → argv).
-- **Lossless on the edges**: any option the model doesn't cover lives in a
-  `passthrough` bucket that is emitted verbatim, ordered, and *preserved across edits*.
-  The UI shows "3 options are set outside the visual editor" with a link to inspect them.
-- Reverse direction is best-effort: we can parse our own argv back into a spec, and we
-  import foreign command lines where we understand them, keeping the rest as passthrough.
+**P3 — Generate the long tail from QEMU's schema; hand-craft the short head.** ~15 concepts
+(machine, cpu, memory, firmware, boot, disks, NICs, display, serial, TPM, USB, audio, shares)
+get curated UI. Everything else is rendered from QOM/QAPI property types. If we cannot render
+a property, it is still reachable through passthrough.
 
-### P3 — Generate the boring 80% of the UI from QEMU's own schema
-There are thousands of `-device`/`-object`/`-netdev`/`-chardev`/`-audiodev` properties.
-Hand-mapping them is a permanent maintenance treadmill. Instead introspect and render:
-on/off/auto → tri-state switch, bool → checkbox, uint32/size → numeric with units,
-enum → select, string → text with pattern hints, `*` list → repeatable rows.
-Hand-crafted UI is reserved for the ~15 concepts a human actually reasons about
-(machine, cpu, memory, disks, nics, display, firmware, boot).
+**P4 — QEMU is the authoritative validator.** Our rules lag QEMU; QEMU's own startup does
+not. Starting with `-S` and checking health before `cont` is the final word (§6.3).
 
-### P4 — The authoritative validator is QEMU itself, not our rules
-Our compatibility rules will always lag QEMU. So we add a **lint run**: spawn the real
-command line with `-S` (CPUs halted), `-nodefaults`, `-display none`, a small `-m`,
-microlifetime QMP connection, capture stderr, `quit`. Exit-nonzero or stderr containing
-device/machine errors → surfaced as a pre-flight failure *before* touching real disks or RAM.
-This catches "you can't put virtio-vga on an ISA-only machine" for machines we've never
-seen, on architectures released after we shipped.
+**P5 — The daemon owns VMs, QEMU outlives the daemon.** QEMU processes are spawned detached,
+with stdio to files, a pidfile, and socket-based monitors. On start the daemon re-attaches and
+reconciles. Killing or upgrading the daemon never kills a VM.
 
-### P5 — The supervisor owns VMs; the browser is a client of the supervisor
-Three tiers, each able to outlive the one above it:
-```
-browser tab  ──►  web/api process  ──►  supervisor (service)  ──►  qemu-system-* process
-   (dies)              (restartable)         (survives browser)      (survives everything)
-```
-QEMU is started `-daemonize`-equivalent (detached, own process group) with a QMP unix
-socket (or named pipe on Windows) + pidfile. On supervisor start it **re-attaches** by
-socket + pidfile rather than assuming it owns anything. Killing the web UI never kills a VM.
+**P6 — qcow2 + backing chains are the copy-on-write primitive.** Templates are read-only
+bases; clones are overlays; snapshots are cheap. This is designed in from M1 because
+"VM as a link" (§18) depends on it.
 
-### P6 — qcow2-first, backing chains as the copy-on-write primitive
-Templates = read-only base image + per-VM overlay. "Clone VM" is a 1 MB overlay, not a
-50 GB copy. This also gives free snapshot/rollback and cheap disposable VMs.
+**P7 — Narrow plugin interfaces at the platform seams.** Storage, network, display and
+accelerator backends sit behind small traits so Windows specifics never leak into Linux code
+paths or the frontend.
 
-### P7 — Everything is a plugin behind a narrow interface
-Storage backends (local dir, block passthrough, NBD, iSCSI, RBD, browser upload staging),
-network backends (slirp, passt, tap/bridge, socket/mcast, passthrough), display backends
-(VNC, SPICE later), accelerators (KVM, WHPX, HVF, TCG). Keeps the Windows-host story from
-contaminating the Linux one.
+**P8 — Capabilities are data, never `if windows`.** Every "can this host do X" answer comes
+from the probe (§4) or the parity ledger (§14), both of which the UI and CI consume. A control
+that cannot work is *absent or disabled with a reason*, never broken.
 
 ---
 
@@ -96,718 +105,704 @@ contaminating the Linux one.
 ```
 ┌──────────────────────────── Browser (SPA) ────────────────────────────┐
 │ React + TS + Vite · TanStack Router/Query · shadcn/ui + Tailwind      │
-│  noVNC (canvas) · xterm.js (serial) · Monaco (raw argv / JSON)        │
-└───────▲──────────────────────────────▲───────────────────────▲────────┘
-        │ REST (JSON) + Zod          │ SSE/WS: state, QMP events │ WS: VNC/SPICE
-┌───────┴──────────────────────────────┴───────────────────────┴────────┐
-│ API layer: authn/z, spec CRUD, capability cache, task/job API         │
-└───────▲───────────────────────────────────────────────────────────────┘
-        │ control RPC (local socket, token-auth)
-┌───────┴───────────────────────────────────────────────────────────────┐
-│ SUPERVISOR (the only thing that talks to QEMU)                        │
-│  · VM registry (SQLite)   · process spawn/reap   · QMP client pool    │
-│  · capability cache       · image ops (qemu-img) · reattach on boot   │
-│  · compat engine + lint-run validator · audit log · console recorder  │
-└───────▲───────────────────────────────────────────────────────────────┘
-        │ QMP (unix socket / npipe) + VNC (localhost TCP)
-┌───────┴───────────────────────────────────────────────────────────────┐
-│ qemu-system-<arch>  × N   (detached · pidfile · QMP · VNC/SPICE · GA)  │
-│ guacd (optional, loopback-only) ──► SPICE/VNC rich display engine      │
-└───────────────────────────────────────────────────────────────────────┘
+│ noVNC · xterm.js · Monaco (argv / JSON)                               │
+└──────▲──────────────────────────▲──────────────────────────▲──────────┘
+       │ REST /api/v1 (JSON)      │ SSE /api/v1/events       │ WS /ws/{vnc,serial}/{vm}
+┌──────┴──────────────────────────┴──────────────────────────┴──────────┐
+│ qemu-uid  (single Rust daemon)                                        │
+│  http: axum, auth, OpenAPI        console: WS↔VNC/serial proxies      │
+│  supervisor: spawn · reap · reattach · state machine · autostart      │
+│  qmp: session pool (2 monitors/VM) · event log                        │
+│  caps: binary discovery · probe · snapshots · parity ledger           │
+│  compiler: spec → argv (pure crate)   store: SQLite                   │
+│  jobs: qemu-img, uploads, downloads   audit                           │
+└──────▲─────────────────────────────▲──────────────────────────────────┘
+       │ local socket, request allowlist          │ QMP / VNC / serial (unix sockets, or
+┌──────┴──────────────────┐                       │ loopback TCP + password on Windows)
+│ qemu-ui-helper          │            ┌──────────┴───────────────────────┐
+│ (privileged, tiny)      │            │ qemu-system-<arch> × N           │
+│ tap/bridge, phys disks, │            │ detached · pidfile · stdio→files │
+│ per-VM uid/cgroup setup │            │ swtpm / virtiofsd / passt sidecars│
+└─────────────────────────┘            └──────────────────────────────────┘
+          (CLI `qemu-ui` speaks the same HTTP API as the browser)
 ```
 
-**Why a separate supervisor and not one process?** Because "keep sessions running" is a
-*process supervision and re-attachment* problem, not a web problem. It also means we can
-ship a headless `qemu-ui` daemon that a future CLI/TUI/mobile client can drive, and it keeps
-QMP credentials off the HTTP surface entirely.
+### 3.1 Why one daemon (changed from v2)
+The v2 argument for splitting web and supervisor was "restarting the web server must not
+orphan VMs". P5 already guarantees that — VMs outlive the supervisor too — so the split buys
+nothing and costs an internal RPC protocol, a second auth boundary and a second service. Code
+stays modular (separate crates), so splitting later is mechanical if ever needed.
 
-### Stack recommendation (my opinion)
+### 3.2 Process survival rules (new)
+"QEMU survives the daemon" only holds if all of these are true:
+- **No pipes.** QEMU's stdout/stderr go to per-run log files, never pipes; otherwise QEMU gets
+  EPIPE/SIGPIPE when the daemon exits.
+- **Linux/systemd.** Each VM runs in its own transient scope (`systemd-run --scope`, via the
+  helper or the user manager), or the daemon unit uses `KillMode=process`. Default
+  `KillMode=control-group` kills every VM when the service stops. Per-VM scopes also give us
+  per-VM cgroups for free (§13).
+- **Windows.** If VMs are placed in job objects for containment, the job must not set
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` on a handle whose lifetime is the daemon's. Spawn with
+  `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB` where permitted.
+- **Identity.** Re-attach trusts a pid only if the process start time (Linux
+  `/proc/<pid>/stat` field 22; Windows `GetProcessTimes`) matches what we recorded and the
+  monitor socket answers with the expected VM name. Pids are reused.
 
-| Layer | Pick | Why |
+### 3.3 Repository layout
+```
+crates/
+  qemu-ui-core/      spec types, compiler, capability model, parity ledger — pure, no I/O
+  qemu-ui-qmp/       async QMP client (framing, negotiation, commands, events, transports)
+  qemu-ui-daemon/    qemu-uid binary: http, supervisor, probe, store, jobs
+  qemu-ui-cli/       qemu-ui binary: HTTP client for the daemon
+  qemu-ui-helper/    privileged helper (M2+)
+web/                 React SPA
+data/                parity ledger, curated rules, golden specs (data, not code)
+scripts/             bootstrap.sh, env.sh, dev helpers
+.tools/              project-local toolchains + QEMU (gitignored)
+```
+
+### 3.4 Stack
+
+| Layer | Pick | Notes |
 |---|---|---|
-| Supervisor | **Rust** — tokio + axum, `serde`/`serde_json`, `tokio::process` ✅ **decided** | Process supervision, signal handling, spawn-without-shell, one static binary, precise argv control, typed QMP. Best long-term fit for a systems daemon that must be reliable for weeks. |
-| Crates | `tokio`, `axum`, `rusqlite` (or `sqlx`), `serde`, `tracing`, `argon2`, `rustls`, `toml`, `notify`, `clap` (CLI parity) | Small, boring, well-maintained. |
-| Rejected | Go (nearly as good, simpler for contributors); Python/FastAPI (best for a spike, worst deployment story on Windows) | Kept here so the reasoning is auditable, not to reopen it. |
-| Frontend | React 19 + TypeScript + Vite | Ecosystem: noVNC, xterm.js, TanStack, shadcn. Nothing else is close for this UI class. |
-| State | SQLite + JSON spec blobs, files for images | Zero-ops, transactional, one file to back up. Postgres later if multi-node. |
-| Display | noVNC over QEMU's own VNC websocket (proxied) | See §7. |
-| Serial | xterm.js ⟷ QMP `chardev` socket | Serial console is the fallback when graphics die. Non-negotiable. |
+| Daemon | Rust: tokio, axum, serde, rusqlite (bundled), tracing, clap | Decided (v2 #2). |
+| Windows toolchain | `x86_64-pc-windows-gnu` + w64devkit | No Visual Studio required; all in `.tools/`. |
+| API types | Rust structs → OpenAPI (`utoipa`) → generated TS client | One source of truth; no hand-written Zod drift. |
+| Frontend | React 19 + TS + Vite, TanStack Router/Query, shadcn/ui | |
+| State | SQLite (WAL) + files for images, logs, run dirs | One DB file to back up. |
+| Display | noVNC via our WS proxy (v1); guacd engine gated on M0-15 | §8 |
+| Serial | xterm.js ↔ chardev socket | Non-negotiable fallback console. |
 
-I'd *not* put the web server and the supervisor in one process even though it's tempting:
-restarting a web server must not orphan VMs, and a supervisor bug must not take down the UI.
+### 3.5 Project-local toolchain (new)
+`scripts/bootstrap.sh` installs every required binary under `.tools/` (gitignored) and
+`scripts/env.sh` puts them on `PATH` for the current shell only:
 
----
+| Component | Windows | Linux |
+|---|---|---|
+| Rust (rustup, cargo, clippy, rustfmt) | `.tools/rustup`, `.tools/cargo` (GNU host) | same, native host |
+| C toolchain (bundled SQLite, ring) | `.tools/w64devkit` | system cc |
+| QEMU | `.tools/qemu` (extracted from the upstream Windows build, never "installed") | distro packages; probe also checks `.tools/qemu` |
+| Node | system Node ≥ 20 (npm deps in `web/node_modules`) | same |
 
-## 4. "All architectures, all machine types" — capability discovery
-
-Do not hardcode a list of architectures. At install/first-boot and on a schedule
-(configurable "rescan"), build a **host capability database**:
-
-1. **Find binaries.** Scan `PATH` + configured dirs for `qemu-system-*` and `qemu-img`.
-   Map exe → target arch (`x86_64`, `i386`, `aarch64`, `arm`, `riscv32/64`, `ppc64`,
-   `s390x`, `mips*`, `loongarch64`, `sparc`, `avr`, …). Get `--version` per binary.
-2. **Enumerate machines** per binary: `-machine help` (authoritative name list including
-   versioned aliases like `pc-q35-9.1`) plus `query-machines` (flags: `hotpluggable-cpus`,
-   `numa-mem-supported`, `deprecated`, `default-cpu-type`, `default-ram-id`, `alias`).
-3. **Enumerate CPUs**: `query-cpu-definitions`, and `-cpu help` as fallback. Per-model
-   features via `query-cpu-model-expansion` (expensive — cache, and only on demand).
-4. **Enumerate devices**: `-device help` (name + bus + description) then, per machine,
-   `device-list-properties` for the devices the user tries to add (lazy, cached by
-   (binary, machine, device)). This is what makes "which properties does *this* device have
-   *on this* machine" correct.
-5. **Enumerate objects/chards/nets/audiodevs**: `-object help`, `query-command-line-options`
-   (gives option → parameters → types/enums for many options), `-netdev help`,
-   `-chardev help`, `-audiodev help`, `-accel help`, `-display help`, `-nic help`.
-6. **Enumerate accels and their availability**: KVM (Linux, `/dev/kvm`), WHPX (Windows,
-   needs Hyper-V platform), HVF (macOS), NVMM (NetBSD), TCG (always). Record *why* one is
-   unavailable so the UI can explain it.
-7. **Firmware inventory**: scan for `bios-256k.bin`, `edk2-x86_64-code.fd`,
-   `edk2-aarch64-code.fd`, `edk2-riscv-code.fd`, `u-boot.e500`, `openbios-sparc64`,
-   `s390-ccw.img`, UEFI var templates. Machine → bootable-without-firmware vs needs-firmware.
-8. **QAPI schema**: `query-qmp-schema` once per binary → typed commands/events. Bonus:
-   this tells us which *runtime* ops exist (hotplug, blockdev, migration, stats) so we can
-   hide buttons QEMU can't do for this version instead of disabling at click time.
-
-Capability snapshot is versioned and stored; the UI tags every VM spec with the
-`(binary, qemu version, machine alias)` it was built against, so re-probing never
-silently mutates an existing VM.
-
-**Cross-arch reality check:** non-native archs are TCG-only (no KVM/WHPX/HVF), so they're
-10–100× slower. The UI must show an honest badge — `native (WHPX)`, `emulated (TCG, slow)`
-— rather than letting people build a riscv64 desktop and wonder why it crawls.
+Versions are pinned in `bootstrap.sh`; bumping one is a deliberate commit. Binary discovery
+(§4) searches `.tools/qemu` first, then configured dirs, then `PATH`, and side-by-side
+versions are first-class.
 
 ---
 
-## 5. Compatibility engine (the "knows enough about QEMU" part)
+## 4. Capability discovery
 
-Three layers, in order of trust:
+Never hardcode architectures, machines or devices. Build a **capability snapshot** per QEMU
+binary at first run, on demand ("Rescan"), and when a binary's version/mtime changes.
 
-### L1 — Structural, derived from introspection (high confidence)
-- Machine has buses: PCI/PCIe (q35), ISA (i440fx/malta), USB (piix3-uhci/pcie), SCSI,
-  virtio-mmio (arm `virt`, riscv `virt`), CCW (s390x).
-- Device declares its bus (`-device help` second column, or `qom-list-properties`); if the
-  machine has no such bus → incompatible.
-- Properties exist per (machine, device) — `device-list-properties` is the source of truth.
-- `query-hotpluggable-cpus` → whether CPU topology is editable at runtime.
-- Machine max RAM (`query-machines` + chipset tables), max CPUs, NUMA support.
-- Firmware requirement came from the scan.
+1. **Discover binaries**: `qemu-system-*` and `qemu-img` in `.tools/qemu`, configured dirs,
+   `PATH`. Target arch from the file name; version from `--version`.
+2. **Probe via one long-lived process per binary**:
+   `qemu-system-<arch> -machine none -nodefaults -nographic -S -qmp stdio`
+   and issue QMP commands, rather than parsing many `-x help` outputs:
+   - `query-version`, `query-qmp-schema` (hash it; typed commands/events; which runtime ops exist)
+   - `query-machines` (name, alias, default, deprecated, cpu-max, default-cpu-type, …)
+   - `query-cpu-definitions` (+ `query-cpu-model-expansion` lazily, on demand)
+   - `qom-list-types` (devices: `abstract=false`, `implements=device`) and
+     `device-list-properties` lazily per device, cached by `(binary hash, device)`
+   - `query-accels` where available; otherwise the help-text fallback below
+   - `query-command-line-options` as a supplement only (incomplete for several options)
+3. **Help-text fallbacks** for things not exposed over QMP: `-accel help`, `-netdev help`,
+   `-chardev help`, `-audiodev help`, `-display help`, `-tpmdev help`, `-machine help`.
+4. **Accelerator availability with reasons**: KVM (`/dev/kvm` exists and is accessible —
+   distinguish "absent" from "permission denied: add user to group kvm"); WHPX (try
+   `-accel whpx` with `-machine none`; map failure to "enable Windows Hypervisor Platform",
+   plus the VMware/VirtualBox coexistence note); HVF; TCG always.
+5. **Firmware inventory**: read QEMU's firmware interop descriptors
+   (`share/qemu/firmware/*.json` on Linux distros, `share/firmware/*.json` in the Windows build; the `firmware.json` QAPI format) which state architecture,
+   machines, features (secure-boot, enrolled-keys, requires-smm) and the code/vars pair. Fall
+   back to scanning known file names.
+6. **Persist** the snapshot, keyed by `(binary path, version, binary hash)`. Every VM records
+   the snapshot it was created against; re-probing never silently mutates a VM.
 
-### L2 — Curated semantic rules (medium confidence, versioned)
-Things QEMU doesn't introspect. Shipped as a data file, override-able, each rule with a
-citation and a `verified_against: ["qemu 9.1", "qemu 10.0"]` field:
-- `i440fx` has no PCIe → `nvme`, `virtio-vga-gl`, PCIe root-port features rejected.
-- `ps2-*` requires `i8042`; `usb-kbd` requires a USB controller.
-- `virtio-blk-pci` needs PCI; on `virt` (arm) prefer `virtio-blk-device`/mmio.
-- `vmport` requires i440fx; `hpet`/`acpi` quirks per chipset.
-- ARM `virt` + `-cpu host` invalid without KVM; `max` vs named models per arch.
-- `-smp` sockets×cores×threads > machine max.
-- OVMF + `-machine ... ,smm=on` for Secure Boot; swtpm required for Windows 11 TPM.
-- Audio: `ich9-intel-hda` vs `AC97` vs `virtio-sound` by chipset/arch.
-- GPU: `virtio-vga` needs PCI and a BIOS/UEFI GOP story; `VGA`+`bochs-display` tradeoffs.
-- s390x: no PCI graphics at all → "graphics not supported on this target" (honest messaging).
-Each rule can *forbid*, *warn*, or *auto-fix* (e.g. swap `virtio-blk-pci` →
-`virtio-blk-device` on a mmio-only machine, with a visible "we changed this" chip).
-
-### L3 — Live lint run (authoritative)
-Pre-flight spawn as described in P4. Runs: on "Save & Start", on demand ("Check config"),
-and in CI against a matrix of seeded specs. Results cached by argv hash. Stderr is parsed
-into `(severity, message, arg_index)` so the error is pinned to the exact form field.
-**This is the escape hatch that keeps us honest on machines/archs we've never modelled.**
-
-The UI contract: incompatible things are *explained*, not just greyed out —
-"You can't add a virtio-scsi controller here because machine `pc-i440fx-9.1` has no PCIe bus."
-Greyed-out controls with a hover reason beat mystery validation errors.
+**Cross-arch honesty:** non-native archs are TCG-only. The UI shows `native (KVM|WHPX|HVF)`
+or `emulated (TCG, slow)` on every VM card and in the wizard.
 
 ---
 
-## 6. Session lifecycle & persistence
+## 5. VM spec and compiler
 
-### VM states
-`defined` → `starting` → `running` ⇄ `paused` / `suspended (state on disk)` → `stopped` /
-`crashed`. Plus `waiting-for-install-media`.
+### 5.1 Spec
+A versioned JSON document (`spec_version`), with serde types in `qemu-ui-core` and an exported
+JSON Schema. Spec migrations are code, tested on fixtures. The spec references images by
+registry id, networks by id, firmware by descriptor id — never raw host paths (except in
+passthrough).
 
-### Operations
+### 5.2 Compiler output rules
+- Starts with `-nodefaults -no-user-config`; everything QEMU would add implicitly is explicit.
+- JSON syntax for `-blockdev`, `-device`, `-object`, `-netdev`, `-audiodev` (accepted by
+  every QEMU in our supported range — verified by the probe). Keyval only for options without
+  JSON support, with `,` doubled in every value.
+- Disks: `-blockdev` protocol node + format node, named `<role><n>-file` / `<role><n>`;
+  devices reference node names. Never `-drive` except `if=pflash` fallbacks where required.
+- Machine: the pinned versioned name. Accelerator via `-accel`.
+- IDs live in a reserved namespace (`qui-…`); passthrough using a reserved id is an error.
+- Monitors: two QMP chardev sockets (`qmp`, `qmp-user`), one serial chardev with `logfile=`,
+  `-pidfile`, `-name guest=<name>,debug-threads=on`, `-msg timestamp=on`.
+- Linux: `-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`
+  when the probe reports seccomp support.
+- Output is an argv array (`Vec<OsString>`), never a string. A display rendering with
+  shell-quoting exists for the UI's "copy command" only.
+
+### 5.3 Passthrough
+- Ordered list of argv tokens, appended after generated options.
+- Conflict detection: reserved ids, duplicate singleton options (`-machine`, `-accel`, `-m`,
+  `-smp`, `-cpu`, `-bios`) → error with a pointer to the clashing field.
+- Passthrough can reference arbitrary host paths, so it bypasses the pool allowlist. It is an
+  **admin/expert surface** (§13) and the UI says "N options are set outside the editor".
+
+### 5.4 Round-tripping
+Our own argv parses back to an identical spec (property test). Foreign command lines import
+best-effort; unrecognised tokens go to passthrough.
+
+---
+
+## 6. Validation — three layers
+
+### 6.1 L1 Structural (from introspection, high confidence)
+Bus availability per machine, device `user-creatable`, property existence/types per device,
+max CPUs, NUMA support, hotpluggable CPUs, firmware matching machine + arch.
+
+### 6.2 L2 Curated semantic rules (data, warn by default)
+`data/rules/*.toml`, each with `id`, `severity` (`warn` default; `error` only with citation +
+lint reproduction), `verified_against` QEMU versions, optional `autofix`, and a test case.
+Examples worth shipping: ARM `virt` + `-cpu host` needs KVM; topology product > `cpu-max`;
+Secure Boot needs `smm=on` + secure pflash + SB-enabled firmware descriptor; virtio-mmio vs
+virtio-pci variants per machine; no graphics on s390x; virtio drivers needed by Windows
+installers (suggest virtio-win ISO). Auto-fixes are shown as a visible "changed" chip.
+
+### 6.3 L3 QEMU itself (authoritative)
+- **Save & Start:** spawn the real argv with `-S`; wait for QMP; check `query-status`,
+  `query-block`, stderr; then `cont`. If startup fails, the failure *is* the lint result —
+  nothing extra to spawn, nothing to diverge.
+- **Check config (dry lint):** the same argv with side effects rewritten: disks replaced with
+  same-format scratch overlays (`-blockdev` with `read-only` + throwaway overlay), host
+  network backends replaced by `user`, sockets moved to a temp dir, `-display none`. Labelled
+  "authoritative for the device/machine model, not for host resources".
+- **Error mapping:** stderr is matched to spec fields via the reserved id namespace (QEMU
+  messages usually name the device/node id) — a heuristic, labelled as such. Where possible,
+  objects/netdevs/blockdevs are added via QMP after `-S` to get structured per-item errors.
+- Results cached by argv hash. CI runs the golden spec matrix through dry lint.
+
+**UI contract:** incompatible things are *explained*, with the rule id and a docs link.
+
+---
+
+## 7. Lifecycle and persistence
+
+### 7.1 States
+`defined → starting → running ⇄ paused(reason) → stopping → stopped | crashed`, plus
+`suspended` (state file on disk) and `waiting-for-media`. `paused` always carries a reason
+from `query-status`/events: `user`, `io-error` (show which disk and errno, e.g. "host disk
+full"), `guest-panicked`, `debug`, `migration`, `suspended`, `watchdog`.
+
+### 7.2 Operations
 | Op | Mechanism |
 |---|---|
-| Start | supervisor spawns detached QEMU + QMP connect + readiness wait |
-| Stop (graceful) | QMP `system_powerdown`, timer, then ACPI-less fallback prompt |
-| Stop (hard) | `quit` via QMP; escalate to SIGTERM/SIGKILL (Windows: `TerminateProcess`) |
-| Reset | QMP `system_reset` |
-| Pause | QMP `stop` (freezes vCPUs, keeps RAM) |
-| **Suspend to disk** | `migrate` to file (`migrate "exec:cat > vm.state"`) + stop; resume with `-incoming file:` — full RAM state persisted, survives host reboot |
-| Snapshots | qcow2 internal (`savevm`) or external overlay chain; per-disk snapshot sets |
-| Autostart | per-VM policy at supervisor boot (with a "crash-looped" circuit breaker — important, because a VM that dies on start will otherwise thrash) |
-| Console recording | noVNC frames → WebM/PNG-sequence; and/or Guacamole session recording |
-| Reattach | on supervisor start: read registry, probe pidfile + QMP socket, reconcile actual vs expected state, mark orphans `crashed` |
+| Start | detached spawn with `-S` → health checks (§6.3) → `cont` |
+| Stop (graceful) | `system_powerdown`; configurable timeout; then offer hard stop |
+| Stop (hard) | QMP `quit`; escalate to SIGTERM/SIGKILL (Windows: `TerminateProcess`) |
+| Reset / Pause / Resume | `system_reset` / `stop` / `cont` |
+| Suspend to disk | `migrate` to `file:` URI with `mapped-ram` when supported; resume with `-incoming` (M7) |
+| Snapshots | internal: `snapshot-save`/`snapshot-load`/`snapshot-delete` jobs; external: `blockdev-snapshot-sync` overlays (M2) |
+| Autostart | per-VM policy at daemon start; crash-loop circuit breaker with exponential backoff |
+| Reattach | §3.2 identity check → reconnect both monitors → `query-status` → reconcile; unknown → `crashed` |
 
-### Events
-Subscribe to QMP events (`SHUTDOWN`, `RESET`, `STOP`, `GUEST_PANICKED`,
-`BLOCK_IO_ERROR`, `DEVICE_TROUBLE`, `DEVICE_DELETED`, `MIGRATION`, `SPICE_*`, `VNC_*`,
-`BALLOON_CHANGE`, `MEM_UNPLUG_ERROR`) and fan out to browsers over SSE. Browsers are
-stateless: reconnect → full snapshot + event replay from cursor. No sticky sessions.
+### 7.3 Monitors and events
+- Two QMP monitors per VM. The supervisor owns `qmp`; the expert console and power users get
+  `qmp-user`. The supervisor never depends on state it did not observe itself.
+- All QMP events are written to an append-only `event` table with a per-VM sequence, then
+  fanned out over SSE. Clients reconnect with `Last-Event-ID` and get a snapshot + replay.
+  Events missed while the daemon was down are reconciled by queries on reattach.
 
-### Multi-VM
-VM library with tags, search, folders; **wallboard view** with live thumbnails
-(`screendump` → PNG every N seconds, downscaled, cached — cheap and shockingly useful);
-tab strip of open consoles; per-VM resource sparklines (`query-stats`, `/proc`, guest agent).
+### 7.4 Operational cases (new)
+- **QEMU upgraded under running VMs:** running VMs keep their binary; the VM shows "will
+  restart on new QEMU N.M"; the spec stays pinned to its machine version.
+- **Host sleep/hibernate:** detect resume; check guest clocks; optionally pause VMs on suspend.
+- **Disk full:** default `werror=enospc`-style stop on the guest disk; surfaces as
+  `paused(io-error)` with a "free space and resume" action.
+- **Log rotation:** per-run QEMU logs and serial logs with size caps.
+- **Backup/export:** a VM exports as spec + images (+ VARS + TPM state) bundle.
 
 ---
 
-## 7. Display in the browser
+## 8. Display
 
-**Decision: go all-in, but stage it so v1 isn't held hostage by the hardest engine.**
-
-### 7.1 Engine strategy — three engines, one internal interface
-
-| Engine | Role | Why it exists |
-|---|---|---|
-| **noVNC over our own WSS proxy** | default fast path | ~40 KB client, zero extra daemons, works with *every* QEMU build and every arch, lowest latency for installers/desktops/terminals. |
-| **Guacamole (`guacd`)** | rich path: SPICE, audio, multi-monitor, SFTP file transfer into the guest, printing, session recording | guacd already speaks VNC *and* SPICE and packages years of protocol work (audio, recording, file transfer) behind one socket. Cheaper than reimplementing it. |
-| **Native handoff** (`remote-viewer` / `.vv` download) | escape hatch | When someone needs real USB redirection or hardware video decode, hand them the native client in one click instead of pretending the browser can do it. |
-
-Display engine is a **per-VM setting with a per-viewer override**:
-`vnc:novnc` (default) · `vnc:guac` (same VNC, but you get recording/SFTP) ·
-`spice:guac` (audio + multi-monitor + video codecs) · `spice:native`.
-
-One internal abstraction so the UI never guesses:
-
+### 8.1 Engines behind one interface
 ```rust
 trait DisplayEngine {
     fn attach(&self, vm: &VmId, viewer: &Viewer) -> Result<Attachment>; // ticket + transport
-    fn capabilities(&self) -> EngineCaps;  // clipboard, audio, usb, multihead, record, files
+    fn capabilities(&self) -> EngineCaps; // clipboard, audio, usb, multihead, record, files
     async fn screenshot(&self, vm: &VmId) -> Result<Png>;
 }
 ```
+Console controls render from `EngineCaps`: absent, not broken.
 
-Every console control (Ctrl+Alt+Del, clipboard, sound, USB, record) is rendered from
-`EngineCaps`, so a control is *absent* rather than broken when the engine can't do it.
+| Engine | Status |
+|---|---|
+| `vnc:novnc` — noVNC over our WS proxy | default, M1 |
+| `spice:guac` / `vnc:guac` — guacd | M5, **gated on spike M0-15** (SPICE support in guacamole-server; guacd has no native Windows build, so Windows needs WSL/container or is `degraded`) |
+| `spice:native` — `.vv` handoff to remote-viewer | M5; the honest answer for USB redirection and video |
 
-### 7.2 VNC path (default, v1)
+### 8.2 VNC path (M1)
+- QEMU serves VNC on a **unix socket** (`-vnc unix:<rundir>/vnc.sock`) where supported;
+  otherwise loopback TCP from a port pool with `password=on` and a per-run password set via
+  QMP `set_password`.
+- `/ws/vnc/{vm}` proxy: single-use ticket (passed as WS subprotocol), `Origin` check, idle
+  timeout, connection limit, viewer presence, take-control lock, read-only viewers.
+- **Clipboard + absolute pointer:**
+  `-chardev qemu-vdagent,id=qui-vdagent,name=vdagent,clipboard=on,mouse=on`
+  `-device virtio-serial-pci` `-device virtserialport,chardev=qui-vdagent,name=com.redhat.spice.0`.
+  Needs spice-vdagent (Linux) or virtio-win guest tools (Windows); `usb-tablet` as fallback
+  pointer.
+- Controls: fit/scale/1:1, fullscreen, send-key palette (Ctrl+Alt+Del, Ctrl+Alt+Fn),
+  paste-as-keystrokes, screenshot.
+- **Serial console beside graphics** in xterm.js; independent of the display engine.
 
-QEMU's VNC is served **loopback-only** (`-vnc 127.0.0.1:<allocated>`) and proxied by us:
+### 8.3 Thumbnails, screenshots, recording
+- Thumbnails: `screendump` (PNG format) every N s for visible VMs only, downscaled, cached.
+- Recording: capture the RFB byte stream at the proxy (cheap, lossless, tiny); replay it in
+  noVNC; transcode to WebM only on explicit export (ffmpeg sidecar, optional). Bookmarks.
 
-```
-noVNC  ──wss──►  /ws/vnc/{vmId}  ──►  127.0.0.1:<port>
-   (ticket-authenticated upgrade)         (one VNC port per VM, allocated from a pool)
-```
-
-Proxy responsibilities, and why we don't just use QEMU's built-in `websocket=`:
-- auth per viewer (short-lived ticket → never a long-lived token in a query string),
-- Origin/CSRF checks on the upgrade (WebSocket upgrades bypass normal form protections),
-- TLS termination, connection limits, idle timeouts,
-- viewer presence ("2 viewers, 1 read-only"), take-control lock, kick,
-- optional frame tap for recording and dashboard thumbnails.
-
-Details that make it feel native rather than laggy:
-- **`-device qemu-vdagent,clipboard=on,mouse=on`** → real text clipboard both ways and
-  *absolute* pointer positioning, so the cursor doesn't drift. Needs the guest driver
-  (`spice-vdagent` on Linux, virtio-win on Windows). This single device is the difference
-  between "remote desktop from 2003" and "it just works".
-- Encodings: prefer `tight` → `zrle` → `hextile`; TCP_NODELAY on; never `raw` on LAN.
-- Controls: fullscreen, fit/scale/1:1, send-key chord builder, dedicated Ctrl+Alt+Del,
-  Ctrl+Alt+F1…F12, grab/detach mouse, screenshot (`screendump`), record, paste-as-keystrokes.
-- **Serial console in xterm.js alongside** — the graphics+serial split pane is how you
-  actually debug a guest that won't boot. Independent of the graphics engine.
-
-### 7.3 SPICE path (the "rich" engine)
-
-Backed by QEMU SPICE on loopback + guacd as the browser-facing protocol translator:
-
-```
--spice port=<alloc>,addr=127.0.0.1,disable-ticketing=on,image-compression=auto
--device virtio-serial-pci
--chardev spicevmc,id=vdagent,name=vdagent -device virtserialport,chardev=vdagent,name=com.redhat.spice.0
--chardev spicevmc,id=usbredir1,name=usbredir -device usb-redir,chardev=usbredir1
--audiodev spice,id=snd0
-```
-
-What you actually gain: audio in the browser, multi-monitor heads, video-streaming
-detection (mjpeg/h264 for real motion), smartcard/USB redirection plumbing, better
-cursor handling, and dynamic resolution changes.
-
-**Honest caveats to put in the docs, not bury:**
-- Upstream SPICE is in *maintenance mode*. It works and it's stable, but don't plan new
-  features on it. That's exactly why it's engine #2 and not the foundation.
-- `spice-html5` is stale/dead — do **not** build on it. guacd (or a native-client handoff)
-  is the pragmatic browser path.
-- Browser **USB redirection is genuinely hard** (WebUSB + usbredir tunnel, plus per-device
-  driver/permission chaos). Plan it as "experimental, mouse/keyboard/serial dongles only"
-  and keep native handoff as the real answer.
-- `guacd` is a separate JVM-free C daemon (good) but a separate process with its own
-  connection auth — it must only ever listen on loopback and accept connections from us.
-
-### 7.4 Recording, screenshots, thumbnails
-
-One capture path serving three features:
-- **Dashboard thumbnails**: `screendump` → PNG every N s → downscale → cache. Cheap, and it
-  turns the VM list into something you actually glance at.
-- **Screenshots**: on demand, stored with the VM's timeline.
-- **Recording**: for noVNC we tap the proxy's framebuffer updates and mux to WebM (no guest
-  involvement, works on every arch); for guacd engines we can use native session recording.
-  Recording markers ("bookmark this moment") + export clip.
-
-### 7.5 Performance expectations (LAN, single user — the easy case)
-
-- 1080p desktop: 30–60 fps, feels local. 1440p/4K desktop on wired LAN: usable with `tight`;
-  dial colour depth down for slow guests.
-- Video playback: fine-ish on SPICE, poor on VNC. Say so.
-- 3D/GPU: out of scope for the browser. If it's ever needed, it's `virtio-gpu` + native
-  client, and it gets its own milestone — not a checkbox in v1.
-- WAN/remote access: out of scope by decision; the reverse-proxy/TLS story is documented so
-  someone can put it behind Tailscale/WireGuard without us building auth for the internet.
+### 8.4 Expectations to document
+Desktop use on LAN is fine; video playback is poor over VNC; 3D/GPU is out of scope for the
+browser; WAN is out of scope (put it behind WireGuard/Tailscale).
 
 ---
 
-## 8. Storage
+## 9. Storage
 
-### 8.1 Image store
-A configured set of **storage pools** (dirs), each with: quota, default format, allowed
-operations, and an "shared/read-only" flag. Images are first-class records
-(`id, pool, path, format, virtual_size, actual_size, backing_chain, checksum, locked_by`).
+### 9.1 Pools and images
+- Pools are directories with quota, allowed formats, read-only/shared flag. First run proposes
+  a default pool in the app data dir and lets the user pick another (big second drive).
+- Path safety: canonicalise, reject symlink escapes, `..`, device paths and UNC paths outside
+  an explicit allowlist.
+- Image registry: `qemu-img info --output=json` is truth; `check`, `map`, `measure` (predict
+  sizes in confirmation dialogs).
+- Locking: rely on QEMU's own image locking (on by default) plus a registry `locked_by`.
+- Jobs for create/resize/convert/import (raw, qcow2, vmdk, vhdx, vdi, vpc)/compact.
 
-Features:
-- Create (`qemu-img create`, format/size/preallocation/cluster size/LUKS encryption),
-  resize (`qemu-img resize`, plus live `block_resize`), convert/import (raw, qcow2, vmdk,
-  vhd/vhdx, vdi, vpc, qed, ISO), check/repair, compact (`qemu-img convert -O qcow2` + sparsify).
-- `qemu-img info --output=json` for truth; `qemu-img map` for allocated extents;
-  `qemu-img measure` to *predict* size before an operation (great for a confirmation dialog).
-- Backing chains rendered as a visual chain; "merge/flatten" and "rebasing is dangerous" warnings.
-- Per-image advisory locks + a real `flock`/lockfile so two VMs can't corrupt one disk.
-- **Snapshot UI**: tree of qcow2 snapshots per image, revert/delete, plus "runtime snapshot"
-  grouping a memory snapshot with the disk snapshot set.
+### 9.2 Backing chains, templates, clones
+Template = read-only base; VM disk = qcow2 overlay. Linked clone in O(1). Chain visualiser;
+flatten (`block-stream` live / `qemu-img convert` offline) and commit, with warnings.
+Rebase is expert-only.
 
-### 8.2 Physical locations as disks
-- Linux: `host_device`/`host_cdrom` on `/dev/sdX`, `/dev/nvme0n1`, `/dev/sr0`, LVM LVs,
-  and `zvol`s. Must be unmounted; we check (`/proc/mounts`, `/sys/block/*/holders`) and
-  refuse rather than corrupt.
-- Windows: `\\.\PhysicalDriveN` works only if the disk is **offline / has no mounted
-  volumes** (Windows locks mounted volumes). So the UX must be: detect → explain → offer
-  `diskpart`-free guidance (or a "USB attach" alternative). This is the single biggest
-  Windows-host wart; be honest about it in the UI rather than failing cryptically.
-- Whole-disk read-only attach is the safe default (forensics, installers, recovery).
-- **Better default for "map a physical thing":** USB passthrough (`usb-host` by
-  vendor:product or bus:addr, hot-pluggable at runtime — great for USB sticks,
-  YubiKeys, serial adapters) and folder sharing (9p `-virtfs` on Linux/macOS;
-  virtiofs via `virtiofsd` where available). Both avoid the offline-disk problem.
+### 9.3 Snapshots
+Internal via `snapshot-save` jobs (requires all writable nodes qcow2 — UEFI VARS are stored as
+qcow2 for this reason) and external via `blockdev-snapshot-sync`. Snapshot tree UI with
+memory + disk-set grouping; auto-snapshot before risky operations.
 
-### 8.3 Attaching images from elsewhere (browser + remote)
-Three distinct flows — worth naming separately in the UI because users conflate them:
+### 9.4 Attach from elsewhere
+1. **Browser upload:** resumable (tus-style create/HEAD/PATCH), streamed to disk, checksummed,
+   survives tab close.
+2. **URL fetch:** server-side download job with progress — SSRF-guarded (scheme allowlist,
+   block loopback/link-local/metadata ranges after DNS resolution, size cap, admin only) — or
+   read-only remote attach via QEMU's `https`/`nbd` block drivers (boot an ISO from a URL).
+3. **Peer/NAS:** NBD export from another host, iSCSI, etc. through the same registry.
 
-1. **Upload from browser** → chunked, resumable (tus-style: create/HEAD/PATCH/complete),
-   checksummed, progress with pause/resume, survives tab close (server-side session),
-   writes into a pool. For multi-GB ISOs this is the main path, so it must be resumable and
-   not buffered in memory. Optional: write straight into a preallocated qcow2/raw file.
-2. **URL fetch** → server-side download job with progress/ETA, or — where it's an immutable
-   image — QEMU's own block drivers: `https://` (read-only, curl-backed), `nbd://`,
-   `iscsi://`, `rbd:`, `ssh://`, `gluster://`. Read-only remote attach is a genuinely nice
-   trick: boot an installer ISO straight off a URL with zero local disk use.
-3. **Peer attach** → another qemu-ui instance exposes a pool as NBD (`qemu-nbd`), or the
-   browser uploads *to a remote* via the same resumable API. Also covers "attach a disk
-   that lives on my NAS".
+### 9.5 Disk attachment
+Controllers filtered by machine (L1): `virtio-blk-pci`/`-device`, `virtio-scsi-pci` +
+`scsi-hd`, `nvme`, `ide-hd`/`ide-cd`, AHCI, `usb-storage`, with plain-language tradeoffs.
+Cache/aio guidance: Linux hosts `cache.direct=on`, `aio=io_uring` (probe), `discard=unmap`;
+Windows hosts `aio=threads`. Warn on `cache=unsafe`. Hotplug via `blockdev-add` +
+`device_add`; unplug waits for `DEVICE_DELETED`; eject-before-unplug guard.
 
-All flows land in the same image registry so a disk is a disk regardless of origin.
-Upload of a *live* disk is refused; upload-then-attach is a two-step job with a queue.
-
-### 8.4 Disk attachment semantics
-- Controllers: `virtio-blk-pci`, `virtio-scsi-pci` (+ per-disk `scsi-hd`), `nvme`, `ide-hd`,
-  `ahci`, `usb-storage`. Picker filtered by machine (see §5) with an explanation of tradeoffs
-  (virtio = fastest but needs drivers; IDE/AHCI = works with stock installers).
-- Cache modes (`none/writeback/writethrough/directsync/unsafe`) and `aio`
-  (`threads/native/io_uring`) with real guidance: `cache=none,aio=io_uring,discard=unmap`
-  for Linux guests; warn on `unsafe`.
-- Media: disk vs CD-ROM vs floppy; boot order per device; `readonly=on`; `snapshot=on`
-  (ephemeral).
-- Hotplug/unplug live via `device_add`/`device_del` (with `query-block` confirmation and
-  an "eject before unplug" guard).
+### 9.6 Physical devices
+- Physical disks go through the **privileged helper**. Linux: `host_device` on block
+  devices; refuse if mounted or held (`/proc/mounts`, `/sys/block/*/holders`). Windows:
+  `\\.\PhysicalDriveN` only when no volume is online; guided flow explains offlining; read-only
+  default.
+- Better defaults for "attach a physical thing": USB passthrough (`usb-host`, hotplug,
+  remembered per VM) and folder sharing (virtiofs via `virtiofsd` or 9p on Linux hosts).
 
 ---
 
-## 9. Networking
+## 10. Networking
 
-### 9.1 Network objects
-Reusable, named network definitions (so 5 VMs share "LAN" without duplicating widgets):
-
-| Type | Backend | Host privileges | Use |
+### 10.1 Network objects
+| Type | Backend | Privilege | Hosts |
 |---|---|---|---|
-| NAT (user/slirp) | `-netdev user` | none | default; outbound + `hostfwd` port forwards |
-| NAT (passt) | passt/pasta backend | none | better perf, IPv6, live port-forward control socket |
-| Isolated | `-netdev socket,mcast=` or userspace vswitch | none | VM↔VM only, no host stack |
-| Bridged | `tap` + bridge / Windows external vSwitch | admin/root | real LAN presence, DHCP from LAN |
-| Host-only | `tap` + host bridge w/o uplink | admin | host↔VM |
-| Passthrough | VFIO PCI NIC | root + IOMMU | near-native; single VM |
-| None | — | — | explicit |
+| NAT | `-netdev user` (slirp) | none | Linux, Windows |
+| NAT (fast) | passt (`-netdev stream` to passt socket, or native `passt` netdev if probed) | none | Linux only |
+| Isolated | `-netdev dgram` (multicast) / `stream` | none | Linux, Windows |
+| Bridged | tap + bridge (helper) | helper | Linux; Windows via TAP-Windows driver, guided |
+| Host-only | tap + bridge without uplink | helper | Linux; Windows guided |
+| VFIO NIC | vfio-pci | root + IOMMU | Linux |
+| None | — | — | all |
 
-### 9.2 Models & features
-`-nic model=`: `virtio-net-pci` (+ multiqueue, `vhost=on`, `vhost-user`),
-`e1000/e1000e`, `rtl8139`, `ne2k_pci`, `vmxnet3`; arch-appropriate (virtio-net-device on mmio).
-Optional virtio-net features surfaced as toggles: `mq` + queue count, `csum/guest_csum`,
-`gso`, `tso`, `ufo`, rx/tx queue size, MAC address (with locally-administered random
-default), `vlan`/bridge, MTU.
+### 10.2 Port forwards
+slirp: creation-time `hostfwd=` *and* live `hostfwd_add`/`hostfwd_remove` (HMP via
+`human-monitor-command`). passt: its own forwarding config. Binding to all interfaces is an
+explicit dangerous toggle. Guest-agent IP detection drives "connect to guest" cards
+(SSH/RDP/HTTP) that propose forwards.
 
-### 9.3 Port forwarding UX
-- slirp `hostfwd` is **creation-time only** → UI must say "requires VM restart", offer
-  "apply & restart" as an explicit action.
-- passt: dynamic forwarding via its control socket where the build supports it → live
-  add/remove; verify per QEMU/passt version at runtime and disable the control otherwise.
-- Auto-detect guest IPs via guest agent (`guest-network-get-interfaces`) and show a
-  "connect to guest" card (RDP 3389, SSH 22, HTTP 80) that proposes the right hostfwd.
-- Basic firewall/TLS advice, plus "expose on all interfaces" as an explicit dangerous toggle.
-- Built-in port scan of the guest (optional) to propose forwards.
-
-### 9.4 Bridging on Windows (be blunt in the docs)
-Requires the TAP-Windows driver (OpenVPN) or a Hyper-V external switch, plus admin rights at
-QEMU start. There is no unprivileged bridge. passt is the recommended Windows answer.
+### 10.3 NIC models
+`virtio-net-pci`/`-device` (multiqueue and vhost only with tap), `e1000`/`e1000e`, `rtl8139`,
+`vmxnet3`, `ne2k_pci`; filtered by machine. MAC defaults to a stable random locally
+administered address (`52:54:00:…`), unique across the registry.
 
 ---
 
-## 10. UI / UX
+## 11. UI/UX
 
-### Information architecture
-1. **Dashboard** — VM cards (state, thumbnail, CPU/RAM/disk sparkline, IP, uptime),
-   quick actions (start/stop/console/snapshot), global health (accel available? pools low?
-   orphaned VMs?).
-2. **New VM wizard** — 3 lanes, not one long form:
-   - *Guided*: OS picker (Linux/Windows/BSD/Other) + arch + ISO → sane defaults, all
-     pre-validated. Windows lane pre-adds TPM 2.0, UEFI, virtio-win ISO, Hyper-V enlightenments.
-   - *Custom*: full machine/cpu/mem/device editor with live validation rail.
-   - *Import*: libvirt XML, existing disk image, or raw QEMU command line.
-3. **VM detail** — tabs: Overview · Console (graphics/serial split) · Hardware · Disks ·
-   Network · Snapshots · Logs/Events · Settings. A persistent **"argv preview"** drawer showing
-   the exact command line (copyable) and the diff from the last run.
-4. **Hardware editor** — the schema-driven device tree: buses → devices → properties,
-   with drag-to-add from a filtered palette, and "why is this greyed out?" everywhere.
-5. **Images** — pools, uploads with resume, import/convert jobs, chain visualiser.
-6. **Networks** — network objects + per-VM attachments + port-forward table.
-7. **System** — capability report (what QEMU binaries/accels/firmware we found and why),
-   storage pools, host resources, audit log, API tokens.
-8. **Expert** — raw argv playground (lint-run backed), QMP console (auth-gated, scary colour),
-   schema browser.
+1. **Dashboard** — VM cards (state + pause reason, accel badge, thumbnail, IP, uptime), quick
+   actions, host health (accel, pool space, orphaned/crashed VMs).
+2. **New VM** — *Guided* (OS + arch + ISO → validated defaults), *Custom*, *Import*
+   (raw argv, libvirt XML, existing disk).
+3. **VM detail** — Overview · Console (graphics + serial split) · Hardware · Disks · Network ·
+   Snapshots · Events/Logs · Settings. Persistent **argv drawer**: exact command line,
+   copyable, with diff since last start.
+4. **Hardware editor** — bus/device tree, palette filtered by machine, generated property
+   forms, "why is this disabled?" everywhere.
+5. **Images** — pools, uploads, jobs, chain visualiser.
+6. **Networks** — objects, attachments, forwards.
+7. **System** — capability report (binaries, machines, accels with remediation, firmware,
+   parity ledger), pools, audit, tokens.
+8. **Expert** — argv playground (dry lint), QMP console on `qmp-user` (admin-only, off by
+   default), schema browser.
 
-### Interaction details that decide whether this feels good
-- **Live argv**: every form change shows the compiled command line and a diff. This is the
-  single feature that makes "full CLI support" tangible.
-- **Never lie about state**: optimistic UI is fine for cosmetic things; never for "running".
-  Show `starting…` until QMP says running.
-- **Explain every disable.** Tooltip with the rule (`machine has no PCIe bus`) + docs link.
-- **Warnings ≠ errors.** "You have no accel; this will be slow" is a warning you can override.
-  "This device needs a bus you don't have" is an error.
-- **Job model for slow things**: qemu-img convert, uploads, downloads, snapshot merges are
-  jobs with progress, cancel, and logs — not spinners on a button.
-- **Keyboard-first**: `g d` dashboard, `g c` console, `/` search, send-key palette.
-- **Small-screen fallback**: console still works; editors collapse to accordions.
-
-### The hard UI problem, stated plainly
-"Full support for all command-line options in the UI" cannot mean 4,000 bespoke widgets.
-It means: **everything QEMU advertises is reachable** — through a generated editor for the
-long tail, a curated editor for the short head, and a raw escape hatch with validation and
-round-tripping. If we can't render a property, we must still be able to *reach* it.
+Rules: never show optimistic `running`; warnings are overridable, errors are not; slow work is
+a job with progress/cancel/logs; keyboard-first (`g d`, `g c`, `/`); small screens keep the
+console usable.
 
 ---
 
-## 11. Data model (sketch)
+## 12. Data model
+
+The **spec is canonical**. Tables marked *(derived)* are indexes rebuilt from specs.
 
 ```
-host_capability(id, qemu_version, binary_path, target_arch, probed_at, raw_json)
-machine(id, arch, binary, name, alias, is_default, max_cpus, max_ram_mb, flags_json)
-device(id, arch, binary, machine, name, bus, abstract, user_creatable, props_json)
-image(id, pool, path, format, virtual_size, actual_size, backing_id, mode, locked_by_vm)
-pool(id, name, path, quota_bytes, formats_allowed, shared)
-vm(id, name, spec_json, arch, machine, accel, state, qmp_socket, pid, started_at,
-   created_at, spec_version, last_argv, last_argv_hash, autostart, crash_count)
-vm_run(id, vm, argv, started_at, ended_at, exit_code, stderr_path)
-disk(id, vm, image_id, bus, controller, boot_index, cache_mode, aio, readonly, media)
-nic(id, vm, network_id, model, mac, mtu, mq, queues, link_up)
-network(id, name, kind, bridge, cidr, dhcp, forwards_json, host_priv_required)
-snapshot(id, vm, kind, name, mem_state_path, disks_json, created_at, parent_id)
-port_forward(id, nic, proto, host_ip, host_port, guest_ip, guest_port)
+binary(id, path, arch, version, sha256, discovered_at)
+cap_snapshot(id, binary_id, probed_at, schema_hash, data_json)
+vm(id, name, spec_json, spec_version, cap_snapshot_id, state, pause_reason,
+   autostart, crash_count, created_at, updated_at)
+vm_run(id, vm_id, argv_json, argv_hash, pid, proc_start_time, run_dir,
+   started_at, ended_at, exit_status, log_path)
+event(id, vm_id, seq, at, kind, data_json)            -- SSE replay source
+pool(id, name, path, quota_bytes, formats_allowed, readonly)
+image(id, pool_id, rel_path, format, virtual_size, actual_size, backing_image_id,
+   checksum, locked_by_vm)
+vm_disk(vm_id, image_id, role)          (derived)
+vm_nic(vm_id, network_id, mac)          (derived)
+network(id, name, kind, config_json)
+snapshot(id, vm_id, kind, name, parent_id, mem_state_path, disks_json, created_at)
 job(id, kind, status, progress, message, log_path, created_at, finished_at)
-user(id, name, hash, role), token(id, user, hash, scope, expires_at)
-audit(id, at, user, action, target, detail_json, argv_hash, result)
+user(id, name, pw_hash, role), session(...), token(id, user_id, hash, scope, expires_at)
+audit(id, at, actor, action, target, detail_json, argv_hash, result)
 ```
 
-VM spec (the compiler input) is a versioned JSON document; specs are also exportable as
-files so people can keep them in git ("infrastructure as code", §16).
+Specs export as files (`qemu-ui export`, `qemu-ui apply spec.json`) for config-as-code.
 
 ---
 
-## 12. Security & threat model
+## 13. Security
 
-**Blunt truth: a UI that can spawn QEMU with arbitrary disks, host devices, and network
-backends is equivalent to root on the host.** Plan accordingly.
+**This software is root-equivalent.** Anyone who can configure a VM can attach host disks and
+devices. Decided model: **single user, LAN-exposed** (v2 #4).
 
-**Decided model: single user, exposed on the LAN.** That is *not* the same as "no auth" —
-a LAN is a shared network (Wi-Fi passwords get shared, roommates/guests/clients exist), and
-browser APIs we need (clipboard, WebUSB, crypto) require a **secure context**, so TLS is
-mandatory anyway. Concretely:
-
-- **Auth**: first-run setup creates one admin account (argon2id password). Every request and
-  every WebSocket upgrade is authenticated; there is no anonymous mode, ever. Sessions are
-  `HttpOnly; Secure; SameSite=Strict` cookies; CSRF token on state-changing requests.
-- **WS tickets**: console/serial/event sockets never accept the session cookie or a token in
-  the query string. The client asks the API for a single-use, 30-second ticket and passes it
-  as a WebSocket subprotocol; the proxy validates `Origin` too.
-- **Transport**: TLS by default on first run (self-signed cert + guided "trust this cert"
-  flow), WSS for consoles, HSTS, no mixed content. Bring-your-own cert supported. HTTP-only
-  mode is loopback-only and opt-in.
-- **Designed for multi-user later, not built now**: all authorization funnels through one
-  middleware (`can(actor, action, vm) -> bool`) with a single-user implementation. Adding
-  RBAC/owners/share links later is additive, not a rewrite. The schema already carries
-  `user`/`token`/`audit` tables so the migration doesn't hurt.
-- **Keep audit + quotas even single-user** — they're for debugging and forensics (and for the
-  "which config did I run at 2am" question), not just for tenants.
-- **Treat the LAN as hostile**: no debug endpoints, no directory listings, no `/proc` reads,
-  rate limits on auth attempts, and a loud "this is root-equivalent, don't port-forward it"
-  warning at first run.
-- **Command execution**: never a shell. argv arrays only, `exec` without `shell=True`, no
-  string interpolation into `-drive file=`. Paths validated against the pool allowlist with
-  canonicalisation (block `../`, symlinks out of pool, UNC/`\\.\` outside an explicit
-  allowlist). Machine names, MACs, sizes, and formats are enum/regex validated.
-- **QMP exposure**: unix socket (0600) or Windows named pipe ACL'd to the service account,
-  never TCP, never proxied to the browser except through our own audited command allowlist.
-- **QEMU hardening**: `-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`
-  where the platform supports it; no `-usb-host`/VFIO in shared mode; guest agent socket
-  never mounted into the guest.
-- **Isolation**: Linux → one unprivileged UID per VM, cgroups v2 for CPU/mem/IO limits,
-  AppArmor/SELinux profile per QEMU; Windows → low-privilege service account, restricted
-  token, job objects for process containment (and note: containment is weaker than Linux).
-- **Resource abuse**: RAM/CPU/disk quotas per user and per VM; refuse overcommit beyond a
-  threshold; per-VM disk IO throttling (`throttling.*`).
-- **Supply chain / secrets**: image checksums, optional signature verification for ISOs;
-  LUKS keys never stored in the spec, referenced from OS keyring/DPAPI.
-- **Audit**: every state-changing action logged with actor, argv hash, result.
-- **CSRF/SSRF**: URL-fetch jobs are an SSRF vector — allowlist schemes, block link-local/
-  metadata IPs, cap size, require admin.
-- **The `-monitor`/QMP console in the UI is root by another name** — admin-only, off by
-  default, prominent warning, optionally entirely disabled by config.
+- **Bind loopback-only until M6 lands.** LAN exposure is enabled by the M6 setup flow, never
+  by default in earlier builds.
+- **Auth (M6):** first-run admin account (argon2id); `HttpOnly; Secure; SameSite=Strict`
+  session cookies; CSRF token; auth-attempt rate limits; API tokens for the CLI.
+- **WebSockets:** single-use 30 s tickets as a subprotocol; `Origin` check; no cookies or
+  tokens in query strings.
+- **Transport:** TLS by default with a self-signed cert + trust flow; BYO cert; HSTS. Plain
+  HTTP only on loopback.
+- **Authorization funnel:** one `can(actor, action, target)` used everywhere; single-user
+  implementation now; RBAC later is additive.
+- **No injection:** argv arrays only; JSON-syntax options; comma doubling elsewhere; paths
+  canonicalised against pool allowlists; names/MACs/sizes/enums validated.
+- **Monitors:** unix sockets `0600` in a `0700` run dir (Windows: AF_UNIX or named pipe with
+  service-account ACL, per spike M0-14). Never exposed to the network. The browser reaches QMP
+  only through audited endpoints, or the expert console.
+- **Expert surfaces = root:** passthrough, raw argv, QMP console. Admin-only, off by default,
+  each enable is audited.
+- **QEMU hardening:** `-sandbox` on Linux; run each VM as its own UID (via helper) in its own
+  cgroup with CPU/mem/IO limits; AppArmor/SELinux profiles where present. Windows: restricted
+  token, low-privilege service account, job objects (§3.2) — weaker, and the ledger says so.
+- **Privileged helper:** tiny binary, fixed request set (create tap, attach to bridge, open
+  physical disk and pass fd, create per-VM uid/scope), validates every request, audited.
+- **Secrets:** LUKS passphrases via QEMU `secret` objects fed from the OS keyring/DPAPI,
+  never in the spec. ISO checksum/signature verification.
+- **SSRF:** see §9.4.
 
 ---
 
-## 13. Platform notes (this is where projects die)
+## 14. Platform parity ledger
 
-| Concern | Linux (recommended host) | Windows (your current box) | macOS |
-|---|---|---|---|
-| Accel | KVM (near-native) | WHPX (needs Hyper-V platform; conflicts with VMware/VBox) | HVF |
-| Bridge networking | `ip tuntap` + bridge, trivial | needs TAP-Windows driver / Hyper-V vSwitch + admin | `vmnet` (privileged helper) |
-| Physical disk | `host_device` (/dev/sdX) | `\\.\PhysicalDriveN` **only if volumes offline** | `/dev/rdisk` (needs privileges) |
-| Folder share | 9p `-virtfs`, virtiofs | none practical | 9p / virtiofs |
-| USB passthrough | usb-host | usb-host works (limited device support, WinUSB/libusb) | usb-host, needs entitlements |
-| Sandbox | `-sandbox on` + seccomp | unavailable | partial |
-| Service | systemd unit | Windows service (needs a service wrapper) | launchd |
-| Passthrough (VFIO) | yes | no (Hyper-V/VBS off, DDA unsupported for QEMU) | no |
-
-**Decided: both platforms are first-class, with parity *where physically possible*.** The
-honest formulation is a per-feature parity ledger, not a platform preference:
-
-`native` · `degraded (works, worse)` · `needs-setup (we guide you through it)` · `impossible`
+Ledger values: `native` · `degraded` · `needs-setup` · `impossible` · `unverified`.
+The ledger is **data** (`data/parity.toml`), keyed by feature and platform, refined at runtime
+by the probe (probe wins), consumed by the UI (reasons) and by CI (assertions).
 
 | Feature | Linux | Windows |
 |---|---|---|
-| Hardware accel | `native` KVM | `needs-setup` WHPX — detect and give real remediation (Hyper-V platform, `bcdedit`, reboot), incl. the "WHPX and VMware/VBox collide" warning |
-| Bridged net | `native` tap+bridge | `needs-setup` — detect TAP-Windows; offer guided driver install or push users to passt |
-| Physical disk | `native` | `needs-setup` — detect online volumes, explain offline requirement, offer a guided `diskpart` snippet + a USB-attach alternative |
-| Folder share | `native` 9p / virtiofs | `impossible` — say so plainly, point at SFTP/virtio-win or a network share |
-| USB passthrough | `native` | `degraded` (device/driver dependent) |
-| QEMU sandbox | `native` | `impossible` — compensate with a low-priv service account + restricted token |
-| Per-VM UID | `native` | `impossible` — compensate with job objects |
-| VFIO PCI passthrough | `native` | `impossible` |
-| Everything else (QMP, lifecycle, disks, snapshots, VNC, SPICE, archs, argvs) | `native` | `native` |
+| Hardware accel | `native` KVM (needs-setup if `/dev/kvm` perms) | `needs-setup` WHPX (enable Windows Hypervisor Platform; VMware/VBox coexistence note) |
+| NAT (slirp) incl. live forwards | `native` | `native` |
+| NAT (passt) | `native` | `impossible` |
+| Isolated VM↔VM net | `native` | `native` |
+| Bridged / host-only | `native` via helper | `needs-setup` TAP-Windows + admin |
+| Physical disk | `native` via helper | `needs-setup` offline volumes + admin |
+| Folder share (virtiofs/9p) | `native` | `impossible` (offer SMB share or SFTP) |
+| USB passthrough | `native` | `degraded` (libusb/WinUSB driver per device) |
+| TPM 2.0 (swtpm) | `native` | `impossible` — confirmed: the upstream Windows build (QEMU 11.1) does not compile `-tpmdev` in; the probe re-checks per binary |
+| QEMU `-sandbox` | `native` | `impossible` |
+| Per-VM UID + cgroups | `native` | `impossible` (job objects instead) |
+| VFIO passthrough | `native` | `impossible` |
+| QMP/VNC over unix sockets | `native` | `unverified` — spike M0-14 |
+| guacd engine | `unverified` — spike M0-15 | `unverified` — spike M0-15 |
+| Lifecycle, blockdev disks, snapshots, VNC console, serial, all target archs | `native` | `native` |
 
-Two engineering consequences:
-1. The ledger is **data, not code** — shipped as a capability table keyed by
-   `(platform, qemu version)`, consumed by the UI to grey out with a reason and by CI to
-   assert expectations. No `if windows` sprinkled through the frontend.
-2. **CI runs the golden-spec matrix on both OSes**, so "Windows is supported" stays a tested
-   claim rather than a README sentence. Divergence shows up as a failing test, not a bug report.
+**Consequence for the Windows 11 lane:** on a Windows host it can do UEFI + Secure Boot +
+virtio-win, but not TPM unless the probe finds a backend. The wizard says so and offers the
+documented registry bypass as the user's choice, not ours.
 
-The capability probe (§4) makes most of this automatic: if bridging isn't available, the
-"Bridged" option simply isn't offered, with a "why?" that names the missing driver.
-
-Also: QEMU isn't installed on this machine. M0 includes an installer/detector that finds or
-fetches QEMU (`winget`, `brew`, `apt`, or a managed download into the app data dir), verifies
-it, and probes it.
+CI runs the golden corpus on **both** Windows and Linux; ledger claims are asserted by tests.
 
 ---
 
-## 14. Milestones
+## 15. Decisions
 
-- **M0 — Skeleton & capability probe.** Rust supervisor + API + minimal SPA. Discover QEMU
-  binaries, probe machines/cpus/devices/accels/firmware into SQLite, render "what can this
-  host do". QEMU installer/detector (`winget`, `apt`, `brew`, or managed download). Platform
-  parity ledger populated for both Windows and Linux from the first commit.
-- **M1 — One VM, end to end.** Spec editor (machine/cpu/mem/firmware/boot/one disk), argv
-  compiler, lint-run, detached start, QMP lifecycle, **noVNC console + xterm.js serial**,
-  dashboard, live argv drawer. Persistence across web-process restart (re-attach). **This is
-  the vertical slice that proves the thesis.**
-- **M2 — Storage.** Pools, image CRUD, qcow2 snapshots, resumable upload, URL fetch,
-  controllers filtered by machine, hotplug, backing chains/templates, physical disk attach
-  (with the Windows offline-volume flow as a first-class guided path).
-- **M3 — Networking.** Network objects, slirp + passt, port forwards (+ guest-agent IP
-  detection), isolated nets, bridged (Linux native, Windows via TAP with detection/guidance),
-  models/multiqueue.
-- **M4 — Compatibility engine maturation.** Curated rule set, warn/auto-fix, per-machine
-  device palette, seeded lint-run matrix across every installed arch, libvirt XML + raw argv
-  import.
-- **M5 — Rich display.** SPICE backend + `guacd` engine (audio, multi-monitor, SFTP, native
-  session recording), per-viewer engine override, thumbnail tap, WebM recording, native
-  client handoff. Consolidates the `DisplayEngine` abstraction built in M1.
-- **M6 — Hardening (single-user, LAN).** TLS-first setup with cert trust flow, argon2id
-  auth, WS tickets, audit log, quotas, QEMU `-sandbox` where available, per-VM UID on Linux,
-  restricted-token service on Windows, CSRF/Origin enforcement.
-- **M7 — Power features.** Suspend-to-disk (migration-to-file), guest agent integration,
-  generic job system, cloud-init seeds, templates gallery, API/CLI parity (`qemu-ui` CLI
-  speaking the same supervisor RPC).
-
-Cross-cutting from M0: **golden tests** — a corpus of VM specs (one per arch/machine family)
-run through compile + lint-run in CI **on both Windows and Linux**. That corpus is the
-compatibility engine's regression suite, its documentation, and the proof that the parity
-ledger is honest.
-
----
-
-## 15. Decisions & remaining questions
-
-### Locked
-
-| # | Decision | Consequence baked into this spec |
-|---|---|---|
-| 1 | **Windows and Linux both first-class**, parity where physically possible | Parity ledger (§13) is data + a CI matrix on both OSes; no platform-preference ordering in milestones |
-| 2 | **Rust supervisor** | Single static binary, `tokio::process` spawn without a shell, typed `serde` QMP models, one CLI binary that speaks the same RPC as the web UI |
-| 3 | **Display: all-in, staged** | noVNC fast path in M1; SPICE + guacd + audio + multi-monitor + recording in M5; native client handoff always available |
-| 4 | **Single user, LAN-exposed** | No RBAC now, but one authorization middleware + user/token/audit tables so multi-user is additive; TLS mandatory (secure-context + shared-network reality) |
-| 5 | **Schema-generated long tail + curated short head + raw escape hatch** | §5 + §10: nothing QEMU advertises is unreachable; the raw argv drawer with lint-run is a v1 feature, not a "later" |
-
-### Still open (I can decide these myself, but they change ergonomics)
-
-1. **guacd distribution** — bundle per-platform `guacd` binaries with the app (heavier install,
-   zero setup) or detect-and-guide an external install (lighter, one manual step)?
-   *My lean: detect-and-guide for v1, bundle later once the packaging story is proven.*
-2. **QEMU distribution** — use whatever's installed and probe it (supports side-by-side
-   versions, which the capability model handles beautifully), or pin/bundle a known-good
-   build? *My lean: probe-and-use-installed, with an optional managed download.*
-3. **Default image location** — OS app-data dir (zero-config) vs force the user to pick a
-   pool on first run (better for people with a big second drive). *My lean: propose a pool
-   on first run, pre-filled with a sensible default.*
-4. **Do you want "VM as a link" (disposable clones on demand) in the roadmap now?** It's the
-   highest-wow feature in §16 and it forces the template/backing-chain design early — cheap
-   to plan for, expensive to retrofit.
-5. **macOS host?** Nothing in this design excludes HVF, but it has no place in the CI matrix
-   yet; say if you care and I'll model it.
-
----
-
-## 16. Spitball — things that would make this genuinely better than the alternatives
-
-Ordered by "value per unit of effort", not by how cool they are.
-
-**Cheap and high-impact**
-- **Live thumbnails on the dashboard** via periodic `screendump`. Turns a VM list into
-  something you actually glance at.
-- **Guest agent integration** (qemu-guest-agent over a chardev socket): IP addresses,
-  free disk space, graceful shutdown, filesystem freeze for snapshots, and "run this command"
-  for provisioning. Huge UX win, small surface.
-- **Copy-pasteable argv** on every screen. People will trust the tool once they can see it's
-  just QEMU.
-- **Cloud-init / NoCloud seed ISO generator** — "create Ubuntu VM with SSH key and package X"
-  in one screen instead of an installer walkthrough.
-- **Config-as-code export** — spec files in git, `qemu-ui apply spec.json`. Makes the whole
-  thing scriptable and diff-reviewable.
-- **"Explain this QEMU option"** inline docs from `-option help` + a local docs index.
-- **Pre-flight lint before every start** with a friendly error pinned to the field.
-- **Diff view**: "what changed since this VM last started?"
-
-**Medium effort, high payoff**
-- **Template gallery** with backing-chain clones (Ubuntu/Debian/Alpine/Windows/Win11+TPM,
-  HAProxy appliance, k3s node, pfSense…). Instant clones = the reason people use Proxmox.
-- **Snapshot timeline UI** with branch/merge visualisation, and auto-snapshot-before-risky-op.
-- **Windows 11 lane** that does everything right: UEFI + Secure Boot keys + swtpm + virtio-win
-  ISO + Hyper-V enlightenments + TPM + CPU topology. This alone is a differentiator.
-- **Recording + replay**: QEMU record/replay (`-icount` + `-record`/`-replay`) gives
-  deterministic VM replay with a scrubber and reverse execution. Genuinely novel in a web UI.
-- **TCG plugin integration** (`-plugin`): instruction counters, hot-branch profiles, cache
-  simulation, rendered per-VM. For anyone doing arch/firmware work, this is a killer feature
-  no other web UI has.
-- **GDB stub panel**: "attach gdb to this VM", surface breakpoints/backtrace in-browser.
-- **Console recording to WebM** + shareable clips (great for bug reports / tutorials).
-- **USB device shelf**: list host USB devices (lsusb/WMI), one-click hotplug, remember per-VM.
-- **Multi-monitor** (VNC supports several heads; noVNC can render them as tabs).
-- **Migration between two qemu-ui hosts** over the network (QMP `migrate` + shared storage or
-  block migration). Turns it into a small private cloud.
-- **Resource throttling UI** (cgroups on Linux) so a runaway VM can't eat the desktop.
-
-**Ambitious / speculative**
-- **Record-and-share "VM as a link"**: signed URL boots a disposable clone of a template on
-  demand, auto-destroys. Great for demos, docs, and support ("here, reproduce my bug").
-- **Time-travel debugging**: snapshot + replay + gdb stub + TCG plugin counters, all in one
-  pane. Research-grade but nobody has it in a browser.
-- **Firmware/OS autodetection**: peek at the first sectors of an image / the ISO volume label,
-  infer the OS, pre-select drivers and the right boot setup.
-- **Guided "why is my guest slow"** advisor: accel in use, missing virtio drivers (device
-  manager heuristics via guest agent), `cache=unsafe` vs io_uring, CPU topology mismatch,
-  memory ballooning, THP/KSM status.
-- **HA-ish supervisor**: crash-loop detection, exponential backoff, "last known good config"
-  rollback, alerting hooks.
-- **Plugin SDK** for third-party lifecycle hooks (pre-start/post-stop), so people can wire in
-  their own provisioning without us modelling it.
-- **Mobile "monitor" mode**: list + thumbnails + stop button only.
-
----
-
-## 17. What to steal from whom
-
-| Project | Steal |
+### Locked (from v2)
+| # | Decision |
 |---|---|
-| **Cockpit Machines** | Console UX details, "why is this disabled" copy, snapshot tree UI |
-| **virt-manager** | The new-VM wizard flow, device "add hardware" palette, CPU model picker |
-| **Archoera / WebVirtMgr** | Simple web lifecycle patterns, noVNC wiring |
-| **Proxmox** | Template/clone ergonomics, task/job panel, guest agent integration |
-| **GNOME Boxes** | Zero-config "just boot the ISO" onboarding |
-| **libvirt** | Capabilities-XML idea (machine+device matrix), domain XML import/export |
-| **`qmp-shell` / `aqemu`** | QMP ergonomics, raw command surfaces |
-| **Guacamole** | Display gateway features: recording, SFTP, audio, printing |
-| **UTM (macOS)** | Polished QEMU-config UI on top of a raw hypervisor — closest spiritual cousin |
+| 1 | Windows and Linux both first-class, parity where physically possible (§14) |
+| 2 | Rust daemon |
+| 3 | Display all-in, staged: noVNC M1; rich engines M5; native handoff always |
+| 4 | Single user, LAN-exposed (loopback-only until M6) |
+| 5 | Schema-generated long tail + curated head + raw escape hatch |
+
+### Resolved in v3 (previously open)
+| # | Question | Decision |
+|---|---|---|
+| 6 | Process layout | One daemon + privileged helper (§3.1) |
+| 7 | guacd distribution | Detect-and-guide; gated on spike M0-15; bundling revisited after |
+| 8 | QEMU distribution | Use installed QEMU *and* project/app-local managed copies side by side; Windows dev builds use `.tools/qemu` |
+| 9 | Default image location | First-run proposes app-data pool, user can choose another |
+| 10 | "VM as a link" | Plan now (blockdev + overlays from M1/M2); feature itself in backlog |
+| 11 | macOS | Not excluded, not modelled, not in CI |
+| 12 | Disk argv | `-blockdev` + JSON syntax everywhere possible |
+| 13 | Toolchain | Project-local `.tools/`, Windows uses the GNU Rust host + w64devkit |
 
 ---
 
-## Appendix A — Compiler sketch (illustrative, not final)
+## 16. Milestones and work breakdown
+
+Each ID is one GitHub issue; PRs reference IDs. "Spike" = time-boxed investigation whose
+output is a decision recorded in this file.
+
+### M0 — Foundations
+- **M0-01** Repo conventions: licence, `.gitattributes` (LF), editorconfig, CONTRIBUTING, PR/issue templates
+- **M0-02** Project-local toolchain bootstrap (`scripts/bootstrap.sh`, `scripts/env.sh`, `.tools/`)
+- **M0-03** Cargo workspace + crate layout (§3.3) + web scaffold
+- **M0-04** QMP client crate: framing, greeting, `qmp_capabilities`, commands, events, transports (stdio, unix, tcp)
+- **M0-05** QEMU binary discovery (`.tools/qemu`, configured dirs, `PATH`) with version + hash
+- **M0-06** Capability probe via long-lived `-machine none` QMP session (§4.2–4.3)
+- **M0-07** Firmware inventory from QEMU firmware descriptors
+- **M0-08** Accelerator availability with remediation reasons
+- **M0-09** SQLite store + migrations; capability snapshots persisted
+- **M0-10** HTTP API skeleton (axum), `/api/v1/host/*`, OpenAPI + generated TS client
+- **M0-11** Web SPA skeleton: host capability report page
+- **M0-12** Parity ledger as data + API + UI rendering
+- **M0-13** CI on Windows + Linux: fmt, clippy, tests, probe smoke against TCG
+- **M0-14** Spike: QMP/VNC/serial transport on Windows (AF_UNIX vs named pipe vs loopback TCP + password)
+- **M0-15** Spike: guacd SPICE support and Windows availability (gates M5-04)
+
+### M1 — One VM end to end (the thesis slice)
+- **M1-01** VM spec schema v1 + JSON Schema export + migration framework
+- **M1-02** Compiler spec → argv (JSON syntax, `-blockdev`, `-nodefaults`, reserved ids) + golden tests
+- **M1-03** Passthrough: preservation, ordering, conflict detection
+- **M1-04** Machine alias pinning at create
+- **M1-05** Supervisor spawn: detached, run dir, stdio→files, pidfile, process identity
+- **M1-06** Process survival: systemd scope/KillMode; Windows job-object rules; dev runner
+- **M1-07** QMP session manager: two monitors per VM, reconnect, event log
+- **M1-08** Lifecycle state machine incl. pause reasons; start with `-S` → check → `cont`
+- **M1-09** Reattach + reconcile on daemon start
+- **M1-10** Dry lint ("Check config") with side-effect rewriting and stderr → field mapping
+- **M1-11** VNC console: socket/password VNC, WS proxy with tickets, noVNC client, vdagent
+- **M1-12** Serial console: chardev socket + logfile, xterm.js
+- **M1-13** Event stream: SSE with `Last-Event-ID` replay
+- **M1-14** Spec editor (machine/cpu/mem/firmware/boot/one disk) + live argv drawer + diff
+- **M1-15** Dashboard with VM cards and actions
+- **M1-16** Loopback-only binding + local token until M6
+
+### M2 — Storage
+- **M2-01** Pools: config, quotas, path canonicalisation/allowlist
+- **M2-02** Image registry + `qemu-img info/check/map/measure`
+- **M2-03** Generic job system (progress, cancel, logs) — used by everything after
+- **M2-04** Image create/resize/convert/import/compact jobs
+- **M2-05** Backing chains, templates, linked clones; flatten/commit
+- **M2-06** Snapshots: internal (`snapshot-save`, qcow2 VARS) + external + tree UI
+- **M2-07** Resumable browser upload
+- **M2-08** URL fetch job with SSRF guard; read-only remote attach (https/nbd)
+- **M2-09** Disk controllers filtered by machine; cache/aio guidance; hotplug/unplug
+- **M2-10** Privileged helper: design, request allowlist, Linux + Windows implementations
+- **M2-11** Physical disk attach (Linux checks; Windows offline-volume guided flow)
+- **M2-12** USB passthrough shelf (hotplug, remembered per VM)
+- **M2-13** Folder sharing (virtiofs/9p on Linux hosts)
+
+### M3 — Networking
+- **M3-01** Network objects + per-VM attachments
+- **M3-02** slirp NAT with live port forwards
+- **M3-03** passt NAT (Linux)
+- **M3-04** Isolated networks (dgram/stream)
+- **M3-05** Bridged / host-only on Linux via helper
+- **M3-06** Windows TAP detection and guided setup
+- **M3-07** NIC models and virtio-net feature toggles; MAC allocation
+- **M3-08** Guest IP detection + "connect to guest" cards
+
+### M4 — Compatibility engine
+- **M4-01** L1 structural rules from introspection
+- **M4-02** Schema-generated property editor (QOM/QAPI → widgets)
+- **M4-03** L2 curated rules as data, warn-by-default, with test harness
+- **M4-04** Auto-fix with visible "changed" chips
+- **M4-05** Hardware editor device tree + filtered palette
+- **M4-06** Lint matrix across every installed arch in CI
+- **M4-07** Importers (raw argv, libvirt XML) and libvirt XML exporter
+
+### M5 — Rich display
+- **M5-01** `DisplayEngine` abstraction; `EngineCaps`-driven console controls
+- **M5-02** Dashboard thumbnails via `screendump`
+- **M5-03** Recording: RFB capture, noVNC replay, optional WebM export
+- **M5-04** guacd engine (SPICE/VNC, audio, multi-monitor) — gated on M0-15
+- **M5-05** Native client handoff (`.vv`)
+- **M5-06** Multi-viewer presence, take-control, read-only viewers
+
+### M6 — Hardening for LAN exposure
+- **M6-01** First-run setup, argon2id auth, sessions, CSRF, rate limits
+- **M6-02** TLS by default, trust flow, BYO cert, HSTS
+- **M6-03** WS tickets + `Origin` enforcement on all sockets
+- **M6-04** Audit log + UI
+- **M6-05** Linux isolation: per-VM UID, cgroups, `-sandbox`, LSM profiles
+- **M6-06** Windows isolation: service account, restricted token, job objects
+- **M6-07** Quotas and IO throttling
+- **M6-08** Expert surfaces gating (passthrough, argv playground, QMP console)
+- **M6-09** Service install: systemd unit / Windows service
+
+### M7 — Power features
+- **M7-01** Suspend to disk via `file:` migration
+- **M7-02** Guest agent integration
+- **M7-03** Cloud-init NoCloud seed generator
+- **M7-04** Template gallery
+- **M7-05** Config-as-code: export / `qemu-ui apply`
+- **M7-06** CLI parity
+- **M7-07** Windows 11 lane (UEFI + SB + virtio-win; TPM where the probe allows)
+- **M7-08** Autostart with crash-loop breaker and backoff
+
+### Cross-cutting
+- **X-01** Golden spec corpus (one per arch/machine family) run in CI on both OSes
+- **X-02** Operational cases: QEMU upgrades under running VMs, host sleep, disk-full pauses, log rotation
+- **X-03** VM backup/export bundles (spec + images + VARS + TPM state)
+- **X-04** Documentation site: install, platform notes, security model, honest caveats
+
+---
+
+## 17. Prior art — what to borrow
+
+| Project | Borrow |
+|---|---|
+| Cockpit Machines | Console UX, "why is this disabled" copy, snapshot tree |
+| virt-manager | New-VM wizard, add-hardware palette, CPU model picker |
+| Proxmox | Template/clone ergonomics, task panel, guest agent use |
+| GNOME Boxes | Zero-config "just boot the ISO" |
+| libvirt | Capabilities matrix, domain XML import/export, firmware descriptor use |
+| qmp-shell | QMP ergonomics |
+| Guacamole | Recording, file transfer, audio gateway |
+| UTM | Polished config UI over raw QEMU — closest cousin |
+
+---
+
+## 18. Ideas backlog (not scheduled)
+
+Each is an `idea`-labelled issue; promoted into a milestone when picked up.
+
+- **VM as a link** — signed URL boots a disposable linked clone, auto-destroyed.
+- **Record/replay debugging** — `-icount` + record/replay with a scrubber; reverse execution.
+- **TCG plugin panel** — instruction counts, hot blocks, cache sim per VM.
+- **GDB stub panel** — attach gdb, breakpoints/backtrace in browser.
+- **Time-travel debugging** — snapshots + replay + gdb + plugins in one pane.
+- **"Why is my guest slow?" advisor** — accel, drivers, cache/aio, topology, ballooning.
+- **OS autodetection** from ISO volume labels / boot sectors.
+- **"Explain this option"** inline docs from QEMU help + docs index.
+- **Migration between two qemu-ui hosts.**
+- **Resource sparklines** via `query-stats` + host metrics.
+- **Plugin SDK** for lifecycle hooks.
+- **Mobile monitor mode** — list, thumbnails, stop.
+- **Multi-monitor in noVNC** (multiple heads as tabs).
+
+---
+
+## Appendix A — Example spec and compiled argv (Linux host)
 
 ```json
 {
+  "spec_version": 1,
   "name": "win11-dev",
   "arch": "x86_64",
-  "accel": "whpx",
-  "machine": {"type": "pc-q35-9.1", "props": {"smm": "on"}},
-  "cpu": {"model": "host", "topology": {"sockets": 1, "cores": 8, "threads": 2}},
-  "memory": {"size_mb": 16384, "balloon": true},
-  "firmware": {"type": "uefi", "vars": "win11-dev_VARS.fd", "secure_boot": true},
-  "tpm": {"backend": "swtpm", "version": "2.0"},
-  "disks": [
-    {"image": "win11-dev.qcow2", "bus": "virtio-blk-pci", "boot": 1,
-     "cache": "none", "aio": "threads", "discard": "unmap"}
-  ],
-  "media": [{"image": "Win11.iso", "bus": "sata", "readonly": true}],
-  "nics": [{"network": "nat", "model": "virtio-net-pci", "queues": 4}],
-  "display": {"backend": "vnc", "vdagent": true},
-  "passthrough": ["-global", "ICH9-LPC.disable_s3=0"]
+  "accel": "kvm",
+  "machine": { "type": "pc-q35-9.1", "props": { "smm": "on" } },
+  "cpu": { "model": "host", "props": { "hv-passthrough": "on" },
+           "topology": { "sockets": 1, "cores": 8, "threads": 2 } },
+  "memory": { "size_mib": 16384 },
+  "firmware": { "descriptor": "ovmf-x86_64-ms-4m", "vars_image": "img-vars-01" },
+  "tpm": { "model": "tpm-crb", "backend": "swtpm" },
+  "disks": [ { "image": "img-0001", "bus": "virtio-blk", "boot_index": 1,
+               "cache": "none", "aio": "io_uring", "discard": "unmap" } ],
+  "media": [ { "image": "img-iso-07", "bus": "ide", "readonly": true } ],
+  "nics": [ { "network": "net-nat", "model": "virtio-net-pci", "mac": "52:54:00:3a:91:0c" } ],
+  "display": { "engine": "vnc:novnc", "vdagent": true },
+  "passthrough": ["-global", "ICH9-LPC.disable_s3=1"]
 }
 ```
 
 ```text
-qemu-system-x86_64 -name win11-dev -accel whpx -machine pc-q35-9.1,smm=on
-  -cpu host -smp sockets=1,cores=8,threads=2 -m 16384
-  -drive if=pflash,format=raw,readonly=on,file=edk2-x86_64-code.fd
-  -drive if=pflash,format=raw,file=win11-dev_VARS.fd
-  -chardev socket,id=chrtpm,path=/run/swtpm/win11-dev.sock
-  -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0
-  -drive file=win11-dev.qcow2,if=none,id=disk0,cache=none,aio=threads,discard=unmap
-  -device virtio-blk-pci,drive=disk0,bootindex=1
-  -drive file=Win11.iso,media=cdrom,readonly=on,if=none,id=cd0
-  -device ide-cd,drive=cd0,bus=ide.1
-  -netdev user,id=net0 -device virtio-net-pci,netdev=net0,mq=on,queues=4
-  -vnc 127.0.0.1:3 -device qemu-vdagent,clipboard=on,mouse=on
-  -qmp unix:/run/qemu-ui/win11-dev.qmp,server=on,wait=off
-  -pidfile /run/qemu-ui/win11-dev.pid -daemonize
-  -global ICH9-LPC.disable_s3=0
+qemu-system-x86_64
+  -name guest=win11-dev,debug-threads=on -msg timestamp=on
+  -nodefaults -no-user-config
+  -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny
+  -accel kvm
+  -machine pc-q35-9.1,smm=on,pflash0=qui-fw-code,pflash1=qui-fw-vars
+  -global driver=cfi.pflash01,property=secure,value=on
+  -cpu host,hv-passthrough=on -smp 16,sockets=1,cores=8,threads=2 -m 16384
+  -blockdev {"node-name":"qui-fw-code","driver":"file","filename":"<share>/edk2-x86_64-secure-code.fd","read-only":true}
+  -blockdev {"node-name":"qui-fw-vars-file","driver":"file","filename":"<pool>/win11-dev/VARS.qcow2"}
+  -blockdev {"node-name":"qui-fw-vars","driver":"qcow2","file":"qui-fw-vars-file"}
+  -chardev socket,id=qui-tpm,path=<run>/swtpm.sock
+  -tpmdev emulator,id=qui-tpm0,chardev=qui-tpm
+  -device {"driver":"tpm-crb","tpmdev":"qui-tpm0"}
+  -blockdev {"node-name":"qui-disk0-file","driver":"file","filename":"<pool>/win11-dev/disk0.qcow2","aio":"io_uring","cache":{"direct":true},"discard":"unmap"}
+  -blockdev {"node-name":"qui-disk0","driver":"qcow2","file":"qui-disk0-file","discard":"unmap"}
+  -device {"driver":"virtio-blk-pci","id":"qui-vd0","drive":"qui-disk0","bootindex":1}
+  -blockdev {"node-name":"qui-cd0-file","driver":"file","filename":"<pool>/iso/Win11.iso","read-only":true}
+  -blockdev {"node-name":"qui-cd0","driver":"raw","file":"qui-cd0-file","read-only":true}
+  -device {"driver":"ide-cd","id":"qui-cd0-dev","drive":"qui-cd0","bus":"ide.1"}
+  -netdev {"type":"user","id":"qui-net0"}
+  -device {"driver":"virtio-net-pci","id":"qui-nic0","netdev":"qui-net0","mac":"52:54:00:3a:91:0c"}
+  -device {"driver":"virtio-vga","id":"qui-gpu0"}
+  -device {"driver":"virtio-serial-pci","id":"qui-vser0"}
+  -chardev qemu-vdagent,id=qui-vdagent,name=vdagent,clipboard=on,mouse=on
+  -device {"driver":"virtserialport","chardev":"qui-vdagent","name":"com.redhat.spice.0"}
+  -vnc unix:<run>/vnc.sock
+  -chardev socket,id=qui-qmp,path=<run>/qmp.sock,server=on,wait=off
+  -mon chardev=qui-qmp,mode=control
+  -chardev socket,id=qui-qmp-user,path=<run>/qmp-user.sock,server=on,wait=off
+  -mon chardev=qui-qmp-user,mode=control
+  -chardev socket,id=qui-ser0,path=<run>/serial.sock,server=on,wait=off,logfile=<run>/serial.log
+  -serial chardev:qui-ser0
+  -pidfile <run>/qemu.pid
+  -S
+  -global ICH9-LPC.disable_s3=1
 ```
 
-Every token in that argv maps to a field in the spec, except the two `-global` entries which
-come from `passthrough` — and the UI will say so. That traceability is the contract.
+Every token traces to a spec field except the final `-global`, which is passthrough and is
+labelled as such in the UI. `-S` is followed by a QMP `cont` once start-up checks pass (§6.3).
+JSON arguments are passed as single argv elements; no shell is involved.
+
+**On a Windows host** the same spec compiles with `-accel whpx`, `aio=threads`, no
+`-sandbox`, transports per spike M0-14, and **no TPM** unless the probe reports a TPM backend
+(the editor shows the TPM field as unavailable with that reason).
