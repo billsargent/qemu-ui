@@ -1,0 +1,453 @@
+{
+  "$defs": {
+    "CacheMode": {
+      "oneOf": [
+        {
+          "enum": [
+            "writeback",
+            "writethrough",
+            "directsync"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "O_DIRECT, flushes honoured. Best default for most guests.",
+          "type": "string"
+        },
+        {
+          "const": "unsafe",
+          "description": "Ignores flushes: fast, loses data on host crash.",
+          "type": "string"
+        }
+      ]
+    },
+    "CpuSpec": {
+      "properties": {
+        "count": {
+          "description": "Total vCPUs.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "default": null,
+          "description": "CPU model; `None` uses the machine default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "props": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Extra CPU properties, e.g. `hv-passthrough=on`.",
+          "type": "object"
+        },
+        "topology": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Topology"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "count"
+      ],
+      "type": "object"
+    },
+    "DiskBus": {
+      "oneOf": [
+        {
+          "const": "virtio",
+          "description": "virtio-blk on PCI (or virtio-mmio machines).",
+          "type": "string"
+        },
+        {
+          "const": "scsi",
+          "description": "virtio-scsi controller + scsi-hd / scsi-cd.",
+          "type": "string"
+        },
+        {
+          "const": "nvme",
+          "description": "NVMe controller per disk.",
+          "type": "string"
+        },
+        {
+          "const": "ide",
+          "description": "IDE / AHCI (q35 has AHCI built in).",
+          "type": "string"
+        },
+        {
+          "const": "usb",
+          "description": "usb-storage on an xHCI controller.",
+          "type": "string"
+        }
+      ]
+    },
+    "DiskSpec": {
+      "properties": {
+        "aio": {
+          "default": null,
+          "description": "`threads`, `native`, `io_uring`; `None` picks a platform default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "boot_index": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "bus": {
+          "$ref": "#/$defs/DiskBus"
+        },
+        "cache": {
+          "$ref": "#/$defs/CacheMode",
+          "default": "none"
+        },
+        "discard": {
+          "default": true,
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/$defs/ImageRef"
+        },
+        "media": {
+          "$ref": "#/$defs/Media",
+          "default": "disk"
+        },
+        "readonly": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "image",
+        "bus"
+      ],
+      "type": "object"
+    },
+    "DisplaySpec": {
+      "properties": {
+        "device": {
+          "default": null,
+          "description": "Graphics device (`virtio-vga`, `VGA`, `virtio-gpu-pci`, …); `None` = headless.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vdagent": {
+          "default": false,
+          "description": "qemu-vdagent: clipboard + absolute pointer (needs guest agent).",
+          "type": "boolean"
+        },
+        "vnc": {
+          "default": true,
+          "description": "Serve the console over VNC (proxied; never exposed directly).",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "FirmwareSpec": {
+      "oneOf": [
+        {
+          "description": "Whatever the machine boots by default (SeaBIOS on x86, built-in elsewhere).",
+          "properties": {
+            "kind": {
+              "const": "default",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Firmware from a descriptor, e.g. UEFI. The daemon keeps the per-VM\nNVRAM copy (as qcow2, so internal snapshots work).",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "descriptor",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ImageRef": {
+      "properties": {
+        "name": {
+          "description": "File name inside the pool. No path separators.",
+          "type": "string"
+        },
+        "pool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pool",
+        "name"
+      ],
+      "type": "object"
+    },
+    "InputSpec": {
+      "properties": {
+        "usb_tablet": {
+          "default": true,
+          "description": "USB tablet for absolute pointing without guest agent.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "MachineSpec": {
+      "properties": {
+        "props": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Extra `-machine` properties, e.g. `smm=on`.",
+          "type": "object"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "Media": {
+      "enum": [
+        "disk",
+        "cdrom"
+      ],
+      "type": "string"
+    },
+    "MemorySpec": {
+      "properties": {
+        "size_mib": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "size_mib"
+      ],
+      "type": "object"
+    },
+    "NicBackend": {
+      "oneOf": [
+        {
+          "description": "slirp NAT (M1). Network objects arrive in M3.",
+          "properties": {
+            "forwards": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PortForward"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "user",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NicSpec": {
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/NicBackend"
+        },
+        "mac": {
+          "default": null,
+          "description": "Locally administered MAC; assigned at creation when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "Device model, e.g. `virtio-net-pci`, `e1000e`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "backend",
+        "model"
+      ],
+      "type": "object"
+    },
+    "PortForward": {
+      "properties": {
+        "guest_port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "host_addr": {
+          "description": "Host address to bind; loopback unless deliberately widened.",
+          "type": "string"
+        },
+        "host_port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "proto": {
+          "description": "`tcp` or `udp`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proto",
+        "host_addr",
+        "host_port",
+        "guest_port"
+      ],
+      "type": "object"
+    },
+    "Topology": {
+      "properties": {
+        "cores": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sockets": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "threads": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sockets",
+        "cores",
+        "threads"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "accel": {
+      "default": "auto",
+      "description": "`auto`, or an accelerator name (`kvm`, `whpx`, `hvf`, `tcg`).",
+      "type": "string"
+    },
+    "arch": {
+      "description": "Target architecture in QEMU naming.",
+      "type": "string"
+    },
+    "cpu": {
+      "$ref": "#/$defs/CpuSpec"
+    },
+    "disks": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DiskSpec"
+      },
+      "type": "array"
+    },
+    "display": {
+      "$ref": "#/$defs/DisplaySpec",
+      "default": {
+        "device": null,
+        "vdagent": false,
+        "vnc": true
+      }
+    },
+    "firmware": {
+      "$ref": "#/$defs/FirmwareSpec",
+      "default": {
+        "kind": "default"
+      }
+    },
+    "input": {
+      "$ref": "#/$defs/InputSpec",
+      "default": {
+        "usb_tablet": true
+      }
+    },
+    "machine": {
+      "$ref": "#/$defs/MachineSpec",
+      "description": "Versioned machine type; aliases are pinned at creation (§5.2)."
+    },
+    "memory": {
+      "$ref": "#/$defs/MemorySpec"
+    },
+    "name": {
+      "description": "`[A-Za-z0-9][A-Za-z0-9._-]{0,62}`; also used in `-name`.",
+      "type": "string"
+    },
+    "nics": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/NicSpec"
+      },
+      "type": "array"
+    },
+    "passthrough": {
+      "default": [],
+      "description": "Raw argv tokens appended after generated options (§5.3).",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "spec_version": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "spec_version",
+    "name",
+    "arch",
+    "machine",
+    "cpu",
+    "memory"
+  ],
+  "title": "VmSpec",
+  "type": "object"
+}

@@ -7,13 +7,14 @@
 
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// Current spec format version.
 pub const SPEC_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 #[ts(export)]
 pub struct VmSpec {
     pub spec_version: u32,
@@ -47,7 +48,7 @@ fn auto() -> String {
     "auto".into()
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 #[ts(export)]
 pub struct MachineSpec {
     #[serde(rename = "type")]
@@ -57,7 +58,7 @@ pub struct MachineSpec {
     pub props: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 #[ts(export)]
 pub struct CpuSpec {
     /// CPU model; `None` uses the machine default.
@@ -72,7 +73,7 @@ pub struct CpuSpec {
     pub topology: Option<Topology>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
 #[ts(export)]
 pub struct Topology {
     pub sockets: u32,
@@ -80,14 +81,14 @@ pub struct Topology {
     pub threads: u32,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
 #[ts(export)]
 pub struct MemorySpec {
     #[ts(type = "number")]
     pub size_mib: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 #[ts(export)]
 pub enum FirmwareSpec {
@@ -99,7 +100,7 @@ pub enum FirmwareSpec {
     Descriptor { id: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(export)]
 pub struct ImageRef {
     pub pool: String,
@@ -107,7 +108,7 @@ pub struct ImageRef {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, TS)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, TS, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 #[ts(export)]
 pub enum DiskBus {
@@ -123,7 +124,7 @@ pub enum DiskBus {
     Usb,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 #[ts(export)]
 pub enum Media {
@@ -132,7 +133,7 @@ pub enum Media {
     Cdrom,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 #[ts(export)]
 pub enum CacheMode {
@@ -146,7 +147,7 @@ pub enum CacheMode {
     Unsafe,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 #[ts(export)]
 pub struct DiskSpec {
     pub image: ImageRef,
@@ -170,7 +171,7 @@ fn yes() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 #[ts(export)]
 pub struct PortForward {
     /// `tcp` or `udp`.
@@ -181,7 +182,7 @@ pub struct PortForward {
     pub guest_port: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 #[ts(export)]
 pub enum NicBackend {
@@ -192,7 +193,7 @@ pub enum NicBackend {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 #[ts(export)]
 pub struct NicSpec {
     pub backend: NicBackend,
@@ -203,7 +204,7 @@ pub struct NicSpec {
     pub mac: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 #[ts(export)]
 pub struct DisplaySpec {
     /// Graphics device (`virtio-vga`, `VGA`, `virtio-gpu-pci`, …); `None` = headless.
@@ -227,7 +228,7 @@ impl Default for DisplaySpec {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 #[ts(export)]
 pub struct InputSpec {
     /// USB tablet for absolute pointing without guest agent.
@@ -267,6 +268,11 @@ pub fn valid_mac(mac: &str) -> bool {
             .iter()
             .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
         && u8::from_str_radix(parts[0], 16).is_ok_and(|b| b & 1 == 0)
+}
+
+/// JSON Schema for the current spec version (for editors and config-as-code).
+pub fn json_schema() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(VmSpec)).expect("schema serialises")
 }
 
 /// Upgrade an older spec document to [`SPEC_VERSION`]. v1 is the first
@@ -319,6 +325,26 @@ mod tests {
         assert!(!valid_mac("53:54:00:12:34:56"), "multicast");
         assert!(!valid_mac("52:54:00:12:34"));
         assert!(!valid_mac("52:54:00:12:34:zz"));
+    }
+
+    /// `data/schema/vm-spec.v1.json` must match the Rust types. Regenerate
+    /// with `UPDATE_GOLDEN=1 cargo test -p qemu-ui-core`.
+    #[test]
+    fn json_schema_file_is_current() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data/schema")
+            .join(format!("vm-spec.v{SPEC_VERSION}.json"));
+        let actual = serde_json::to_string_pretty(&json_schema()).unwrap() + "
+";
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &actual).unwrap();
+            return;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_default().replace("
+", "
+");
+        assert_eq!(actual, expected, "stale {}; run with UPDATE_GOLDEN=1", path.display());
     }
 
     #[test]
