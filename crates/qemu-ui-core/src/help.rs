@@ -8,7 +8,9 @@ use crate::caps::{DeviceInfo, MachineInfo};
 
 /// Parse a simple list such as `-netdev help`, `-display help`, `-accel help`,
 /// `-audiodev help`: a header line ending in `:` followed by one name per line,
-/// terminated by a blank line or end of input.
+/// terminated by a blank line or end of input. Lines may carry a description
+/// after the name (`-tpmdev help`: ` passthrough   Passthrough TPM backend`);
+/// only the name is kept.
 pub fn parse_name_list(text: &str) -> Vec<String> {
     let mut lines = text.lines().map(str::trim_end);
     // Skip to the header line.
@@ -19,10 +21,9 @@ pub fn parse_name_list(text: &str) -> Vec<String> {
     }
     let mut out = Vec::new();
     for line in lines {
-        let name = line.trim();
-        if name.is_empty() {
+        let Some(name) = line.split_whitespace().next() else {
             break;
-        }
+        };
         out.push(name.to_string());
     }
     out
@@ -221,6 +222,16 @@ mod tests {
             ms.iter()
                 .all(|m| !m.description.ends_with(')') || m.description.contains('('))
         );
+    }
+
+    #[test]
+    fn name_list_with_descriptions() {
+        // Linux `-tpmdev help` (also exits non-zero).
+        let t = "Supported TPM types (choose only one):
+ passthrough   Passthrough TPM backend driver
+    emulator   TPM emulator backend driver
+";
+        assert_eq!(parse_name_list(t), ["passthrough", "emulator"]);
     }
 
     #[test]

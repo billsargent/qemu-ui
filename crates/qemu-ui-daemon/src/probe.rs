@@ -128,11 +128,25 @@ async fn help_text(path: &Path, option: &str) -> Help {
                 Help::NotCompiled
             } else if o.status.success() {
                 Help::Text(String::from_utf8_lossy(&o.stdout).into_owned())
+            } else if let Some(text) = listing(&o.stdout, &stderr) {
+                // Some options print a valid listing but exit non-zero
+                // (`-tpmdev help` on Linux).
+                Help::Text(text)
             } else {
                 Help::Failed(format!("{option} help: {}", tidy(&stderr)))
             }
         }
     }
+}
+
+/// A help listing from either stream, if one is there despite a failure exit.
+fn listing(stdout: &[u8], stderr: &str) -> Option<String> {
+    [
+        String::from_utf8_lossy(stdout).into_owned(),
+        stderr.to_string(),
+    ]
+    .into_iter()
+    .find(|t| !help::parse_name_list(t).is_empty())
 }
 
 fn now() -> u64 {
