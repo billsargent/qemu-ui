@@ -1,0 +1,95 @@
+# Platform parity ledger (plan.md §14).
+#
+# status: native | degraded | needs-setup | impossible | unverified
+# The daemon refines the row for the *current* host with probe results
+# (probe wins); CI asserts this file parses and covers both platforms.
+
+[[row]]
+id = "hw-accel"
+feature = "Hardware acceleration"
+linux = { status = "native", note = "KVM. Needs read/write access to /dev/kvm (usually membership of the kvm group)." }
+windows = { status = "needs-setup", note = "WHPX. Enable the Windows Hypervisor Platform optional feature and reboot. Can conflict with older VMware/VirtualBox releases." }
+
+[[row]]
+id = "nat-slirp"
+feature = "NAT networking (slirp) with live port forwards"
+linux = { status = "native", note = "" }
+windows = { status = "native", note = "" }
+
+[[row]]
+id = "nat-passt"
+feature = "NAT networking (passt)"
+linux = { status = "native", note = "Requires the passt package." }
+windows = { status = "impossible", note = "passt only runs on Linux. Use slirp NAT." }
+
+[[row]]
+id = "net-isolated"
+feature = "Isolated VM-to-VM networks"
+linux = { status = "native", note = "-netdev dgram / stream" }
+windows = { status = "native", note = "-netdev dgram / stream" }
+
+[[row]]
+id = "net-bridged"
+feature = "Bridged and host-only networking"
+linux = { status = "native", note = "tap + bridge, set up by the privileged helper." }
+windows = { status = "needs-setup", note = "Requires the TAP-Windows driver and administrator rights." }
+
+[[row]]
+id = "physical-disk"
+feature = "Physical disk passthrough"
+linux = { status = "native", note = "Device must not be mounted; opened by the privileged helper." }
+windows = { status = "needs-setup", note = "All volumes on the disk must be offline; administrator rights required." }
+
+[[row]]
+id = "folder-share"
+feature = "Folder sharing (virtiofs / 9p)"
+linux = { status = "native", note = "virtiofsd, or 9p as fallback." }
+windows = { status = "impossible", note = "QEMU has no host folder sharing on Windows. Use an SMB share or SFTP instead." }
+
+[[row]]
+id = "usb-passthrough"
+feature = "USB device passthrough"
+linux = { status = "native", note = "" }
+windows = { status = "degraded", note = "Works per device; needs a libusb-compatible (WinUSB) driver bound to the device." }
+
+[[row]]
+id = "tpm"
+feature = "TPM 2.0 emulation (swtpm)"
+linux = { status = "native", note = "Requires the swtpm package." }
+windows = { status = "impossible", note = "The Windows build of QEMU does not include TPM backends (-tpmdev), and swtpm has no mainstream Windows build." }
+
+[[row]]
+id = "sandbox"
+feature = "QEMU seccomp sandbox (-sandbox)"
+linux = { status = "native", note = "" }
+windows = { status = "impossible", note = "Compensated by a restricted token and job objects (weaker)." }
+
+[[row]]
+id = "per-vm-uid"
+feature = "Per-VM user and cgroup isolation"
+linux = { status = "native", note = "" }
+windows = { status = "impossible", note = "Job objects are used instead." }
+
+[[row]]
+id = "vfio"
+feature = "VFIO PCI passthrough"
+linux = { status = "native", note = "Requires an IOMMU and root." }
+windows = { status = "impossible", note = "QEMU on Windows has no VFIO; Hyper-V Discrete Device Assignment is not available to QEMU." }
+
+[[row]]
+id = "unix-sockets"
+feature = "QMP / VNC / serial over unix sockets"
+linux = { status = "native", note = "" }
+windows = { status = "unverified", note = "Pending spike M0-14." }
+
+[[row]]
+id = "guacd"
+feature = "guacd rich display engine (SPICE, audio, multi-monitor)"
+linux = { status = "unverified", note = "Pending spike M0-15." }
+windows = { status = "unverified", note = "Pending spike M0-15. guacd has no native Windows build." }
+
+[[row]]
+id = "core"
+feature = "Lifecycle, blockdev disks, snapshots, VNC and serial consoles, all target architectures"
+linux = { status = "native", note = "" }
+windows = { status = "native", note = "" }

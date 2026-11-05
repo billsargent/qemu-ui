@@ -1,0 +1,8 @@
+Available audio drivers:
+none
+dbus
+dsound
+jack
+sdl
+spice
+wav
