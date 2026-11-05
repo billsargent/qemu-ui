@@ -1,0 +1,30 @@
+[package]
+name = "qemu-ui-daemon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8.9"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+dirs = "7.0.0"
+futures = "0.3.34"
+hex = "0.4.3"
+qemu-ui-core = { version = "0.1.0", path = "../qemu-ui-core" }
+qemu-ui-qmp = { version = "0.1.0", path = "../qemu-ui-qmp" }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+tokio = { version = "1.54.1", features = ["full"] }
+tower-http = { version = "0.7.1", features = ["fs", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+which = "8.0.6"
+
+[[bin]]
+name = "qemu-uid"
+path = "src/main.rs"
+
+[lints]
+workspace = true
