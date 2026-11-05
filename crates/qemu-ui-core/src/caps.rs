@@ -110,7 +110,23 @@ pub struct Backends {
     pub display: Option<Vec<String>>,
     pub audiodev: Option<Vec<String>>,
     pub tpmdev: Option<Vec<String>>,
+    /// `-object` types (e.g. `monitor-qmp`, `memory-backend-file`, `secret`).
+    #[serde(default)]
+    pub object: Option<Vec<String>>,
 }
+
+impl Backends {
+    /// QEMU 11.1 deprecates `-mon` in favour of `-object monitor-qmp`.
+    pub fn has_object(&self, name: &str) -> bool {
+        self.object
+            .as_ref()
+            .is_some_and(|o| o.iter().any(|x| x == name))
+    }
+}
+
+/// Bump when the probe collects new data, so cached snapshots made by an
+/// older probe are re-probed instead of served without it.
+pub const PROBE_VERSION: u32 = 2;
 
 /// Result of probing one `qemu-system-*` binary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -119,6 +135,9 @@ pub struct BinaryCaps {
     pub binary: Binary,
     pub arch: String,
     pub qemu_version: QemuVersion,
+    /// [`PROBE_VERSION`] of the probe that produced this snapshot.
+    #[serde(default)]
+    pub probe_version: u32,
     /// Seconds since the Unix epoch.
     #[ts(type = "number")]
     pub probed_at: u64,

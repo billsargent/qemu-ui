@@ -12,6 +12,10 @@ import type { QemuVersion } from "./QemuVersion";
  */
 export type BinaryCaps = { binary: Binary, arch: string, qemu_version: QemuVersion, 
 /**
+ * [`PROBE_VERSION`] of the probe that produced this snapshot.
+ */
+probe_version: number, 
+/**
  * Seconds since the Unix epoch.
  */
 probed_at: number, 

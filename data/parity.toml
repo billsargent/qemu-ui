@@ -78,9 +78,15 @@ windows = { status = "impossible", note = "QEMU on Windows has no VFIO; Hyper-V 
 
 [[row]]
 id = "unix-sockets"
-feature = "QMP / VNC / serial over unix sockets"
+feature = "QMP and serial consoles over AF_UNIX sockets"
 linux = { status = "native", note = "" }
-windows = { status = "unverified", note = "Pending spike M0-14." }
+windows = { status = "native", note = "Verified in spike M0-14. Named pipes were rejected: QEMU serves a single instance that cannot be reconnected." }
+
+[[row]]
+id = "vnc-unix"
+feature = "VNC on a unix socket (no network listener)"
+linux = { status = "native", note = "" }
+windows = { status = "degraded", note = "QEMU on Windows does not listen on unix VNC sockets; loopback TCP with a per-run password is used instead." }
 
 [[row]]
 id = "guacd"

@@ -187,6 +187,7 @@ impl Scanner {
         if !force
             && let Ok(Some(json)) = self.store.snapshot(&binary.sha256)
             && let Ok(mut caps) = serde_json::from_str::<BinaryCaps>(&json)
+            && caps.probe_version == qemu_ui_core::caps::PROBE_VERSION
         {
             // Same bytes, possibly a different location.
             caps.binary.path = binary.path.clone();

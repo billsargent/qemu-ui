@@ -9,6 +9,8 @@
 //! The client is transport-agnostic: give it any `AsyncRead` + `AsyncWrite`
 //! pair. Helpers exist for TCP, unix sockets and a child's stdio.
 
+pub mod transport;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,6 +23,9 @@ use tokio::sync::{Mutex, broadcast, oneshot};
 
 /// Default time to wait for a command reply.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Time to wait for the greeting after connecting.
+pub const GREETING_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum QmpError {
@@ -85,6 +90,11 @@ struct Inner {
     events: broadcast::Sender<Event>,
     greeting: Greeting,
     timeout: Duration,
+    /// Dropped with the last `Qmp` clone; tells the reader task to stop so
+    /// the read half is released and the connection actually closes. Without
+    /// this, QEMU (which serves one client per chardev) would never accept
+    /// the next client.
+    _close: oneshot::Sender<()>,
 }
 
 impl Qmp {
@@ -95,14 +105,20 @@ impl Qmp {
         W: AsyncWrite + Send + Unpin + 'static,
     {
         let mut lines = BufReader::new(reader).lines();
-        let greeting = loop {
-            let line = lines.next_line().await?.ok_or(QmpError::Closed)?;
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+        // A QEMU monitor that already has a client accepts the connection but
+        // stays silent; don't wait forever for its greeting.
+        let greeting = tokio::time::timeout(GREETING_TIMEOUT, async {
+            loop {
+                let line = lines.next_line().await?.ok_or(QmpError::Closed)?;
+                let line = line.trim();
+                if !line.is_empty() {
+                    return parse_greeting(line);
+                }
             }
-            break parse_greeting(line)?;
-        };
+        })
+        .await
+        .map_err(|_| QmpError::Timeout("QMP greeting".into()))??;
+        let (close_tx, mut close_rx) = oneshot::channel::<()>();
 
         let pending: Pending = Arc::default();
         let (events, _) = broadcast::channel(1024);
@@ -113,11 +129,18 @@ impl Qmp {
             events: events.clone(),
             greeting,
             timeout: DEFAULT_TIMEOUT,
+            _close: close_tx,
         });
 
         tokio::spawn(async move {
-            while let Ok(Some(line)) = lines.next_line().await {
-                dispatch(&line, &pending, &events);
+            loop {
+                tokio::select! {
+                    line = lines.next_line() => match line {
+                        Ok(Some(line)) => dispatch(&line, &pending, &events),
+                        Ok(None) | Err(_) => break,
+                    },
+                    _ = &mut close_rx => break,
+                }
             }
             // Fail everything still waiting.
             for (_, tx) in pending.lock().unwrap().drain() {
@@ -138,11 +161,10 @@ impl Qmp {
         Self::connect(r, w).await
     }
 
-    /// Connect over a unix socket.
-    #[cfg(unix)]
+    /// Connect over a unix-domain socket (Linux and Windows; see [`transport`]).
     pub async fn connect_unix(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let stream = tokio::net::UnixStream::connect(path).await?;
-        let (r, w) = stream.into_split();
+        let stream = transport::connect_unix(path.as_ref()).await?;
+        let (r, w) = tokio::io::split(stream);
         Self::connect(r, w).await
     }
 
