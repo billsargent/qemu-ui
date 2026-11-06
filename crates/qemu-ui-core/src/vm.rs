@@ -152,6 +152,12 @@ pub struct ImageInfo {
     pub actual_size: u64,
     /// Attached to these VMs (by name).
     pub used_by: Vec<String>,
+    /// A template: never opened writable; clone it instead (M2-05).
+    #[serde(default)]
+    pub template: bool,
+    /// Pool/name of the backing image when this is an overlay inside a pool.
+    #[serde(default)]
+    pub backing: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]

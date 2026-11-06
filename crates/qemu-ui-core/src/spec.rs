@@ -256,12 +256,27 @@ pub fn valid_name(name: &str) -> bool {
 
 /// Is `name` acceptable as a file name inside a pool?
 pub fn valid_image_name(name: &str) -> bool {
+    // Windows device names resolve to devices in any directory ("nul.qcow2"
+    // is NUL), so they are refused on every platform for portability.
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
     !name.is_empty()
         && name.len() <= 255
         && name != "."
         && name != ".."
         && !name.starts_with('.')
-        && !name.contains(['/', '\\', ':', '\0'])
+        && !name.ends_with(['.', ' '])
+        && !name.contains(['/', '\\', ':', '\0', '<', '>', '"', '|', '?', '*'])
+        && !name.chars().any(|c| c.is_control())
+        && !RESERVED.contains(&stem.as_str())
 }
 
 /// Is `mac` a unicast `xx:xx:xx:xx:xx:xx`?
@@ -321,6 +336,14 @@ mod tests {
         assert!(!valid_image_name("a/b"));
         assert!(!valid_image_name("C:x"));
         assert!(!valid_image_name(".hidden"));
+        assert!(!valid_image_name("nul.qcow2"), "Windows device name");
+        assert!(!valid_image_name("COM1"));
+        assert!(!valid_image_name("a|b.iso"));
+        assert!(!valid_image_name("trailing."));
+        assert!(
+            valid_image_name("console.iso"),
+            "only exact device names are reserved"
+        );
     }
 
     #[test]

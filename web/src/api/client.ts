@@ -5,8 +5,16 @@ import type { CompileResponse } from "./generated/CompileResponse";
 import type { DeviceProperty } from "./generated/DeviceProperty";
 import type { LintResult } from "./generated/LintResult";
 import type { Diagnostic } from "./generated/Diagnostic";
+import type { CheckResult } from "./generated/CheckResult";
+import type { ImageDetail } from "./generated/ImageDetail";
+import type { Job } from "./generated/Job";
+import type { MeasureResult } from "./generated/MeasureResult";
 import type { PoolInfo } from "./generated/PoolInfo";
+import type { PoolSummary } from "./generated/PoolSummary";
+import type { UploadProgress } from "./generated/UploadProgress";
+import type { UploadSession } from "./generated/UploadSession";
 import type { ScanStatus } from "./generated/ScanStatus";
+import type { SnapshotList } from "./generated/SnapshotList";
 import type { VmDetail } from "./generated/VmDetail";
 import type { VmEvent } from "./generated/VmEvent";
 import type { VmSpec } from "./generated/VmSpec";
@@ -83,9 +91,102 @@ export const api = {
   },
   consoleTicket: (id: string, kind: "vnc" | "serial") => post<ConsoleTicket>(`/vms/${id}/consoles/${kind}/ticket`),
 
-  pool: (name = "default") => request<PoolInfo>(`/pools/${name}`),
-  createImage: (name: string, sizeBytes: number, format = "qcow2") =>
-    post<void>("/pools/default/images", { name, size_bytes: sizeBytes, format }),
+  pools: () => request<PoolSummary[]>("/pools"),
+  addPool: (name: string, path: string, quotaBytes: number | null) =>
+    post<void>("/pools", { name, path, quota_bytes: quotaBytes }),
+  updatePool: (name: string, quotaBytes: number | null, readonly: boolean) =>
+    request<void>(`/pools/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: JSON.stringify({ quota_bytes: quotaBytes, readonly }),
+    }),
+  removePool: (name: string) => request<void>(`/pools/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  pool: (name = "default") => request<PoolInfo>(`/pools/${encodeURIComponent(name)}`),
+  /** Every image in every pool. */
+  allImages: async () => {
+    const pools = await request<PoolSummary[]>("/pools");
+    const infos = await Promise.all(pools.map((p) => request<PoolInfo>(`/pools/${encodeURIComponent(p.name)}`)));
+    return infos.flatMap((i) => i.images);
+  },
+  image: (pool: string, name: string) =>
+    request<ImageDetail>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}`),
+  createImage: (name: string, sizeBytes: number, format = "qcow2", pool = "default") =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/images`, { name, size_bytes: sizeBytes, format }),
+  deleteImage: (pool: string, name: string) =>
+    request<void>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  checkImage: (pool: string, name: string) =>
+    post<CheckResult>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/check`),
+  convertImage: (pool: string, name: string, targetPool: string, targetName: string, format: string) =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/convert`, {
+      target_pool: targetPool,
+      target_name: targetName,
+      format,
+    }),
+
+  measureImage: (pool: string, name: string, format: string) =>
+    post<MeasureResult>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/measure`, { format }),
+  resizeImage: (pool: string, name: string, sizeBytes: number, shrink: boolean) =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/resize`, {
+      size_bytes: sizeBytes,
+      shrink,
+    }),
+  compactImage: (pool: string, name: string, compress: boolean) =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/compact`, { compress }),
+  renameImage: (pool: string, name: string, newName: string) =>
+    post<void>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/rename`, { new_name: newName }),
+  setTemplate: (pool: string, name: string, template: boolean) =>
+    request<void>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/template`, {
+      method: "PUT",
+      body: JSON.stringify({ template }),
+    }),
+  cloneImage: (pool: string, name: string, targetPool: string, targetName: string) =>
+    post<{ pool: string; name: string }>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/clone`, {
+      target_pool: targetPool,
+      target_name: targetName,
+    }),
+  flattenImage: (pool: string, name: string) =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/flatten`),
+  commitImage: (pool: string, name: string) =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/commit`),
+  cloneVm: (id: string, name: string, mode: "linked" | "full", pool: string) =>
+    post<{ vm: VmDetail | null; job: Job | null }>(`/vms/${id}/clone`, { name, mode, pool }),
+  uploads: () => request<UploadSession[]>("/uploads"),
+  createUpload: (pool: string, name: string, sizeBytes: number, clientKey: string) =>
+    post<UploadSession>("/uploads", { pool, name, size_bytes: sizeBytes, client_key: clientKey }),
+  deleteUpload: (id: string) => request<void>(`/uploads/${id}`, { method: "DELETE" }),
+  /** Send one chunk. Resolves with progress, or with `{conflict}` carrying
+   * the server's offset when the client is out of sync. */
+  uploadChunk: async (
+    id: string,
+    offset: number,
+    chunk: Blob,
+    signal?: AbortSignal,
+  ): Promise<UploadProgress | { conflict: number }> => {
+    const res = await fetch(`/api/v1/uploads/${id}`, {
+      method: "PATCH",
+      headers: { "upload-offset": String(offset), "content-type": "application/offset+octet-stream" },
+      body: chunk,
+      signal,
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 409 && typeof body.offset === "number") return { conflict: body.offset };
+    if (!res.ok) throw new ApiError(res.status, body.error ?? res.statusText);
+    return body as UploadProgress;
+  },
+
+  jobs: () => request<Job[]>("/jobs"),
+  cancelJob: (id: string) => post<void>(`/jobs/${id}/cancel`),
+  jobLog: async (id: string) => {
+    const res = await fetch(`/api/v1/jobs/${id}/log`);
+    return res.ok ? res.text() : "";
+  },
+
+  snapshots: (vmId: string) => request<SnapshotList>(`/vms/${vmId}/snapshots`),
+  takeSnapshot: (vmId: string, name: string, description: string, withMemory: boolean) =>
+    post<Job>(`/vms/${vmId}/snapshots`, { name, description, with_memory: withMemory }),
+  revertSnapshot: (vmId: string, snapshotId: string, safetySnapshot: boolean) =>
+    post<Job>(`/vms/${vmId}/snapshots/${snapshotId}/revert`, { safety_snapshot: safetySnapshot }),
+  deleteSnapshot: (vmId: string, snapshotId: string) =>
+    request<Job>(`/vms/${vmId}/snapshots/${snapshotId}`, { method: "DELETE" }),
 };
 
 export function wsUrl(path: string): string {

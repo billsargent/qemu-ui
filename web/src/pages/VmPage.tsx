@@ -1,15 +1,16 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../api/client";
+import { ApiError, api } from "../api/client";
 import type { VmDetail } from "../api/generated/VmDetail";
 import { SerialConsole } from "../components/SerialConsole";
+import { SnapshotsTab } from "../components/SnapshotsTab";
 import { VncConsole } from "../components/VncConsole";
 import { VmEditor } from "../components/VmEditor";
-import { Badge, Button, Card } from "../components/ui";
+import { Badge, Button, Card, Field, inputCls } from "../components/ui";
 import { AccelBadge, StateBadge, VmActions, explainPause, useUptime } from "../components/vm";
 import { navigate } from "../router";
 
-const TABS = ["overview", "console", "settings", "events"] as const;
+const TABS = ["overview", "console", "snapshots", "settings", "events"] as const;
 
 export default function VmPage({ id, tab }: { id: string; tab: string }) {
   const vm = useQuery({ queryKey: ["vm", id], queryFn: () => api.vm(id) });
@@ -42,6 +43,7 @@ export default function VmPage({ id, tab }: { id: string; tab: string }) {
           <SerialConsole vmId={id} running={active} />
         </div>
       )}
+      {current === "snapshots" && <SnapshotsTab vm={d.summary} />}
       {current === "settings" && <Settings d={d} />}
       {current === "events" && <Events id={id} />}
     </div>
@@ -71,6 +73,8 @@ function Header({ d }: { d: VmDetail }) {
 function Overview({ d }: { d: VmDetail }) {
   const s = d.summary;
   const spec = d.spec;
+  const images = useQuery({ queryKey: ["images", "all"], queryFn: api.allImages });
+  const backingOf = (pool: string, name: string) => images.data?.find((i) => i.pool === pool && i.name === name)?.backing;
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
       {(s.state === "crashed" || (s.state === "paused" && s.pause_reason !== "user")) && (
@@ -107,6 +111,11 @@ function Overview({ d }: { d: VmDetail }) {
           {spec.disks.map((x, i) => (
             <li key={i}>
               <span className="font-mono">{x.image.name}</span>{" "}
+              {backingOf(x.image.pool, x.image.name) && (
+                <Badge tone="blue" title="qcow2 overlay on a template">
+                  linked clone of {backingOf(x.image.pool, x.image.name)}
+                </Badge>
+              )}{" "}
               <span className="text-xs text-zinc-500">
                 {x.media} on {x.bus}
                 {x.boot_index != null ? ` · boot ${x.boot_index}` : ""}
@@ -161,6 +170,7 @@ function Settings({ d }: { d: VmDetail }) {
           }
         }}
       />
+      <CloneCard d={d} stopped={stopped} />
       <Card title="Danger zone">
         <div className="flex items-center gap-3">
           <Button
@@ -189,6 +199,63 @@ function Settings({ d }: { d: VmDetail }) {
         </div>
       </Card>
     </div>
+  );
+}
+
+function CloneCard({ d, stopped }: { d: VmDetail; stopped: boolean }) {
+  const qc = useQueryClient();
+  const pools = useQuery({ queryKey: ["pools"], queryFn: api.pools });
+  const [name, setName] = useState(`${d.summary.name}-clone`);
+  const [mode, setMode] = useState<"linked" | "full">("linked");
+  const [pool, setPool] = useState("default");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [started, setStarted] = useState(false);
+  return (
+    <Card title="Clone VM">
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setBusy(true);
+          setError(null);
+          try {
+            const r = await api.cloneVm(d.summary.id, name, mode, pool);
+            qc.invalidateQueries({ queryKey: ["vms"] });
+            if (r.vm) navigate(`/vms/${r.vm.summary.id}`);
+            else setStarted(true);
+          } catch (err) {
+            const ex = err as ApiError;
+            setError(ex.diagnostics?.length ? ex.diagnostics.map((x) => x.message).join(" ") : ex.message);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <Field label="Name">
+          <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <Field label="Kind" hint={mode === "linked" ? "Instant; shares template disks (needs template disks)" : "Independent copy of every disk (a job)"}>
+          <select className={inputCls} value={mode} onChange={(e) => setMode(e.target.value as "linked" | "full")}>
+            <option value="linked">Linked clone</option>
+            <option value="full">Full copy</option>
+          </select>
+        </Field>
+        <Field label="Disks in pool">
+          <select className={inputCls} value={pool} onChange={(e) => setPool(e.target.value)}>
+            {pools.data?.filter((p) => !p.readonly).map((p) => (
+              <option key={p.name}>{p.name}</option>
+            ))}
+          </select>
+        </Field>
+        <Button type="submit" disabled={!stopped || busy || !name}>
+          {busy ? "Cloning…" : "Clone"}
+        </Button>
+        {!stopped && <span className="text-xs text-zinc-500">Stop the VM to clone it.</span>}
+        {started && <span className="text-xs text-zinc-500">Copying disks — see Jobs.</span>}
+      </form>
+      {error && <p className="mt-2 text-xs text-rose-600">{error}</p>}
+    </Card>
   );
 }
 

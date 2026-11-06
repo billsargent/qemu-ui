@@ -1,11 +1,16 @@
 //! qemu-uid: the qemu-ui daemon (plan.md §3).
 
 mod api;
+mod api_snapshots;
+mod api_storage;
+mod api_upload;
 mod api_vms;
 mod consoles;
 mod discovery;
 mod guard;
+mod image_ops;
 mod images;
+mod jobs;
 mod probe;
 mod procs;
 mod scan;

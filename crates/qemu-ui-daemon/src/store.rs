@@ -65,7 +65,181 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX event_vm ON event(vm_id, seq);
     "#,
+    // 3: storage pools and jobs (M2)
+    r#"
+    CREATE TABLE pool (
+        name        TEXT NOT NULL PRIMARY KEY,
+        path        TEXT NOT NULL UNIQUE,
+        quota_bytes INTEGER,
+        readonly    INTEGER NOT NULL DEFAULT 0,
+        created_at  INTEGER NOT NULL
+    );
+    CREATE TABLE job (
+        id          TEXT NOT NULL PRIMARY KEY,
+        kind        TEXT NOT NULL,
+        title       TEXT NOT NULL,
+        status      TEXT NOT NULL,
+        progress    REAL,
+        message     TEXT,
+        error       TEXT,
+        target_json TEXT NOT NULL,
+        log_path    TEXT,
+        created_at  INTEGER NOT NULL,
+        started_at  INTEGER,
+        finished_at INTEGER
+    );
+    CREATE INDEX job_created ON job(created_at);
+    "#,
+    // 4: template images (M2-05)
+    r#"
+    CREATE TABLE image_template (
+        pool TEXT NOT NULL,
+        name TEXT NOT NULL,
+        PRIMARY KEY (pool, name)
+    );
+    "#,
+    // 5: VM snapshots (M2-06)
+    r#"
+    CREATE TABLE snapshot (
+        id          TEXT NOT NULL PRIMARY KEY,
+        vm_id       TEXT NOT NULL REFERENCES vm(id) ON DELETE CASCADE,
+        name        TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        tag         TEXT NOT NULL,
+        parent_id   TEXT,
+        with_memory INTEGER NOT NULL,
+        auto        INTEGER NOT NULL DEFAULT 0,
+        disks_json  TEXT NOT NULL,
+        created_at  INTEGER NOT NULL
+    );
+    CREATE INDEX snapshot_vm ON snapshot(vm_id);
+    CREATE TABLE snapshot_head (
+        vm_id       TEXT NOT NULL PRIMARY KEY REFERENCES vm(id) ON DELETE CASCADE,
+        snapshot_id TEXT
+    );
+    "#,
+    // 6: resumable uploads (M2-07)
+    r#"
+    CREATE TABLE upload (
+        id          TEXT NOT NULL PRIMARY KEY,
+        pool        TEXT NOT NULL,
+        name        TEXT NOT NULL,
+        size        INTEGER NOT NULL,
+        sha256      TEXT,
+        client_key  TEXT,
+        job_id      TEXT,
+        created_at  INTEGER NOT NULL,
+        UNIQUE (pool, name)
+    );
+    "#,
 ];
+
+/// A resumable upload session row.
+#[derive(Debug, Clone)]
+pub struct UploadRow {
+    pub id: String,
+    pub pool: String,
+    pub name: String,
+    pub size: u64,
+    pub sha256: Option<String>,
+    pub client_key: Option<String>,
+    pub job_id: Option<String>,
+    pub created_at: u64,
+}
+
+fn upload_row(r: &rusqlite::Row) -> rusqlite::Result<UploadRow> {
+    Ok(UploadRow {
+        id: r.get(0)?,
+        pool: r.get(1)?,
+        name: r.get(2)?,
+        size: r.get::<_, i64>(3)? as u64,
+        sha256: r.get(4)?,
+        client_key: r.get(5)?,
+        job_id: r.get(6)?,
+        created_at: r.get::<_, i64>(7)? as u64,
+    })
+}
+
+const UPLOAD_COLS: &str = "id, pool, name, size, sha256, client_key, job_id, created_at";
+
+/// A snapshot row.
+#[derive(Debug, Clone)]
+pub struct SnapshotRow {
+    pub id: String,
+    pub vm_id: String,
+    pub name: String,
+    pub description: String,
+    pub tag: String,
+    pub parent_id: Option<String>,
+    pub with_memory: bool,
+    pub auto: bool,
+    pub disks_json: String,
+    pub created_at: u64,
+}
+
+fn snapshot_row(r: &rusqlite::Row) -> rusqlite::Result<SnapshotRow> {
+    Ok(SnapshotRow {
+        id: r.get(0)?,
+        vm_id: r.get(1)?,
+        name: r.get(2)?,
+        description: r.get(3)?,
+        tag: r.get(4)?,
+        parent_id: r.get(5)?,
+        with_memory: r.get(6)?,
+        auto: r.get(7)?,
+        disks_json: r.get(8)?,
+        created_at: r.get::<_, i64>(9)? as u64,
+    })
+}
+
+const SNAPSHOT_COLS: &str =
+    "id, vm_id, name, description, tag, parent_id, with_memory, auto, disks_json, created_at";
+
+/// A pool row.
+#[derive(Debug, Clone)]
+pub struct PoolRow {
+    pub name: String,
+    pub path: String,
+    pub quota_bytes: Option<u64>,
+    pub readonly: bool,
+}
+
+/// A job row (see `qemu_ui_core::storage::Job`).
+#[derive(Debug, Clone)]
+pub struct JobRow {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub status: String,
+    pub progress: Option<f64>,
+    pub message: Option<String>,
+    pub error: Option<String>,
+    pub target_json: String,
+    pub log_path: Option<String>,
+    pub created_at: u64,
+    pub started_at: Option<u64>,
+    pub finished_at: Option<u64>,
+}
+
+const JOB_COLS: &str = "id, kind, title, status, progress, message, error, target_json, log_path, \
+                        created_at, started_at, finished_at";
+
+fn job_row(r: &rusqlite::Row) -> rusqlite::Result<JobRow> {
+    Ok(JobRow {
+        id: r.get(0)?,
+        kind: r.get(1)?,
+        title: r.get(2)?,
+        status: r.get(3)?,
+        progress: r.get(4)?,
+        message: r.get(5)?,
+        error: r.get(6)?,
+        target_json: r.get(7)?,
+        log_path: r.get(8)?,
+        created_at: r.get::<_, i64>(9)? as u64,
+        started_at: r.get::<_, Option<i64>>(10)?.map(|v| v as u64),
+        finished_at: r.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+    })
+}
 
 /// A VM row.
 #[derive(Debug, Clone)]
@@ -427,6 +601,311 @@ impl Store {
     }
 }
 
+impl Store {
+    // ----------------------------------------------------------------- pools
+
+    pub fn insert_pool(&self, p: &PoolRow, now: u64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO pool (name, path, quota_bytes, readonly, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![p.name, p.path, p.quota_bytes.map(|q| q as i64), p.readonly, now as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn update_pool(&self, name: &str, quota_bytes: Option<u64>, readonly: bool) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE pool SET quota_bytes = ?2, readonly = ?3 WHERE name = ?1",
+                params![name, quota_bytes.map(|q| q as i64), readonly],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn delete_pool(&self, name: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM pool WHERE name = ?1", [name])
+                .map(|_| ())
+        })
+    }
+
+    pub fn list_pools(&self) -> Result<Vec<PoolRow>> {
+        self.with(|c| {
+            let mut st =
+                c.prepare("SELECT name, path, quota_bytes, readonly FROM pool ORDER BY name")?;
+            st.query_map([], |r| {
+                Ok(PoolRow {
+                    name: r.get(0)?,
+                    path: r.get(1)?,
+                    quota_bytes: r.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                    readonly: r.get(3)?,
+                })
+            })?
+            .collect()
+        })
+    }
+
+    // ------------------------------------------------------------- templates
+
+    pub fn set_template(&self, pool: &str, name: &str, template: bool) -> Result<()> {
+        self.with(|c| {
+            if template {
+                c.execute(
+                    "INSERT OR IGNORE INTO image_template (pool, name) VALUES (?1, ?2)",
+                    params![pool, name],
+                )
+            } else {
+                c.execute(
+                    "DELETE FROM image_template WHERE pool = ?1 AND name = ?2",
+                    params![pool, name],
+                )
+            }
+            .map(|_| ())
+        })
+    }
+
+    pub fn is_template(&self, pool: &str, name: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM image_template WHERE pool = ?1 AND name = ?2",
+                params![pool, name],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    // ------------------------------------------------------------------ jobs
+
+    pub fn insert_job(&self, j: &JobRow) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO job (id, kind, title, status, target_json, log_path, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    j.id,
+                    j.kind,
+                    j.title,
+                    j.status,
+                    j.target_json,
+                    j.log_path,
+                    j.created_at as i64
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn update_job(&self, j: &JobRow) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE job SET status = ?2, progress = ?3, message = ?4, error = ?5, \
+                 started_at = ?6, finished_at = ?7 WHERE id = ?1",
+                params![
+                    j.id,
+                    j.status,
+                    j.progress,
+                    j.message,
+                    j.error,
+                    j.started_at.map(|v| v as i64),
+                    j.finished_at.map(|v| v as i64)
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn get_job(&self, id: &str) -> Result<Option<JobRow>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {JOB_COLS} FROM job WHERE id = ?1"),
+                [id],
+                job_row,
+            )
+            .optional()
+        })
+    }
+
+    pub fn recent_jobs(&self, limit: u32) -> Result<Vec<JobRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {JOB_COLS} FROM job ORDER BY created_at DESC, rowid DESC LIMIT ?1"
+            ))?;
+            st.query_map([limit], job_row)?.collect()
+        })
+    }
+
+    /// Mark jobs that were queued or running when the daemon stopped.
+    pub fn interrupt_unfinished_jobs(&self, now: u64) -> Result<usize> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE job SET status = 'interrupted', finished_at = ?1, \
+                 error = 'the daemon stopped while this job was running' \
+                 WHERE status IN ('queued', 'running')",
+                [now as i64],
+            )
+        })
+    }
+}
+
+impl Store {
+    // ------------------------------------------------------------ snapshots
+
+    pub fn insert_snapshot(&self, s: &SnapshotRow) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                &format!("INSERT INTO snapshot ({SNAPSHOT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
+                params![
+                    s.id,
+                    s.vm_id,
+                    s.name,
+                    s.description,
+                    s.tag,
+                    s.parent_id,
+                    s.with_memory,
+                    s.auto,
+                    s.disks_json,
+                    s.created_at as i64
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn list_snapshots(&self, vm_id: &str) -> Result<Vec<SnapshotRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {SNAPSHOT_COLS} FROM snapshot WHERE vm_id = ?1 ORDER BY created_at, rowid"
+            ))?;
+            st.query_map([vm_id], snapshot_row)?.collect()
+        })
+    }
+
+    pub fn get_snapshot(&self, vm_id: &str, id: &str) -> Result<Option<SnapshotRow>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {SNAPSHOT_COLS} FROM snapshot WHERE vm_id = ?1 AND id = ?2"),
+                params![vm_id, id],
+                snapshot_row,
+            )
+            .optional()
+        })
+    }
+
+    /// Remove a snapshot and keep the tree whole: its children move up to
+    /// its parent, and the head moves to its parent if it pointed here.
+    pub fn delete_snapshot(&self, vm_id: &str, id: &str) -> Result<()> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let parent: Option<String> = tx
+            .query_row(
+                "SELECT parent_id FROM snapshot WHERE vm_id = ?1 AND id = ?2",
+                params![vm_id, id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        tx.execute(
+            "UPDATE snapshot SET parent_id = ?3 WHERE vm_id = ?1 AND parent_id = ?2",
+            params![vm_id, id, parent],
+        )?;
+        tx.execute(
+            "UPDATE snapshot_head SET snapshot_id = ?3 WHERE vm_id = ?1 AND snapshot_id = ?2",
+            params![vm_id, id, parent],
+        )?;
+        tx.execute(
+            "DELETE FROM snapshot WHERE vm_id = ?1 AND id = ?2",
+            params![vm_id, id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn snapshot_head(&self, vm_id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT snapshot_id FROM snapshot_head WHERE vm_id = ?1",
+                [vm_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+        })
+    }
+
+    pub fn set_snapshot_head(&self, vm_id: &str, snapshot_id: Option<&str>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO snapshot_head (vm_id, snapshot_id) VALUES (?1, ?2) \
+                 ON CONFLICT(vm_id) DO UPDATE SET snapshot_id = ?2",
+                params![vm_id, snapshot_id],
+            )
+            .map(|_| ())
+        })
+    }
+}
+
+impl Store {
+    pub fn insert_upload(&self, u: &UploadRow) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO upload (id, pool, name, size, sha256, client_key, job_id, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    u.id,
+                    u.pool,
+                    u.name,
+                    u.size as i64,
+                    u.sha256,
+                    u.client_key,
+                    u.job_id,
+                    u.created_at as i64
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn set_upload_job(&self, id: &str, job_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE upload SET job_id = ?2 WHERE id = ?1",
+                params![id, job_id],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn get_upload(&self, id: &str) -> Result<Option<UploadRow>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {UPLOAD_COLS} FROM upload WHERE id = ?1"),
+                [id],
+                upload_row,
+            )
+            .optional()
+        })
+    }
+
+    pub fn list_uploads(&self) -> Result<Vec<UploadRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {UPLOAD_COLS} FROM upload ORDER BY created_at, rowid"
+            ))?;
+            st.query_map([], upload_row)?.collect()
+        })
+    }
+
+    pub fn delete_upload(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM upload WHERE id = ?1", [id])
+                .map(|_| ())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +926,106 @@ mod tests {
         s.put_kv("k", "v").unwrap();
         s.put_kv("k", "w").unwrap();
         assert_eq!(s.get_kv("k").unwrap().as_deref(), Some("w"));
+    }
+
+    #[test]
+    fn pools_and_jobs() {
+        let s = Store::memory().unwrap();
+        s.insert_pool(
+            &PoolRow {
+                name: "big".into(),
+                path: "/big".into(),
+                quota_bytes: Some(10),
+                readonly: false,
+            },
+            1,
+        )
+        .unwrap();
+        assert!(
+            s.insert_pool(
+                &PoolRow {
+                    name: "dup".into(),
+                    path: "/big".into(),
+                    quota_bytes: None,
+                    readonly: false
+                },
+                1
+            )
+            .is_err(),
+            "unique path"
+        );
+        s.update_pool("big", None, true).unwrap();
+        let p = &s.list_pools().unwrap()[0];
+        assert_eq!((p.quota_bytes, p.readonly), (None, true));
+
+        let mut j = JobRow {
+            id: "j1".into(),
+            kind: "image.create".into(),
+            title: "t".into(),
+            status: "queued".into(),
+            progress: None,
+            message: None,
+            error: None,
+            target_json: "{}".into(),
+            log_path: None,
+            created_at: 5,
+            started_at: None,
+            finished_at: None,
+        };
+        s.insert_job(&j).unwrap();
+        j.status = "running".into();
+        j.progress = Some(0.5);
+        s.update_job(&j).unwrap();
+        assert_eq!(s.get_job("j1").unwrap().unwrap().progress, Some(0.5));
+        assert_eq!(s.interrupt_unfinished_jobs(9).unwrap(), 1);
+        assert_eq!(s.recent_jobs(10).unwrap()[0].status, "interrupted");
+        s.delete_pool("big").unwrap();
+        assert!(s.list_pools().unwrap().is_empty());
+
+        assert!(!s.is_template("p", "base.qcow2").unwrap());
+        s.set_template("p", "base.qcow2", true).unwrap();
+        s.set_template("p", "base.qcow2", true).unwrap();
+        assert!(s.is_template("p", "base.qcow2").unwrap());
+        s.set_template("p", "base.qcow2", false).unwrap();
+        assert!(!s.is_template("p", "base.qcow2").unwrap());
+    }
+
+    #[test]
+    fn snapshot_tree_reparents_on_delete() {
+        let s = Store::memory().unwrap();
+        s.insert_vm("v", "vm", "{}", 1).unwrap();
+        let snap = |id: &str, parent: Option<&str>| SnapshotRow {
+            id: id.into(),
+            vm_id: "v".into(),
+            name: id.into(),
+            description: String::new(),
+            tag: format!("qui-{id}"),
+            parent_id: parent.map(String::from),
+            with_memory: false,
+            auto: false,
+            disks_json: "[]".into(),
+            created_at: 1,
+        };
+        // a -> b -> {c, d}
+        s.insert_snapshot(&snap("a", None)).unwrap();
+        s.insert_snapshot(&snap("b", Some("a"))).unwrap();
+        s.insert_snapshot(&snap("c", Some("b"))).unwrap();
+        s.insert_snapshot(&snap("d", Some("b"))).unwrap();
+        s.set_snapshot_head("v", Some("b")).unwrap();
+        s.delete_snapshot("v", "b").unwrap();
+        let rows = s.list_snapshots("v").unwrap();
+        assert_eq!(rows.len(), 3);
+        for id in ["c", "d"] {
+            let r = rows.iter().find(|r| r.id == id).unwrap();
+            assert_eq!(r.parent_id.as_deref(), Some("a"), "{id} re-parented");
+        }
+        assert_eq!(
+            s.snapshot_head("v").unwrap().as_deref(),
+            Some("a"),
+            "head moved up"
+        );
+        s.delete_vm("v").unwrap();
+        assert!(s.list_snapshots("v").unwrap().is_empty(), "cascade");
     }
 
     #[test]

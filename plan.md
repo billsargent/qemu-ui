@@ -398,6 +398,19 @@ Internal via `snapshot-save` jobs (requires all writable nodes qcow2 — UEFI VA
 qcow2 for this reason) and external via `blockdev-snapshot-sync`. Snapshot tree UI with
 memory + disk-set grouping; auto-snapshot before risky operations.
 
+**As built (M2-06):** internal snapshots only, one tag across every writable qcow2 disk and the
+NVRAM file. Running VM with memory: QMP `snapshot-save`/`snapshot-load`/`snapshot-delete` jobs;
+running disk-only: a `transaction` of `blockdev-snapshot-internal-sync` (crash-consistent, and
+reverting it needs the VM stopped); stopped VM: `qemu-img snapshot`. Snapshots form a tree
+(parent = the VM's head when taken); reverts can take an automatic safety snapshot first;
+deleting re-parents children. Raw writable disks are refused up front, naming the disk.
+
+**External snapshots are deferred.** An external snapshot changes which file a VM writes to:
+the spec would have to point at a new overlay image (pool + name) after every snapshot, and
+reverting means discarding or rebasing overlays — the same backing-chain machinery as templates
+and linked clones (§9.2, M2-05). They will be built on that once it lands, rather than as a
+second, parallel chain model.
+
 ### 9.4 Attach from elsewhere
 1. **Browser upload:** resumable (tus-style create/HEAD/PATCH), streamed to disk, checksummed,
    survives tab close.

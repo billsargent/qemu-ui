@@ -43,9 +43,24 @@ export function useLiveInvalidation() {
   useEffect(
     () =>
       onVmEvent((ev) => {
+        if (ev.kind === "job") {
+          qc.invalidateQueries({ queryKey: ["jobs"] });
+          const status = (ev.data as { status?: string }).status;
+          if (status === "succeeded") {
+            qc.invalidateQueries({ queryKey: ["pools"] });
+            qc.invalidateQueries({ queryKey: ["pool"] });
+            qc.invalidateQueries({ queryKey: ["images"] });
+            qc.invalidateQueries({ queryKey: ["image"] });
+          }
+          return;
+        }
         if (["state", "created", "updated", "deleted", "started", "exited", "reattached"].includes(ev.kind)) {
           qc.invalidateQueries({ queryKey: ["vms"] });
           qc.invalidateQueries({ queryKey: ["vm", ev.vm_id] });
+        }
+        if (ev.kind === "snapshot") {
+          qc.invalidateQueries({ queryKey: ["snapshots", ev.vm_id] });
+          qc.invalidateQueries({ queryKey: ["image"] });
         }
         qc.invalidateQueries({ queryKey: ["vm-events", ev.vm_id] });
       }),

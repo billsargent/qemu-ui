@@ -4,4 +4,12 @@ export type ImageInfo = { pool: string, name: string, format: string, virtual_si
 /**
  * Attached to these VMs (by name).
  */
-used_by: Array<string>, };
+used_by: Array<string>, 
+/**
+ * A template: never opened writable; clone it instead (M2-05).
+ */
+template: boolean, 
+/**
+ * Pool/name of the backing image when this is an overlay inside a pool.
+ */
+backing: string | null, };
