@@ -62,6 +62,10 @@ pub struct ImageDetail {
     pub used_by: Vec<String>,
     /// VMs currently running with this image open.
     pub in_use_by: Vec<String>,
+    /// A template: never opened writable; clone it instead.
+    pub template: bool,
+    /// Other images (pool/name) that use this one as their backing file.
+    pub dependents: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]

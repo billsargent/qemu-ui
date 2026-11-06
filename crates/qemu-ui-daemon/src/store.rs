@@ -90,6 +90,14 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX job_created ON job(created_at);
     "#,
+    // 4: template images (M2-05)
+    r#"
+    CREATE TABLE image_template (
+        pool TEXT NOT NULL,
+        name TEXT NOT NULL,
+        PRIMARY KEY (pool, name)
+    );
+    "#,
 ];
 
 /// A pool row.
@@ -544,6 +552,36 @@ impl Store {
         })
     }
 
+    // ------------------------------------------------------------- templates
+
+    pub fn set_template(&self, pool: &str, name: &str, template: bool) -> Result<()> {
+        self.with(|c| {
+            if template {
+                c.execute(
+                    "INSERT OR IGNORE INTO image_template (pool, name) VALUES (?1, ?2)",
+                    params![pool, name],
+                )
+            } else {
+                c.execute(
+                    "DELETE FROM image_template WHERE pool = ?1 AND name = ?2",
+                    params![pool, name],
+                )
+            }
+            .map(|_| ())
+        })
+    }
+
+    pub fn is_template(&self, pool: &str, name: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM image_template WHERE pool = ?1 AND name = ?2",
+                params![pool, name],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+        })
+    }
+
     // ------------------------------------------------------------------ jobs
 
     pub fn insert_job(&self, j: &JobRow) -> Result<()> {
@@ -692,6 +730,13 @@ mod tests {
         assert_eq!(s.recent_jobs(10).unwrap()[0].status, "interrupted");
         s.delete_pool("big").unwrap();
         assert!(s.list_pools().unwrap().is_empty());
+
+        assert!(!s.is_template("p", "base.qcow2").unwrap());
+        s.set_template("p", "base.qcow2", true).unwrap();
+        s.set_template("p", "base.qcow2", true).unwrap();
+        assert!(s.is_template("p", "base.qcow2").unwrap());
+        s.set_template("p", "base.qcow2", false).unwrap();
+        assert!(!s.is_template("p", "base.qcow2").unwrap());
     }
 
     #[test]

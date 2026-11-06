@@ -155,7 +155,10 @@ function PoolImages({ pool, selected }: { pool: string; selected?: string }) {
                 onClick={() => navigate(`/storage/${pool}/${encodeURIComponent(i.name)}`)}
                 className={`cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/50 ${selected === i.name ? "bg-zinc-100 dark:bg-zinc-800" : ""}`}
               >
-                <td className="py-1 font-mono text-xs">{i.name}</td>
+                <td className="py-1 font-mono text-xs">
+                  {i.name} {i.template && <Badge tone="blue">template</Badge>}
+                  {i.backing && <span className="ml-1 text-zinc-500" title="Linked clone (qcow2 overlay)">↳ {i.backing}</span>}
+                </td>
                 <td className="py-1 text-xs">{i.format}</td>
                 <td className="py-1 text-right text-xs tabular-nums">{formatBytes(i.virtual_size)}</td>
                 <td className="py-1 text-right text-xs tabular-nums">{formatBytes(i.actual_size)}</td>
@@ -289,6 +292,7 @@ function ImagePanel({ pool, name }: { pool: string; name: string }) {
           {check.isError && <span className="text-xs text-rose-600">{check.error.message}</span>}
         </div>
       </Card>
+      <ClonesCard pool={pool} name={name} template={x.template} hasBacking={x.backing_chain.length > 0} dependents={x.dependents} open={x.in_use_by} />
       <Card title="Copy / convert">
         <form
           className="space-y-2"
@@ -339,5 +343,117 @@ function ImagePanel({ pool, name }: { pool: string; name: string }) {
         {del.isError && <p className="mt-1 text-xs text-rose-600">{del.error.message}</p>}
       </Card>
     </div>
+  );
+}
+
+/** Templates, linked clones, flatten and commit (M2-05). */
+function ClonesCard({
+  pool,
+  name,
+  template,
+  hasBacking,
+  dependents,
+  open,
+}: {
+  pool: string;
+  name: string;
+  template: boolean;
+  hasBacking: boolean;
+  dependents: string[];
+  open: string[];
+}) {
+  const qc = useQueryClient();
+  const pools = useQuery({ queryKey: ["pools"], queryFn: api.pools });
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["image", pool, name] });
+    qc.invalidateQueries({ queryKey: ["pool"] });
+    qc.invalidateQueries({ queryKey: ["images"] });
+  };
+  const toggle = useMutation({ mutationFn: () => api.setTemplate(pool, name, !template), onSuccess: refresh });
+  const [target, setTarget] = useState({ pool, name: "" });
+  const clone = useMutation({
+    mutationFn: () => api.cloneImage(pool, name, target.pool, target.name),
+    onSuccess: (r) => {
+      refresh();
+      navigate(`/storage/${r.pool}/${encodeURIComponent(r.name)}`);
+    },
+  });
+  const flatten = useMutation({ mutationFn: () => api.flattenImage(pool, name) });
+  const commit = useMutation({ mutationFn: () => api.commitImage(pool, name) });
+  const err = toggle.error ?? clone.error ?? flatten.error ?? commit.error;
+  return (
+    <Card title="Templates and linked clones">
+      <div className="space-y-3 text-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          {template ? <Badge tone="blue">template</Badge> : <span className="text-xs text-zinc-500">Not a template.</span>}
+          <Button
+            variant="ghost"
+            disabled={toggle.isPending || (template && dependents.length > 0) || open.length > 0}
+            title={
+              template && dependents.length
+                ? "Linked clones depend on it; it must stay a template"
+                : "A template is never opened writable, so clones built on it stay valid"
+            }
+            onClick={() => toggle.mutate()}
+          >
+            {template ? "Unmark template" : "Make template"}
+          </Button>
+        </div>
+        {template && (
+          <p className="text-xs text-zinc-500">
+            VMs cannot use this image as a writable disk any more; clone it instead. Clones:{" "}
+            {dependents.length ? dependents.join(", ") : "none yet"}.
+          </p>
+        )}
+        {template && (
+          <form
+            className="flex flex-wrap items-end gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              clone.mutate();
+            }}
+          >
+            <Field label="Clone into pool">
+              <select className={inputCls} value={target.pool} onChange={(e) => setTarget({ ...target, pool: e.target.value })}>
+                {pools.data?.filter((p) => !p.readonly).map((p) => (
+                  <option key={p.name}>{p.name}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Name">
+              <input className={inputCls} value={target.name} onChange={(e) => setTarget({ ...target, name: e.target.value })} placeholder="web-01.qcow2" />
+            </Field>
+            <Button type="submit" disabled={!target.name || clone.isPending}>
+              Linked clone
+            </Button>
+          </form>
+        )}
+        {hasBacking && (
+          <div className="flex flex-wrap items-center gap-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+            <Button
+              variant="ghost"
+              disabled={flatten.isPending}
+              title="Copy the backing data into this image so it stands alone (uses more space)"
+              onClick={() => flatten.mutate()}
+            >
+              Flatten{open.length ? " (live)" : ""}
+            </Button>
+            <Button
+              variant="ghost"
+              disabled={commit.isPending || open.length > 0}
+              title="Write this image's changes into its base. Refused when the base is shared, a template or attached to a VM."
+              onClick={() =>
+                window.confirm("Write this image's changes into its backing file? The base is modified permanently.") &&
+                commit.mutate()
+              }
+            >
+              Commit into base
+            </Button>
+            {(flatten.isSuccess || commit.isSuccess) && <span className="text-xs text-zinc-500">Started — see Jobs.</span>}
+          </div>
+        )}
+        {err && <p className="text-xs text-rose-600">{err.message}</p>}
+      </div>
+    </Card>
   );
 }
