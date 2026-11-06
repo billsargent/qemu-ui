@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../api/client";
 import type { BinaryCaps } from "../api/generated/BinaryCaps";
 import type { CacheMode } from "../api/generated/CacheMode";
@@ -8,6 +8,7 @@ import type { Diagnostic } from "../api/generated/Diagnostic";
 import type { DiskBus } from "../api/generated/DiskBus";
 import type { DiskSpec } from "../api/generated/DiskSpec";
 import type { Firmware } from "../api/generated/Firmware";
+import type { LintResult } from "../api/generated/LintResult";
 import type { Media } from "../api/generated/Media";
 import type { NicSpec } from "../api/generated/NicSpec";
 import type { VmSpec } from "../api/generated/VmSpec";
@@ -121,9 +122,17 @@ export function VmEditor({
     queryFn: () => api.compile(debounced, vmId),
     placeholderData: (prev) => prev,
   });
+  // "Check config" (M1-10): QEMU itself validates, without side effects.
+  const lint = useMutation({ mutationFn: () => api.lint(spec, vmId) });
+  const lintFresh = lint.data;
+  useEffect(() => lint.reset(), [debounced]); // eslint-disable-line react-hooks/exhaustive-deps
   const diags = useMemo(
-    () => [...(compiled.data?.diagnostics ?? []), ...(saveError?.diagnostics ?? [])],
-    [compiled.data, saveError],
+    () => [
+      ...(compiled.data?.diagnostics ?? []),
+      ...(saveError?.diagnostics ?? []),
+      ...(lintFresh?.diagnostics.filter((d) => d.rule === "qemu.lint") ?? []),
+    ],
+    [compiled.data, saveError, lintFresh],
   );
   const diagsFor = (prefix: string) => diags.filter((d) => d.field === prefix || d.field.startsWith(`${prefix}.`) || d.field.startsWith(`${prefix}[`));
   const hasErrors = diags.some((d) => d.severity === "error");
@@ -546,7 +555,13 @@ export function VmEditor({
         </div>
       </div>
 
-      <ArgvDrawer compiled={compiled.data} loading={compiled.isFetching} lastRunArgs={lastRunArgs ?? null} diags={diags} />
+      <ArgvDrawer
+        compiled={compiled.data}
+        loading={compiled.isFetching}
+        lastRunArgs={lastRunArgs ?? null}
+        diags={diags}
+        lint={{ run: () => lint.mutate(), pending: lint.isPending, result: lint.data ?? null, error: lint.error?.message ?? null }}
+      />
     </div>
   );
 }
@@ -556,11 +571,13 @@ function ArgvDrawer({
   loading,
   lastRunArgs,
   diags,
+  lint,
 }: {
   compiled?: CompileResponse;
   loading: boolean;
   lastRunArgs: string[] | null;
   diags: Diagnostic[];
+  lint: { run: () => void; pending: boolean; result: LintResult | null; error: string | null };
 }) {
   const [mode, setMode] = useState<"argv" | "diff">("argv");
   const [copied, setCopied] = useState(false);
@@ -634,6 +651,20 @@ function ArgvDrawer({
           </pre>
         )}
         {unpinned.length > 0 && <Diags list={unpinned} />}
+        <div className="mt-3 flex items-center gap-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+          <Button onClick={lint.run} disabled={!args || lint.pending} title="Start QEMU paused with scratch disks and no network ports, then quit">
+            {lint.pending ? "Checking…" : "Check with QEMU"}
+          </Button>
+          {lint.result &&
+            (lint.result.ok ? (
+              <span className="text-xs text-emerald-700 dark:text-emerald-400">
+                ✓ QEMU {lint.result.qemu_version} accepts this configuration ({lint.result.cached ? "cached" : `${lint.result.duration_ms} ms`})
+              </span>
+            ) : (
+              <span className="text-xs text-rose-600">✕ QEMU rejected this configuration — see the messages above.</span>
+            ))}
+          {lint.error && <span className="text-xs text-rose-600">{lint.error}</span>}
+        </div>
         <p className="mt-3 text-xs text-zinc-500">
           Exactly what will run; QEMU is started paused (<code>-S</code>), checked, then resumed.
         </p>

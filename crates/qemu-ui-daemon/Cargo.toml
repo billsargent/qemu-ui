@@ -34,3 +34,4 @@ workspace = true
 
 [dev-dependencies]
 tokio-tungstenite = "0.30.0"
+tower = { version = "0.5.3", features = ["util"] }

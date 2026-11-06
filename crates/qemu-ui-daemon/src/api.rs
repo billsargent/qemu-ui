@@ -24,14 +24,17 @@ pub struct App {
     pub scanner: Arc<Scanner>,
     pub supervisor: Arc<Supervisor>,
     pub consoles: crate::consoles::Consoles,
+    /// Local API token for non-browser clients (see `guard`).
+    pub token: String,
     props: Mutex<HashMap<(String, String), Vec<DeviceProperty>>>,
 }
 
 impl App {
-    pub fn new(scanner: Arc<Scanner>, supervisor: Arc<Supervisor>) -> Arc<Self> {
+    pub fn new(scanner: Arc<Scanner>, supervisor: Arc<Supervisor>, token: String) -> Arc<Self> {
         Arc::new(App {
             scanner,
             supervisor,
+            token,
             consoles: crate::consoles::Consoles::default(),
             props: Mutex::default(),
         })
@@ -60,11 +63,15 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
         .merge(crate::api_vms::routes())
         .merge(crate::consoles::routes())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "no such endpoint".into()) })
+        .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            crate::guard::api_guard,
+        ))
         .with_state(app.clone());
     let router = Router::new()
         .nest("/api/v1", api)
         .merge(crate::consoles::ws_routes().with_state(app));
-    match web_dir {
+    let router = match web_dir {
         Some(dir) if dir.join("index.html").is_file() => {
             let index = dir.join("index.html");
             router.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(index)))
@@ -75,7 +82,8 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
                 "Web UI not built. Run `npm run build` in web/, or use the dev server (`npm run dev`).",
             )
         }),
-    }
+    };
+    router.layer(axum::middleware::from_fn(crate::guard::host_guard))
 }
 
 async fn health() -> Json<serde_json::Value> {

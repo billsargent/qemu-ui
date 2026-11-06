@@ -3,6 +3,7 @@
 import type { CapabilitiesResponse } from "./generated/CapabilitiesResponse";
 import type { CompileResponse } from "./generated/CompileResponse";
 import type { DeviceProperty } from "./generated/DeviceProperty";
+import type { LintResult } from "./generated/LintResult";
 import type { Diagnostic } from "./generated/Diagnostic";
 import type { PoolInfo } from "./generated/PoolInfo";
 import type { ScanStatus } from "./generated/ScanStatus";
@@ -75,6 +76,7 @@ export const api = {
       `/vms/defaults?arch=${encodeURIComponent(arch)}&name=${encodeURIComponent(name)}`,
     ),
   compile: (spec: VmSpec, vmId?: string) => post<CompileResponse>("/vms/compile", { spec, vm_id: vmId }),
+  lint: (spec: VmSpec, vmId?: string) => post<LintResult>("/vms/lint", { spec, vm_id: vmId }),
   serialLog: async (id: string) => {
     const res = await fetch(`/api/v1/vms/${id}/serial-log`);
     return res.ok ? res.text() : "";

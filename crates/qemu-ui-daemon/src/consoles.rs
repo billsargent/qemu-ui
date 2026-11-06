@@ -438,7 +438,13 @@ mod real {
         let rest = url.strip_prefix("http://").unwrap();
         let (host, path) = rest.split_once('/').unwrap();
         let mut s = std::net::TcpStream::connect(host).unwrap();
-        write!(s, "POST /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        let token = "t".repeat(64);
+        write!(
+            s,
+            "POST /{path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).unwrap();
         let body = out.split("\r\n\r\n").nth(1).unwrap_or_default();
@@ -485,7 +491,8 @@ mod real {
             let id = small_vm(&sv, &caps, "console").await;
             sv.start(&id).await.map_err(|e| format!("{e:?}")).unwrap();
 
-            let app = crate::api::App::new(sv.scanner.clone(), sv.clone());
+            let token = "t".repeat(64);
+            let app = crate::api::App::new(sv.scanner.clone(), sv.clone(), token.clone());
             let router = crate::api::router(app, None);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();

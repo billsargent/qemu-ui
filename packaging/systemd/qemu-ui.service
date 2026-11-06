@@ -1,0 +1,28 @@
+# systemd unit for the qemu-ui daemon (Linux).
+#
+# Install as a user service (recommended for a single-user host):
+#   cp qemu-ui.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now qemu-ui
+#   loginctl enable-linger "$USER"     # keep VMs running after logout
+#
+# Adjust ExecStart to where qemu-uid is installed.
+
+[Unit]
+Description=qemu-ui daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/qemu-uid
+Restart=on-failure
+RestartSec=2
+
+# VMs are separate QEMU processes that must outlive restarts of this service
+# (plan.md §3.2). The default KillMode=control-group would kill every VM on
+# `systemctl restart`; with KillMode=process only the daemon itself is
+# signalled, and it re-attaches to running VMs when it starts again.
+# Per-VM scopes with their own resource limits replace this in M6-05.
+KillMode=process
+
+[Install]
+WantedBy=default.target

@@ -18,6 +18,7 @@ use qemu_ui_core::caps::BinaryCaps;
 use qemu_ui_core::compile::{
     self, Compiled, Diagnostic, ResolvedFirmware, ResolvedImage, RunPaths, Severity, VncListen,
 };
+use qemu_ui_core::lint::{self, LintResult};
 use qemu_ui_core::spec::{FirmwareSpec, ImageRef, VmSpec};
 use qemu_ui_core::vm::{VmDetail, VmEvent, VmState, VmSummary, mac_from_bytes, state_from_qmp};
 use qemu_ui_qmp::{Qmp, transport};
@@ -61,6 +62,18 @@ pub struct Supervisor {
     live: Mutex<HashMap<String, Live>>,
     /// Serialises lifecycle operations (start/stop/delete/edit).
     ops: tokio::sync::Mutex<()>,
+    /// Dry-lint results by (binary, lint spec) hash.
+    lint_cache: Mutex<HashMap<String, LintResult>>,
+}
+
+/// What `build` is compiling for.
+enum BuildMode {
+    /// An actual start: creates the NVRAM copy, allocates a VNC endpoint.
+    Run,
+    /// The live argv drawer: no side effects.
+    Preview,
+    /// "Check config": scratch disks, NVRAM, sockets in this directory.
+    Lint(PathBuf),
 }
 
 fn now() -> u64 {
@@ -122,6 +135,7 @@ impl Supervisor {
             events,
             live: Mutex::default(),
             ops: tokio::sync::Mutex::new(()),
+            lint_cache: Mutex::default(),
         }))
     }
 
@@ -349,15 +363,20 @@ impl Supervisor {
 
     // -------------------------------------------------------------- compile
 
-    /// Resolve images and firmware and compile. `run` = for an actual start:
-    /// creates the NVRAM copy and allocates a VNC endpoint.
+    /// Resolve images and firmware and compile, for one of three purposes
+    /// (see [`BuildMode`]).
     async fn build(
         &self,
         id: &str,
         spec: &VmSpec,
         caps: &BinaryCaps,
-        run: bool,
+        mode: &BuildMode,
     ) -> Result<(Compiled, Option<VncInfo>), Vec<Diagnostic>> {
+        let run = matches!(mode, BuildMode::Run);
+        let scratch = match mode {
+            BuildMode::Lint(dir) => Some(dir.as_path()),
+            _ => None,
+        };
         let fail = |field: &str, rule: &str, msg: String| {
             vec![Diagnostic {
                 severity: Severity::Error,
@@ -384,6 +403,45 @@ impl Supervisor {
                         "qemu-img is not installed".into(),
                     ));
                 }
+            };
+            let path = match (scratch, &qemu_img) {
+                // Lint: a blank image of the same format and size, so the real
+                // one (perhaps in use by the running VM) is never opened.
+                (Some(dir), Some(q)) => {
+                    let size = Pools::info(q, &path)
+                        .await
+                        .map(|(_, s, _)| s)
+                        .unwrap_or(1 << 20);
+                    let blank = dir.join(format!("disk{i}"));
+                    let fmt = if format == "qcow2" || format == "raw" {
+                        format.as_str()
+                    } else {
+                        "raw"
+                    };
+                    let ok = crate::probe::command(q)
+                        .args(["create", "-q", "-f", fmt])
+                        .arg(&blank)
+                        .arg(size.max(1 << 20).to_string())
+                        .status()
+                        .await
+                        .is_ok_and(|s| s.success());
+                    if !ok {
+                        return Err(fail(
+                            &format!("disks[{i}]"),
+                            "lint.scratch",
+                            "could not create a scratch image".into(),
+                        ));
+                    }
+                    images.insert(
+                        d.image.clone(),
+                        ResolvedImage {
+                            path: path_str(&blank),
+                            format: fmt.into(),
+                        },
+                    );
+                    continue;
+                }
+                _ => path,
             };
             images.insert(
                 d.image.clone(),
@@ -427,10 +485,13 @@ impl Supervisor {
                         "firmware code file is missing".into(),
                     ));
                 };
-                let vars_path = self.vm_dir(id).join("VARS.qcow2");
+                let vars_path = match scratch {
+                    Some(dir) => dir.join("VARS.qcow2"),
+                    None => self.vm_dir(id).join("VARS.qcow2"),
+                };
                 let vars = match fw.nvram_template.as_ref().and_then(|t| t.resolved.clone()) {
                     Some(template) => {
-                        if run && !vars_path.exists() {
+                        if (run || scratch.is_some()) && !vars_path.exists() {
                             let Some(q) = &qemu_img else {
                                 return Err(fail(
                                     "firmware",
@@ -438,7 +499,9 @@ impl Supervisor {
                                     "qemu-img is not installed".into(),
                                 ));
                             };
-                            let _ = std::fs::create_dir_all(self.vm_dir(id));
+                            if let Some(parent) = vars_path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
                             let out = crate::probe::command(q)
                                 .args(["convert", "-q", "-O", "qcow2"])
                                 .arg(&template)
@@ -472,8 +535,14 @@ impl Supervisor {
             }
         };
 
-        let dir = self.run_dir(id);
+        let dir = scratch
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.run_dir(id));
         let s = |n: &str| path_str(&dir.join(n));
+        let serial_log = match scratch {
+            Some(d) => d.join("serial.log"),
+            None => self.vm_dir(id).join("serial.log"),
+        };
         let vnc = if !spec.display.vnc {
             None
         } else if cfg!(windows) {
@@ -516,7 +585,7 @@ impl Supervisor {
                 qmp: s("qmp.sock"),
                 qmp_user: s("qmp-user.sock"),
                 serial: s("serial.sock"),
-                serial_log: path_str(&self.vm_dir(id).join("serial.log")),
+                serial_log: path_str(&serial_log),
                 pidfile: s("qemu.pid"),
                 vnc: vnc_listen,
             },
@@ -533,13 +602,123 @@ impl Supervisor {
         spec: VmSpec,
     ) -> OpResult<(Compiled, Vec<Diagnostic>)> {
         let (spec, caps) = self.normalise(spec).await?;
-        match self.build(id.unwrap_or("new"), &spec, &caps, false).await {
+        match self
+            .build(id.unwrap_or("new"), &spec, &caps, &BuildMode::Preview)
+            .await
+        {
             Ok((c, _)) => {
                 let w = c.warnings.clone();
                 Ok((c, w))
             }
             Err(d) => Err(OpError::Invalid(d)),
         }
+    }
+
+    /// "Check config" (M1-10): run the argv through QEMU with every side
+    /// effect rewritten away, then quit. Never touches the VM's real disks,
+    /// NVRAM, ports or sockets, so it is safe while the VM runs.
+    pub async fn lint(&self, id: Option<&str>, spec: VmSpec) -> OpResult<LintResult> {
+        let began = std::time::Instant::now();
+        let (spec, caps) = self.normalise(spec).await?;
+        let lspec = lint::lint_spec(&spec);
+        let key = {
+            use sha2::{Digest, Sha256};
+            let json = serde_json::to_string(&lspec).unwrap_or_default();
+            hex::encode(Sha256::digest(
+                format!("{}\n{json}", caps.binary.sha256).as_bytes(),
+            ))
+        };
+        if let Some(mut hit) = self.lint_cache.lock().unwrap().get(&key).cloned() {
+            hit.cached = true;
+            return Ok(hit);
+        }
+
+        let tmp = self
+            .run_root
+            .join(format!("lint-{:06x}", rand::random::<u32>() & 0xff_ffff));
+        std::fs::create_dir_all(&tmp).map_err(|e| OpError::Failed(e.into()))?;
+        let result = self.lint_in(id.unwrap_or("new"), &lspec, &caps, &tmp).await;
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (ok, diagnostics) = result?;
+        let res = LintResult {
+            ok,
+            diagnostics,
+            qemu_version: caps.qemu_version.to_string(),
+            duration_ms: began.elapsed().as_millis() as u64,
+            cached: false,
+        };
+        let mut cache = self.lint_cache.lock().unwrap();
+        if cache.len() > 256 {
+            cache.clear();
+        }
+        cache.insert(key, res.clone());
+        Ok(res)
+    }
+
+    async fn lint_in(
+        &self,
+        id: &str,
+        spec: &VmSpec,
+        caps: &BinaryCaps,
+        tmp: &Path,
+    ) -> OpResult<(bool, Vec<Diagnostic>)> {
+        let compiled = match self
+            .build(id, spec, caps, &BuildMode::Lint(tmp.to_path_buf()))
+            .await
+        {
+            Ok((c, _)) => c,
+            Err(d) => return Ok((false, d)),
+        };
+        let mut child = crate::probe::command(Path::new(&compiled.program))
+            .args(&compiled.args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| OpError::Failed(e.into()))?;
+        let sock = tmp.join("qmp.sock");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let qmp = loop {
+            if let Ok(q) = Qmp::connect_unix(&sock).await {
+                break Some(q);
+            }
+            if matches!(child.try_wait(), Ok(Some(_))) || tokio::time::Instant::now() >= deadline {
+                break None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        let mut warnings = compiled.warnings.clone();
+        let ok = match qmp {
+            Some(q) => {
+                let ok = q
+                    .execute("query-status", None)
+                    .await
+                    .is_ok_and(|v| v["status"] == "prelaunch");
+                let _ = q
+                    .execute_with_timeout("quit", None, Duration::from_secs(5))
+                    .await;
+                ok
+            }
+            None => false,
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        let _ = child.kill().await;
+        let mut stderr = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            use tokio::io::AsyncReadExt;
+            let _ =
+                tokio::time::timeout(Duration::from_secs(2), e.read_to_string(&mut stderr)).await;
+        }
+        let mut found = lint::diagnostics_from_stderr(&stderr, spec);
+        if !ok && !found.iter().any(|d| d.severity == Severity::Error) {
+            found.push(Diagnostic {
+                severity: Severity::Error,
+                field: String::new(),
+                rule: "qemu.lint".into(),
+                message: "QEMU did not start with this configuration".into(),
+            });
+        }
+        warnings.extend(found);
+        Ok((ok, warnings))
     }
 
     // ------------------------------------------------------------ lifecycle
@@ -554,7 +733,7 @@ impl Supervisor {
             serde_json::from_str(&row.spec_json).map_err(|e| OpError::Failed(e.into()))?;
         let caps = self.caps_for(&spec.arch).await?;
         let (compiled, vnc) = self
-            .build(id, &spec, &caps, true)
+            .build(id, &spec, &caps, &BuildMode::Run)
             .await
             .map_err(OpError::Invalid)?;
 
@@ -1330,5 +1509,92 @@ mod lifecycle {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         panic!("condition not met");
+    }
+}
+
+/// "Check config" against a real QEMU, including while the VM runs: no lock,
+/// port or socket conflicts; errors map to fields; results are cached.
+#[cfg(test)]
+mod dry_lint {
+    use super::test_support::*;
+    use super::*;
+    use qemu_ui_core::spec::*;
+
+    #[test]
+    fn lint_is_side_effect_free_and_maps_errors() {
+        let (Some(qemu), Some(img)) = (find("qemu-system-x86_64"), find("qemu-img")) else {
+            eprintln!("skipping: qemu not found");
+            return;
+        };
+        let data = short_data_dir("lint");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let caps = host_caps(&qemu, &img).await;
+            let sv = make(&data, &caps).await;
+            let id = small_vm(&sv, &caps, "linted").await;
+            // Give it a port forward the lint must not try to bind again.
+            let mut spec = sv.detail(&id).ok().unwrap().spec;
+            let NicBackend::User { forwards } = &mut spec.nics[0].backend;
+            forwards.push(PortForward {
+                proto: "tcp".into(),
+                host_addr: "127.0.0.1".into(),
+                host_port: 45222,
+                guest_port: 22,
+            });
+            sv.update(&id, spec.clone())
+                .await
+                .map_err(|e| format!("{e:?}"))
+                .unwrap();
+            sv.start(&id).await.map_err(|e| format!("{e:?}")).unwrap();
+
+            // Same config, VM running: must pass.
+            let r = sv
+                .lint(Some(&id), spec.clone())
+                .await
+                .map_err(|e| format!("{e:?}"))
+                .unwrap();
+            assert!(r.ok, "{:#?}", r.diagnostics);
+            assert!(!r.cached);
+            let again = sv
+                .lint(Some(&id), spec.clone())
+                .await
+                .map_err(|e| format!("{e:?}"))
+                .unwrap();
+            assert!(again.cached);
+
+            // A bad passthrough option: QEMU rejects it, pinned to the token.
+            let mut bad = spec.clone();
+            bad.passthrough = vec!["-global".into(), "ICH9-LPC.no-such-property=1".into()];
+            let r = sv
+                .lint(Some(&id), bad)
+                .await
+                .map_err(|e| format!("{e:?}"))
+                .unwrap();
+            assert!(!r.ok);
+            assert!(
+                r.diagnostics
+                    .iter()
+                    .any(|d| d.field == "passthrough[1]" && d.severity == Severity::Error),
+                "{:#?}",
+                r.diagnostics
+            );
+
+            // The running VM is untouched.
+            assert_eq!(sv.detail(&id).ok().unwrap().summary.state, VmState::Running);
+            sv.force_stop(&id)
+                .await
+                .map_err(|e| format!("{e:?}"))
+                .unwrap();
+            wait_state(&sv, &id, VmState::Stopped).await;
+            // No scratch directories are left behind.
+            let leftovers: Vec<_> = std::fs::read_dir(data.join("r"))
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().starts_with("lint-"))
+                .collect();
+            assert!(leftovers.is_empty());
+        });
+        drop(rt);
+        let _ = std::fs::remove_dir_all(&data);
     }
 }

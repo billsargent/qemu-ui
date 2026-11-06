@@ -4,6 +4,7 @@ mod api;
 mod api_vms;
 mod consoles;
 mod discovery;
+mod guard;
 mod images;
 mod probe;
 mod procs;
@@ -85,7 +86,8 @@ async fn main() -> Result<()> {
         let d = std::env::current_dir().ok()?.join("web").join("dist");
         d.is_dir().then_some(d)
     });
-    let app = api::router(api::App::new(scanner, supervisor), web_dir);
+    let token = guard::load_or_create_token(&data_dir)?;
+    let app = api::router(api::App::new(scanner, supervisor, token), web_dir);
 
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
