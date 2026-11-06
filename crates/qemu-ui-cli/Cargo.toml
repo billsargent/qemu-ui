@@ -6,8 +6,13 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }
+dirs = "7.0.0"
 serde_json = "1.0.154"
 ureq = { version = "3.5.1", default-features = false, features = ["json"] }
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "qemu-ui"
+path = "src/main.rs"
