@@ -55,7 +55,8 @@ struct Live {
 pub struct Supervisor {
     pub store: Store,
     pub scanner: Arc<Scanner>,
-    pub pools: Pools,
+    pub pools: Arc<Pools>,
+    pub jobs: Arc<crate::jobs::Jobs>,
     data_dir: PathBuf,
     run_root: PathBuf,
     events: broadcast::Sender<VmEvent>,
@@ -126,10 +127,12 @@ impl Supervisor {
             )
         })?;
         let (events, _) = broadcast::channel(1024);
+        let jobs = crate::jobs::Jobs::new(store.clone(), events.clone(), data_dir.join("jobs"))?;
         Ok(Arc::new(Supervisor {
+            pools: Arc::new(Pools::new(data_dir, store.clone())?),
+            jobs,
             store,
             scanner,
-            pools: Pools::new(data_dir)?,
             data_dir: data_dir.to_path_buf(),
             run_root,
             events,
@@ -141,6 +144,47 @@ impl Supervisor {
 
     pub fn subscribe(&self) -> broadcast::Receiver<VmEvent> {
         self.events.subscribe()
+    }
+
+    /// Which VMs reference each image (by spec), and which have it open now
+    /// (an active run whose spec lists it).
+    pub fn image_users(
+        &self,
+    ) -> (
+        HashMap<ImageRef, Vec<String>>,
+        HashMap<ImageRef, Vec<String>>,
+    ) {
+        let mut used: HashMap<ImageRef, Vec<String>> = HashMap::new();
+        let mut open: HashMap<ImageRef, Vec<String>> = HashMap::new();
+        for row in self.store.list_vms().unwrap_or_default() {
+            if let Ok(spec) = serde_json::from_str::<VmSpec>(&row.spec_json) {
+                for d in &spec.disks {
+                    used.entry(d.image.clone())
+                        .or_default()
+                        .push(row.name.clone());
+                }
+            }
+            let run = self
+                .store
+                .last_run(&row.id)
+                .ok()
+                .flatten()
+                .filter(|r| r.ended_at.is_none());
+            if let Some(run) = run
+                && let Ok(spec) = serde_json::from_str::<VmSpec>(&run.spec_json)
+            {
+                for d in &spec.disks {
+                    open.entry(d.image.clone())
+                        .or_default()
+                        .push(row.name.clone());
+                }
+            }
+        }
+        for v in used.values_mut().chain(open.values_mut()) {
+            v.sort();
+            v.dedup();
+        }
+        (used, open)
     }
 
     fn vm_dir(&self, id: &str) -> PathBuf {
@@ -200,7 +244,7 @@ impl Supervisor {
             .ok_or_else(|| anyhow!("no qemu-system-{arch} binary is installed"))
     }
 
-    async fn qemu_img(&self) -> Option<PathBuf> {
+    pub async fn qemu_img(&self) -> Option<PathBuf> {
         let caps = self.scanner.caps.read().await;
         caps.as_ref()?
             .qemu_img
@@ -392,7 +436,9 @@ impl Supervisor {
                 continue;
             }; // compile reports it
             let format = match &qemu_img {
-                Some(q) => Pools::info(q, &path)
+                Some(q) => self
+                    .pools
+                    .info(q, &path)
                     .await
                     .map(|(f, _, _)| f)
                     .unwrap_or_else(|_| "raw".into()),
@@ -408,7 +454,9 @@ impl Supervisor {
                 // Lint: a blank image of the same format and size, so the real
                 // one (perhaps in use by the running VM) is never opened.
                 (Some(dir), Some(q)) => {
-                    let size = Pools::info(q, &path)
+                    let size = self
+                        .pools
+                        .info(q, &path)
                         .await
                         .map(|(_, s, _)| s)
                         .unwrap_or(1 << 20);

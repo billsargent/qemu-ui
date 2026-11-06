@@ -5,7 +5,11 @@ import type { CompileResponse } from "./generated/CompileResponse";
 import type { DeviceProperty } from "./generated/DeviceProperty";
 import type { LintResult } from "./generated/LintResult";
 import type { Diagnostic } from "./generated/Diagnostic";
+import type { CheckResult } from "./generated/CheckResult";
+import type { ImageDetail } from "./generated/ImageDetail";
+import type { Job } from "./generated/Job";
 import type { PoolInfo } from "./generated/PoolInfo";
+import type { PoolSummary } from "./generated/PoolSummary";
 import type { ScanStatus } from "./generated/ScanStatus";
 import type { VmDetail } from "./generated/VmDetail";
 import type { VmEvent } from "./generated/VmEvent";
@@ -83,9 +87,43 @@ export const api = {
   },
   consoleTicket: (id: string, kind: "vnc" | "serial") => post<ConsoleTicket>(`/vms/${id}/consoles/${kind}/ticket`),
 
-  pool: (name = "default") => request<PoolInfo>(`/pools/${name}`),
-  createImage: (name: string, sizeBytes: number, format = "qcow2") =>
-    post<void>("/pools/default/images", { name, size_bytes: sizeBytes, format }),
+  pools: () => request<PoolSummary[]>("/pools"),
+  addPool: (name: string, path: string, quotaBytes: number | null) =>
+    post<void>("/pools", { name, path, quota_bytes: quotaBytes }),
+  updatePool: (name: string, quotaBytes: number | null, readonly: boolean) =>
+    request<void>(`/pools/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: JSON.stringify({ quota_bytes: quotaBytes, readonly }),
+    }),
+  removePool: (name: string) => request<void>(`/pools/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  pool: (name = "default") => request<PoolInfo>(`/pools/${encodeURIComponent(name)}`),
+  /** Every image in every pool. */
+  allImages: async () => {
+    const pools = await request<PoolSummary[]>("/pools");
+    const infos = await Promise.all(pools.map((p) => request<PoolInfo>(`/pools/${encodeURIComponent(p.name)}`)));
+    return infos.flatMap((i) => i.images);
+  },
+  image: (pool: string, name: string) =>
+    request<ImageDetail>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}`),
+  createImage: (name: string, sizeBytes: number, format = "qcow2", pool = "default") =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/images`, { name, size_bytes: sizeBytes, format }),
+  deleteImage: (pool: string, name: string) =>
+    request<void>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  checkImage: (pool: string, name: string) =>
+    post<CheckResult>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/check`),
+  convertImage: (pool: string, name: string, targetPool: string, targetName: string, format: string) =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/convert`, {
+      target_pool: targetPool,
+      target_name: targetName,
+      format,
+    }),
+
+  jobs: () => request<Job[]>("/jobs"),
+  cancelJob: (id: string) => post<void>(`/jobs/${id}/cancel`),
+  jobLog: async (id: string) => {
+    const res = await fetch(`/api/v1/jobs/${id}/log`);
+    return res.ok ? res.text() : "";
+  },
 };
 
 export function wsUrl(path: string): string {

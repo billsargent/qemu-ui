@@ -65,7 +65,78 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX event_vm ON event(vm_id, seq);
     "#,
+    // 3: storage pools and jobs (M2)
+    r#"
+    CREATE TABLE pool (
+        name        TEXT NOT NULL PRIMARY KEY,
+        path        TEXT NOT NULL UNIQUE,
+        quota_bytes INTEGER,
+        readonly    INTEGER NOT NULL DEFAULT 0,
+        created_at  INTEGER NOT NULL
+    );
+    CREATE TABLE job (
+        id          TEXT NOT NULL PRIMARY KEY,
+        kind        TEXT NOT NULL,
+        title       TEXT NOT NULL,
+        status      TEXT NOT NULL,
+        progress    REAL,
+        message     TEXT,
+        error       TEXT,
+        target_json TEXT NOT NULL,
+        log_path    TEXT,
+        created_at  INTEGER NOT NULL,
+        started_at  INTEGER,
+        finished_at INTEGER
+    );
+    CREATE INDEX job_created ON job(created_at);
+    "#,
 ];
+
+/// A pool row.
+#[derive(Debug, Clone)]
+pub struct PoolRow {
+    pub name: String,
+    pub path: String,
+    pub quota_bytes: Option<u64>,
+    pub readonly: bool,
+}
+
+/// A job row (see `qemu_ui_core::storage::Job`).
+#[derive(Debug, Clone)]
+pub struct JobRow {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub status: String,
+    pub progress: Option<f64>,
+    pub message: Option<String>,
+    pub error: Option<String>,
+    pub target_json: String,
+    pub log_path: Option<String>,
+    pub created_at: u64,
+    pub started_at: Option<u64>,
+    pub finished_at: Option<u64>,
+}
+
+const JOB_COLS: &str = "id, kind, title, status, progress, message, error, target_json, log_path, \
+                        created_at, started_at, finished_at";
+
+fn job_row(r: &rusqlite::Row) -> rusqlite::Result<JobRow> {
+    Ok(JobRow {
+        id: r.get(0)?,
+        kind: r.get(1)?,
+        title: r.get(2)?,
+        status: r.get(3)?,
+        progress: r.get(4)?,
+        message: r.get(5)?,
+        error: r.get(6)?,
+        target_json: r.get(7)?,
+        log_path: r.get(8)?,
+        created_at: r.get::<_, i64>(9)? as u64,
+        started_at: r.get::<_, Option<i64>>(10)?.map(|v| v as u64),
+        finished_at: r.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+    })
+}
 
 /// A VM row.
 #[derive(Debug, Clone)]
@@ -427,6 +498,125 @@ impl Store {
     }
 }
 
+impl Store {
+    // ----------------------------------------------------------------- pools
+
+    pub fn insert_pool(&self, p: &PoolRow, now: u64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO pool (name, path, quota_bytes, readonly, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![p.name, p.path, p.quota_bytes.map(|q| q as i64), p.readonly, now as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn update_pool(&self, name: &str, quota_bytes: Option<u64>, readonly: bool) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE pool SET quota_bytes = ?2, readonly = ?3 WHERE name = ?1",
+                params![name, quota_bytes.map(|q| q as i64), readonly],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn delete_pool(&self, name: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM pool WHERE name = ?1", [name])
+                .map(|_| ())
+        })
+    }
+
+    pub fn list_pools(&self) -> Result<Vec<PoolRow>> {
+        self.with(|c| {
+            let mut st =
+                c.prepare("SELECT name, path, quota_bytes, readonly FROM pool ORDER BY name")?;
+            st.query_map([], |r| {
+                Ok(PoolRow {
+                    name: r.get(0)?,
+                    path: r.get(1)?,
+                    quota_bytes: r.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                    readonly: r.get(3)?,
+                })
+            })?
+            .collect()
+        })
+    }
+
+    // ------------------------------------------------------------------ jobs
+
+    pub fn insert_job(&self, j: &JobRow) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO job (id, kind, title, status, target_json, log_path, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    j.id,
+                    j.kind,
+                    j.title,
+                    j.status,
+                    j.target_json,
+                    j.log_path,
+                    j.created_at as i64
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn update_job(&self, j: &JobRow) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE job SET status = ?2, progress = ?3, message = ?4, error = ?5, \
+                 started_at = ?6, finished_at = ?7 WHERE id = ?1",
+                params![
+                    j.id,
+                    j.status,
+                    j.progress,
+                    j.message,
+                    j.error,
+                    j.started_at.map(|v| v as i64),
+                    j.finished_at.map(|v| v as i64)
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn get_job(&self, id: &str) -> Result<Option<JobRow>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {JOB_COLS} FROM job WHERE id = ?1"),
+                [id],
+                job_row,
+            )
+            .optional()
+        })
+    }
+
+    pub fn recent_jobs(&self, limit: u32) -> Result<Vec<JobRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {JOB_COLS} FROM job ORDER BY created_at DESC, rowid DESC LIMIT ?1"
+            ))?;
+            st.query_map([limit], job_row)?.collect()
+        })
+    }
+
+    /// Mark jobs that were queued or running when the daemon stopped.
+    pub fn interrupt_unfinished_jobs(&self, now: u64) -> Result<usize> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE job SET status = 'interrupted', finished_at = ?1, \
+                 error = 'the daemon stopped while this job was running' \
+                 WHERE status IN ('queued', 'running')",
+                [now as i64],
+            )
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +637,61 @@ mod tests {
         s.put_kv("k", "v").unwrap();
         s.put_kv("k", "w").unwrap();
         assert_eq!(s.get_kv("k").unwrap().as_deref(), Some("w"));
+    }
+
+    #[test]
+    fn pools_and_jobs() {
+        let s = Store::memory().unwrap();
+        s.insert_pool(
+            &PoolRow {
+                name: "big".into(),
+                path: "/big".into(),
+                quota_bytes: Some(10),
+                readonly: false,
+            },
+            1,
+        )
+        .unwrap();
+        assert!(
+            s.insert_pool(
+                &PoolRow {
+                    name: "dup".into(),
+                    path: "/big".into(),
+                    quota_bytes: None,
+                    readonly: false
+                },
+                1
+            )
+            .is_err(),
+            "unique path"
+        );
+        s.update_pool("big", None, true).unwrap();
+        let p = &s.list_pools().unwrap()[0];
+        assert_eq!((p.quota_bytes, p.readonly), (None, true));
+
+        let mut j = JobRow {
+            id: "j1".into(),
+            kind: "image.create".into(),
+            title: "t".into(),
+            status: "queued".into(),
+            progress: None,
+            message: None,
+            error: None,
+            target_json: "{}".into(),
+            log_path: None,
+            created_at: 5,
+            started_at: None,
+            finished_at: None,
+        };
+        s.insert_job(&j).unwrap();
+        j.status = "running".into();
+        j.progress = Some(0.5);
+        s.update_job(&j).unwrap();
+        assert_eq!(s.get_job("j1").unwrap().unwrap().progress, Some(0.5));
+        assert_eq!(s.interrupt_unfinished_jobs(9).unwrap(), 1);
+        assert_eq!(s.recent_jobs(10).unwrap()[0].status, "interrupted");
+        s.delete_pool("big").unwrap();
+        assert!(s.list_pools().unwrap().is_empty());
     }
 
     #[test]

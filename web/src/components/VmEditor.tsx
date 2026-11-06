@@ -112,7 +112,7 @@ export function VmEditor({
   useEffect(() => setSpec(initial), [initial]);
 
   const caps = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
-  const pool = useQuery({ queryKey: ["pool", "default"], queryFn: () => api.pool() });
+  const pool = useQuery({ queryKey: ["images", "all"], queryFn: api.allImages });
   const bin: BinaryCaps | undefined = caps.data?.caps?.binaries.find((b) => b.arch === spec.arch);
 
   // Live argv (M1-14): compile on every change, debounced.
@@ -151,7 +151,7 @@ export function VmEditor({
   const displayDevices = (bin?.devices ?? []).filter((d) => d.category === "Display");
   const nicModels = (bin?.devices ?? []).filter((d) => d.category === "Network");
   const firmware = firmwareFor(caps.data?.caps?.firmware ?? [], spec.arch, spec.machine.type);
-  const images = pool.data?.images ?? [];
+  const images = pool.data ?? [];
 
   const save = async () => {
     setSaveError(null);
@@ -313,7 +313,7 @@ export function VmEditor({
                   disks: [
                     ...spec.disks,
                     {
-                      image: { pool: "default", name: images[0]?.name ?? "" },
+                      image: { pool: images[0]?.pool ?? "default", name: images[0]?.name ?? "" },
                       bus: "virtio",
                       media: "disk",
                       readonly: false,
@@ -336,10 +336,18 @@ export function VmEditor({
               <div key={i} className="rounded border border-zinc-200 p-2 dark:border-zinc-800">
                 <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
                   <Field label="Image">
-                    <select className={inputCls} value={d.image.name} onChange={(e) => updateDisk(i, { image: { pool: "default", name: e.target.value } })}>
+                    <select
+                      className={inputCls}
+                      value={d.image.name ? `${d.image.pool}/${d.image.name}` : ""}
+                      onChange={(e) => {
+                        const [p, ...rest] = e.target.value.split("/");
+                        updateDisk(i, { image: { pool: p, name: rest.join("/") } });
+                      }}
+                    >
                       <option value="">— choose —</option>
                       {images.map((img) => (
-                        <option key={img.name} value={img.name}>
+                        <option key={`${img.pool}/${img.name}`} value={`${img.pool}/${img.name}`}>
+                          {img.pool === "default" ? "" : `${img.pool} / `}
                           {img.name} ({img.format})
                         </option>
                       ))}
