@@ -143,6 +143,40 @@ impl Jobs {
         F: FnOnce(Arc<JobCtx>) -> Fut + Send + 'static,
         Fut: Future<Output = Result<String>> + Send + 'static,
     {
+        self.spawn_with(kind, title, target, cancellable, true, body)
+    }
+
+    /// Start a job immediately, without taking one of the `MAX_RUNNING`
+    /// slots. For jobs that mostly wait on something external (a browser
+    /// upload that may pause for hours) and must not block other work.
+    pub fn spawn_unthrottled<F, Fut>(
+        self: &Arc<Self>,
+        kind: &str,
+        title: &str,
+        target: Value,
+        cancellable: bool,
+        body: F,
+    ) -> Job
+    where
+        F: FnOnce(Arc<JobCtx>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<String>> + Send + 'static,
+    {
+        self.spawn_with(kind, title, target, cancellable, false, body)
+    }
+
+    fn spawn_with<F, Fut>(
+        self: &Arc<Self>,
+        kind: &str,
+        title: &str,
+        target: Value,
+        cancellable: bool,
+        throttled: bool,
+        body: F,
+    ) -> Job
+    where
+        F: FnOnce(Arc<JobCtx>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<String>> + Send + 'static,
+    {
         let id = format!("{:012x}", rand::random::<u64>() & 0xffff_ffff_ffff);
         let log = self.logs_dir.join(format!("{id}.log"));
         let row = JobRow {
@@ -182,9 +216,13 @@ impl Jobs {
                 log: Some(log),
             });
             // Wait for a slot, unless cancelled while queued.
-            let permit = tokio::select! {
-                p = jobs.slots.clone().acquire_owned() => p.ok(),
-                _ = ctx.cancelled() => None,
+            let permit = if throttled {
+                tokio::select! {
+                    p = jobs.slots.clone().acquire_owned() => p.ok().map(Some),
+                    _ = ctx.cancelled() => None,
+                }
+            } else {
+                Some(None)
             };
             let outcome: Result<String> = if permit.is_none() {
                 Err(anyhow!("cancelled"))

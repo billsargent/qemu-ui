@@ -2,6 +2,7 @@
 
 mod api;
 mod api_storage;
+mod api_upload;
 mod api_vms;
 mod consoles;
 mod discovery;
