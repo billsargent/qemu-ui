@@ -146,6 +146,43 @@ impl Supervisor {
         self.events.subscribe()
     }
 
+    /// Running VMs that have `image` open: (VM name, QMP session, format node
+    /// name, attached read-only). Uses the spec the run was started with, so
+    /// the node name matches the live process even if the saved spec changed.
+    pub fn live_disks(&self, image: &ImageRef) -> Vec<(String, Qmp, String, bool)> {
+        let mut out = Vec::new();
+        for row in self.store.list_vms().unwrap_or_default() {
+            let Some(run) = self
+                .store
+                .last_run(&row.id)
+                .ok()
+                .flatten()
+                .filter(|r| r.ended_at.is_none())
+            else {
+                continue;
+            };
+            let Ok(spec) = serde_json::from_str::<VmSpec>(&run.spec_json) else {
+                continue;
+            };
+            let Some(qmp) = self
+                .live
+                .lock()
+                .unwrap()
+                .get(&row.id)
+                .and_then(|l| l.qmp.clone())
+            else {
+                continue;
+            };
+            for (i, d) in spec.disks.iter().enumerate() {
+                if &d.image == image {
+                    let ro = d.readonly || d.media == qemu_ui_core::spec::Media::Cdrom;
+                    out.push((row.name.clone(), qmp.clone(), format!("qui-disk{i}"), ro));
+                }
+            }
+        }
+        out
+    }
+
     /// Which VMs reference each image (by spec), and which have it open now
     /// (an active run whose spec lists it).
     pub fn image_users(

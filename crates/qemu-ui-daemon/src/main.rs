@@ -6,6 +6,7 @@ mod api_vms;
 mod consoles;
 mod discovery;
 mod guard;
+mod image_ops;
 mod images;
 mod jobs;
 mod probe;
