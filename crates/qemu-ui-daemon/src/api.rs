@@ -23,6 +23,7 @@ use crate::supervisor::Supervisor;
 pub struct App {
     pub scanner: Arc<Scanner>,
     pub supervisor: Arc<Supervisor>,
+    pub consoles: crate::consoles::Consoles,
     props: Mutex<HashMap<(String, String), Vec<DeviceProperty>>>,
 }
 
@@ -31,6 +32,7 @@ impl App {
         Arc::new(App {
             scanner,
             supervisor,
+            consoles: crate::consoles::Consoles::default(),
             props: Mutex::default(),
         })
     }
@@ -56,9 +58,12 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
             get(device_properties),
         )
         .merge(crate::api_vms::routes())
+        .merge(crate::consoles::routes())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "no such endpoint".into()) })
-        .with_state(app);
-    let router = Router::new().nest("/api/v1", api);
+        .with_state(app.clone());
+    let router = Router::new()
+        .nest("/api/v1", api)
+        .merge(crate::consoles::ws_routes().with_state(app));
     match web_dir {
         Some(dir) if dir.join("index.html").is_file() => {
             let index = dir.join("index.html");

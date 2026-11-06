@@ -5,6 +5,8 @@ import tailwindcss from "@tailwindcss/vite";
 // The dev server proxies the API to a locally running qemu-uid.
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // noVNC uses top-level await.
+  build: { target: "es2022" },
   server: {
     port: 5173,
     proxy: {

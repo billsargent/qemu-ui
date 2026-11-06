@@ -48,20 +48,39 @@ export function Button({
   onClick,
   disabled,
   variant = "default",
+  title,
+  type = "button",
 }: {
   children: ReactNode;
   onClick?: () => void;
   disabled?: boolean;
-  variant?: "default" | "ghost";
+  variant?: "default" | "ghost" | "danger";
+  title?: string;
+  type?: "button" | "submit";
 }) {
   const base = "rounded px-2.5 py-1 text-xs font-medium disabled:opacity-50";
   const v =
     variant === "ghost"
       ? "hover:bg-zinc-100 dark:hover:bg-zinc-800"
-      : "bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300";
+      : variant === "danger"
+        ? "bg-rose-600 text-white hover:bg-rose-500"
+        : "bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300";
   return (
-    <button type="button" className={`${base} ${v}`} onClick={onClick} disabled={disabled}>
+    <button type={type} className={`${base} ${v}`} onClick={onClick} disabled={disabled} title={title}>
       {children}
     </button>
+  );
+}
+
+export const inputCls =
+  "rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-900 disabled:opacity-50";
+
+export function Field({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
+  return (
+    <label className="flex flex-col gap-1 text-xs">
+      <span className="font-medium text-zinc-600 dark:text-zinc-400">{label}</span>
+      {children}
+      {hint && <span className="text-zinc-500">{hint}</span>}
+    </label>
   );
 }

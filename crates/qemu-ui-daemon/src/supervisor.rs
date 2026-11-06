@@ -241,13 +241,20 @@ impl Supervisor {
     }
 
     /// VNC endpoint of the active run, for the console proxy.
-    #[cfg_attr(not(test), allow(dead_code))] // consumed by the VNC proxy (M1-11)
     pub fn vnc_of(&self, id: &str) -> Option<VncInfo> {
         let run = self.store.last_run(id).ok().flatten()?;
         if run.ended_at.is_some() {
             return None;
         }
         serde_json::from_str(run.vnc_json.as_deref()?).ok()
+    }
+
+    /// Serial chardev socket of the active run, for the console hub.
+    pub fn serial_socket(&self, id: &str) -> Option<PathBuf> {
+        let run = self.store.last_run(id).ok().flatten()?;
+        run.ended_at
+            .is_none()
+            .then(|| PathBuf::from(&run.run_dir).join("serial.sock"))
     }
 
     pub fn serial_log(&self, id: &str) -> PathBuf {
@@ -473,7 +480,18 @@ impl Supervisor {
             let port = if run {
                 free_vnc_port().map_err(|e| fail("display.vnc", "vnc.port", e.to_string()))?
             } else {
-                5900
+                // Preview: show the port of the last run so the "changes since
+                // last start" diff is not polluted by port allocation.
+                self.store
+                    .last_run(id)
+                    .ok()
+                    .flatten()
+                    .and_then(|r| serde_json::from_str::<VncInfo>(r.vnc_json.as_deref()?).ok())
+                    .and_then(|v| match v {
+                        VncInfo::Tcp { port, .. } => Some(port),
+                        VncInfo::Unix { .. } => None,
+                    })
+                    .unwrap_or(5900)
             };
             Some(VncInfo::Tcp {
                 port,
@@ -998,13 +1016,14 @@ fn random_password() -> String {
 /// Lifecycle against a real QEMU: create → start → pause → resume →
 /// "daemon restart" (drop the runtime, as a killed daemon would) → reattach
 /// → force-stop → start → external kill → crashed. Skipped without QEMU.
+/// Helpers shared by tests that need a real QEMU.
 #[cfg(test)]
-mod lifecycle {
+pub(crate) mod test_support {
     use super::*;
     use qemu_ui_core::caps::{HostCaps, HostInfo};
     use qemu_ui_core::spec::*;
 
-    fn find(exe: &str) -> Option<PathBuf> {
+    pub fn find(exe: &str) -> Option<PathBuf> {
         let exe = if cfg!(windows) {
             format!("{exe}.exe")
         } else {
@@ -1020,7 +1039,7 @@ mod lifecycle {
         dirs.into_iter().map(|d| d.join(&exe)).find(|p| p.is_file())
     }
 
-    async fn host_caps(qemu: &Path, img: &Path) -> HostCaps {
+    pub async fn host_caps(qemu: &Path, img: &Path) -> HostCaps {
         let host = crate::scan::host_info();
         let bin = qemu_ui_core::caps::Binary {
             id: "t".into(),
@@ -1052,14 +1071,14 @@ mod lifecycle {
         }
     }
 
-    async fn make(data: &Path, caps: &HostCaps) -> Arc<Supervisor> {
+    pub async fn make(data: &Path, caps: &HostCaps) -> Arc<Supervisor> {
         let store = Store::open(&data.join("t.db")).unwrap();
         let scanner = Scanner::new(store.clone(), vec![], vec![]);
         *scanner.caps.write().await = Some(caps.clone());
         Supervisor::new(store, scanner, data, data.join("r")).unwrap()
     }
 
-    async fn wait_state(sv: &Supervisor, id: &str, want: VmState) -> VmSummary {
+    pub async fn wait_state(sv: &Supervisor, id: &str, want: VmState) -> VmSummary {
         for _ in 0..100 {
             let s = sv.detail(id).ok().unwrap().summary;
             if s.state == want {
@@ -1072,6 +1091,59 @@ mod lifecycle {
             sv.detail(id).ok().map(|d| d.summary)
         );
     }
+
+    /// A short data dir (unix socket paths are limited to 108 bytes).
+    pub fn short_data_dir(tag: &str) -> PathBuf {
+        let base = if cfg!(windows) {
+            std::env::temp_dir()
+        } else {
+            PathBuf::from("/tmp")
+        };
+        let data = base.join(format!("qui-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        data
+    }
+
+    /// Create a small TCG VM with one disk; returns its id.
+    pub async fn small_vm(sv: &Supervisor, caps: &HostCaps, name: &str) -> String {
+        let img = ImageRef {
+            pool: "default".into(),
+            name: format!("{name}.qcow2"),
+        };
+        let qemu_img = PathBuf::from(&caps.qemu_img.as_ref().unwrap().path);
+        sv.pools
+            .create(&qemu_img, &img, 32 << 20, "qcow2")
+            .await
+            .unwrap();
+        let (mut spec, _) = qemu_ui_core::vm::default_spec(name, &caps.binaries[0]);
+        spec.accel = "tcg".into();
+        spec.cpu.model = Some("qemu64".into());
+        spec.memory.size_mib = 128;
+        spec.disks.push(DiskSpec {
+            image: img,
+            bus: DiskBus::Virtio,
+            media: Media::Disk,
+            readonly: false,
+            boot_index: Some(1),
+            cache: CacheMode::None,
+            aio: None,
+            discard: true,
+        });
+        sv.create(spec)
+            .await
+            .map_err(|e| format!("{e:?}"))
+            .unwrap()
+            .summary
+            .id
+    }
+}
+
+#[cfg(test)]
+mod lifecycle {
+    use super::test_support::*;
+    use super::*;
+    use qemu_ui_core::spec::*;
 
     #[test]
     fn full_lifecycle_with_reattach() {
