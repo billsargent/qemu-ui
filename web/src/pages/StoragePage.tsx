@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import type { PoolSummary } from "../api/generated/PoolSummary";
 import { Badge, Button, Card, Field, inputCls } from "../components/ui";
 import { navigate } from "../router";
+import { Uploader } from "../components/Uploader";
 import { ProgressBar } from "./JobsPage";
 
 export function formatBytes(n: number): string {
@@ -31,7 +32,14 @@ export default function StoragePage({ pool, image }: { pool?: string; image?: st
       </div>
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <PoolImages pool={current} selected={image} />
-        {image ? <ImagePanel pool={current} name={image} /> : <CreateDisk pool={current} />}
+        {image ? (
+          <ImagePanel pool={current} name={image} />
+        ) : (
+          <div className="space-y-4">
+            <Uploader pool={current} />
+            <CreateDisk pool={current} />
+          </div>
+        )}
       </div>
     </div>
   );

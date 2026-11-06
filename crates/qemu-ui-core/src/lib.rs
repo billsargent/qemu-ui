@@ -14,4 +14,5 @@ pub mod parity;
 pub mod snapshot;
 pub mod spec;
 pub mod storage;
+pub mod upload;
 pub mod vm;

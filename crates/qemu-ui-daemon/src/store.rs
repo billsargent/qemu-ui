@@ -118,7 +118,49 @@ const MIGRATIONS: &[&str] = &[
         snapshot_id TEXT
     );
     "#,
+    // 6: resumable uploads (M2-07)
+    r#"
+    CREATE TABLE upload (
+        id          TEXT NOT NULL PRIMARY KEY,
+        pool        TEXT NOT NULL,
+        name        TEXT NOT NULL,
+        size        INTEGER NOT NULL,
+        sha256      TEXT,
+        client_key  TEXT,
+        job_id      TEXT,
+        created_at  INTEGER NOT NULL,
+        UNIQUE (pool, name)
+    );
+    "#,
 ];
+
+/// A resumable upload session row.
+#[derive(Debug, Clone)]
+pub struct UploadRow {
+    pub id: String,
+    pub pool: String,
+    pub name: String,
+    pub size: u64,
+    pub sha256: Option<String>,
+    pub client_key: Option<String>,
+    pub job_id: Option<String>,
+    pub created_at: u64,
+}
+
+fn upload_row(r: &rusqlite::Row) -> rusqlite::Result<UploadRow> {
+    Ok(UploadRow {
+        id: r.get(0)?,
+        pool: r.get(1)?,
+        name: r.get(2)?,
+        size: r.get::<_, i64>(3)? as u64,
+        sha256: r.get(4)?,
+        client_key: r.get(5)?,
+        job_id: r.get(6)?,
+        created_at: r.get::<_, i64>(7)? as u64,
+    })
+}
+
+const UPLOAD_COLS: &str = "id, pool, name, size, sha256, client_key, job_id, created_at";
 
 /// A snapshot row.
 #[derive(Debug, Clone)]
@@ -801,6 +843,65 @@ impl Store {
                 params![vm_id, snapshot_id],
             )
             .map(|_| ())
+        })
+    }
+}
+
+impl Store {
+    pub fn insert_upload(&self, u: &UploadRow) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO upload (id, pool, name, size, sha256, client_key, job_id, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    u.id,
+                    u.pool,
+                    u.name,
+                    u.size as i64,
+                    u.sha256,
+                    u.client_key,
+                    u.job_id,
+                    u.created_at as i64
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn set_upload_job(&self, id: &str, job_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE upload SET job_id = ?2 WHERE id = ?1",
+                params![id, job_id],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn get_upload(&self, id: &str) -> Result<Option<UploadRow>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {UPLOAD_COLS} FROM upload WHERE id = ?1"),
+                [id],
+                upload_row,
+            )
+            .optional()
+        })
+    }
+
+    pub fn list_uploads(&self) -> Result<Vec<UploadRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {UPLOAD_COLS} FROM upload ORDER BY created_at, rowid"
+            ))?;
+            st.query_map([], upload_row)?.collect()
+        })
+    }
+
+    pub fn delete_upload(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM upload WHERE id = ?1", [id])
+                .map(|_| ())
         })
     }
 }

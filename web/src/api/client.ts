@@ -11,6 +11,8 @@ import type { Job } from "./generated/Job";
 import type { MeasureResult } from "./generated/MeasureResult";
 import type { PoolInfo } from "./generated/PoolInfo";
 import type { PoolSummary } from "./generated/PoolSummary";
+import type { UploadProgress } from "./generated/UploadProgress";
+import type { UploadSession } from "./generated/UploadSession";
 import type { ScanStatus } from "./generated/ScanStatus";
 import type { SnapshotList } from "./generated/SnapshotList";
 import type { VmDetail } from "./generated/VmDetail";
@@ -147,6 +149,29 @@ export const api = {
     post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/commit`),
   cloneVm: (id: string, name: string, mode: "linked" | "full", pool: string) =>
     post<{ vm: VmDetail | null; job: Job | null }>(`/vms/${id}/clone`, { name, mode, pool }),
+  uploads: () => request<UploadSession[]>("/uploads"),
+  createUpload: (pool: string, name: string, sizeBytes: number, clientKey: string) =>
+    post<UploadSession>("/uploads", { pool, name, size_bytes: sizeBytes, client_key: clientKey }),
+  deleteUpload: (id: string) => request<void>(`/uploads/${id}`, { method: "DELETE" }),
+  /** Send one chunk. Resolves with progress, or with `{conflict}` carrying
+   * the server's offset when the client is out of sync. */
+  uploadChunk: async (
+    id: string,
+    offset: number,
+    chunk: Blob,
+    signal?: AbortSignal,
+  ): Promise<UploadProgress | { conflict: number }> => {
+    const res = await fetch(`/api/v1/uploads/${id}`, {
+      method: "PATCH",
+      headers: { "upload-offset": String(offset), "content-type": "application/offset+octet-stream" },
+      body: chunk,
+      signal,
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 409 && typeof body.offset === "number") return { conflict: body.offset };
+    if (!res.ok) throw new ApiError(res.status, body.error ?? res.statusText);
+    return body as UploadProgress;
+  },
 
   jobs: () => request<Job[]>("/jobs"),
   cancelJob: (id: string) => post<void>(`/jobs/${id}/cancel`),
