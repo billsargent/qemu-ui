@@ -198,7 +198,7 @@ pub async fn probe_binary(mut binary: Binary, host: &HostInfo) -> Result<BinaryC
     quit(&qmp, child).await;
 
     // 2. Help-text enrichment and backend lists, in parallel.
-    let (mh, dh, nd, cd, disp, aud, acc, tpm) = tokio::join!(
+    let (mh, dh, nd, cd, disp, aud, acc, tpm, obj) = tokio::join!(
         help_text(&path, "-machine"),
         help_text(&path, "-device"),
         help_text(&path, "-netdev"),
@@ -207,6 +207,7 @@ pub async fn probe_binary(mut binary: Binary, host: &HostInfo) -> Result<BinaryC
         help_text(&path, "-audiodev"),
         help_text(&path, "-accel"),
         help_text(&path, "-tpmdev"),
+        help_text(&path, "-object"),
     );
     let mut list = |h: Help, what: &str| match h {
         Help::Text(t) => Some(help::parse_name_list(&t)),
@@ -222,6 +223,7 @@ pub async fn probe_binary(mut binary: Binary, host: &HostInfo) -> Result<BinaryC
         display: list(disp, "display"),
         audiodev: list(aud, "audiodev"),
         tpmdev: list(tpm, "tpmdev"),
+        object: list(obj, "object"),
     };
     let accel_names = list(acc, "accel").unwrap_or_else(|| vec!["tcg".into()]);
     let help_machines = match mh {
@@ -254,6 +256,7 @@ pub async fn probe_binary(mut binary: Binary, host: &HostInfo) -> Result<BinaryC
         binary,
         arch: target,
         qemu_version,
+        probe_version: qemu_ui_core::caps::PROBE_VERSION,
         probed_at: now(),
         native,
         machines,

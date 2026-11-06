@@ -3,4 +3,8 @@
 /**
  * Backend lists. `None` means the option is not compiled into this binary.
  */
-export type Backends = { netdev: Array<string> | null, chardev: Array<string> | null, display: Array<string> | null, audiodev: Array<string> | null, tpmdev: Array<string> | null, };
+export type Backends = { netdev: Array<string> | null, chardev: Array<string> | null, display: Array<string> | null, audiodev: Array<string> | null, tpmdev: Array<string> | null, 
+/**
+ * `-object` types (e.g. `monitor-qmp`, `memory-backend-file`, `secret`).
+ */
+object: Array<string> | null, };

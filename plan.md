@@ -518,8 +518,9 @@ devices. Decided model: **single user, LAN-exposed** (v2 #4).
   implementation now; RBAC later is additive.
 - **No injection:** argv arrays only; JSON-syntax options; comma doubling elsewhere; paths
   canonicalised against pool allowlists; names/MACs/sizes/enums validated.
-- **Monitors:** unix sockets `0600` in a `0700` run dir (Windows: AF_UNIX or named pipe with
-  service-account ACL, per spike M0-14). Never exposed to the network. The browser reaches QMP
+- **Monitors:** AF_UNIX sockets in a per-VM run dir (`0700` on Unix; on Windows the run dir's
+  ACL grants only the service account), on **both** platforms — decided by spike M0-14, see
+  §14.1. Socket paths must stay under 108 bytes, so run dirs live under a short root. Never exposed to the network. The browser reaches QMP
   only through audited endpoints, or the expert console.
 - **Expert surfaces = root:** passthrough, raw argv, QMP console. Admin-only, off by default,
   each enable is audited.
@@ -554,9 +555,27 @@ by the probe (probe wins), consumed by the UI (reasons) and by CI (assertions).
 | QEMU `-sandbox` | `native` | `impossible` |
 | Per-VM UID + cgroups | `native` | `impossible` (job objects instead) |
 | VFIO passthrough | `native` | `impossible` |
-| QMP/VNC over unix sockets | `native` | `unverified` — spike M0-14 |
+| QMP + serial over AF_UNIX sockets | `native` | `native` (spike M0-14; Windows client bridges a blocking socket) |
+| VNC over unix socket | `native` | `degraded` — loopback TCP + per-run password |
 | guacd engine | `unverified` — spike M0-15 | `unverified` — spike M0-15 |
 | Lifecycle, blockdev disks, snapshots, VNC console, serial, all target archs | `native` | `native` |
+
+### 14.1 Spike M0-14 result: monitor and console transports on Windows
+
+Tested against QEMU 11.1 on a Windows host:
+
+| Transport | Result | Decision |
+|---|---|---|
+| Named pipe (`-chardev pipe`) | QEMU creates a single pipe instance; after the first client disconnects, every new connection fails with "All pipe instances are busy". Any local process that opens the pipe first takes it. | **Rejected** — reattach is impossible. |
+| Loopback TCP | Reconnects fine; no access control (any local process can connect). | Fallback only, never for QMP. |
+| AF_UNIX (`-chardev socket,path=`) | Works and reconnects; protected by filesystem ACLs. 108-byte path limit applies on Windows too. | **QMP and serial on all platforms.** Tokio has no AF_UNIX on Windows, so the client bridges a blocking `uds_windows` socket to an async stream (two threads per connection). |
+| VNC `unix:` | Accepted without error but no socket is created. | VNC on Windows uses loopback TCP with `password=on` and a per-run password set via QMP `set_password`. |
+
+Also found: **`-mon` is deprecated in QEMU 11.1** in favour of
+`-object monitor-qmp,id=…,chardev=…`. The probe records `-object` types; the compiler emits
+`monitor-qmp` objects when available and `-mon` otherwise. And a QMP client must fully close
+its connection when done: QEMU serves one client per monitor chardev and stays silent to the
+next one until the previous connection is closed.
 
 **Consequence for the Windows 11 lane:** on a Windows host it can do UEFI + Secure Boot +
 virtio-win, but not TPM unless the probe finds a backend. The wizard says so and offers the
@@ -787,11 +806,11 @@ qemu-system-x86_64
   -device {"driver":"virtio-serial-pci","id":"qui-vser0"}
   -chardev qemu-vdagent,id=qui-vdagent,name=vdagent,clipboard=on,mouse=on
   -device {"driver":"virtserialport","chardev":"qui-vdagent","name":"com.redhat.spice.0"}
-  -vnc unix:<run>/vnc.sock
+  -vnc unix:<run>/vnc.sock                       (Windows: -vnc 127.0.0.1:<n>,password=on)
   -chardev socket,id=qui-qmp,path=<run>/qmp.sock,server=on,wait=off
-  -mon chardev=qui-qmp,mode=control
+  -object monitor-qmp,id=qui-mon,chardev=qui-qmp            (older QEMU: -mon chardev=…,mode=control)
   -chardev socket,id=qui-qmp-user,path=<run>/qmp-user.sock,server=on,wait=off
-  -mon chardev=qui-qmp-user,mode=control
+  -object monitor-qmp,id=qui-mon-user,chardev=qui-qmp-user
   -chardev socket,id=qui-ser0,path=<run>/serial.sock,server=on,wait=off,logfile=<run>/serial.log
   -serial chardev:qui-ser0
   -pidfile <run>/qemu.pid
@@ -804,5 +823,5 @@ labelled as such in the UI. `-S` is followed by a QMP `cont` once start-up check
 JSON arguments are passed as single argv elements; no shell is involved.
 
 **On a Windows host** the same spec compiles with `-accel whpx`, `aio=threads`, no
-`-sandbox`, transports per spike M0-14, and **no TPM** unless the probe reports a TPM backend
+`-sandbox`, VNC on loopback TCP with a per-run password (§14.1), and **no TPM** unless the probe reports a TPM backend
 (the editor shows the TPM field as unavailable with that reason).
