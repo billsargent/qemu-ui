@@ -31,6 +31,8 @@ use crate::procs::{self, ProcId};
 use crate::scan::Scanner;
 use crate::store::{NewRun, RunRow, Store};
 
+mod snapshots;
+
 const QMP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const EXIT_WAIT: Duration = Duration::from_secs(10);
 

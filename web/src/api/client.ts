@@ -12,6 +12,7 @@ import type { MeasureResult } from "./generated/MeasureResult";
 import type { PoolInfo } from "./generated/PoolInfo";
 import type { PoolSummary } from "./generated/PoolSummary";
 import type { ScanStatus } from "./generated/ScanStatus";
+import type { SnapshotList } from "./generated/SnapshotList";
 import type { VmDetail } from "./generated/VmDetail";
 import type { VmEvent } from "./generated/VmEvent";
 import type { VmSpec } from "./generated/VmSpec";
@@ -153,6 +154,14 @@ export const api = {
     const res = await fetch(`/api/v1/jobs/${id}/log`);
     return res.ok ? res.text() : "";
   },
+
+  snapshots: (vmId: string) => request<SnapshotList>(`/vms/${vmId}/snapshots`),
+  takeSnapshot: (vmId: string, name: string, description: string, withMemory: boolean) =>
+    post<Job>(`/vms/${vmId}/snapshots`, { name, description, with_memory: withMemory }),
+  revertSnapshot: (vmId: string, snapshotId: string, safetySnapshot: boolean) =>
+    post<Job>(`/vms/${vmId}/snapshots/${snapshotId}/revert`, { safety_snapshot: safetySnapshot }),
+  deleteSnapshot: (vmId: string, snapshotId: string) =>
+    request<Job>(`/vms/${vmId}/snapshots/${snapshotId}`, { method: "DELETE" }),
 };
 
 export function wsUrl(path: string): string {
