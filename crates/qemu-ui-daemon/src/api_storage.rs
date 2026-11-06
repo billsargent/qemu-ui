@@ -246,19 +246,42 @@ async fn image(
         actual_size: info["actual-size"].as_u64().unwrap_or(0),
         format_specific: info["format-specific"]["data"].clone(),
         backing_chain: chain,
-        snapshots: info["snapshots"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|s| s["name"].as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        snapshots: {
+            // Show "VM: snapshot name" for tags our snapshots created; tags
+            // made outside qemu-ui are shown as they are.
+            let names = snapshot_names(&app);
+            info["snapshots"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s["name"].as_str())
+                        .map(|tag| names.get(tag).cloned().unwrap_or_else(|| tag.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        },
         used_by: used.get(&r).cloned().unwrap_or_default(),
         in_use_by: open.get(&r).cloned().unwrap_or_default(),
         pool: r.pool,
         name: r.name,
     }))
+}
+
+/// qcow2 snapshot tag → "VM: snapshot name", across every VM.
+fn snapshot_names(app: &App) -> std::collections::HashMap<String, String> {
+    let store = &app.supervisor.store;
+    store
+        .list_vms()
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|vm| {
+            store
+                .list_snapshots(&vm.id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(move |s| (s.tag, format!("{}: {}", vm.name, s.name)))
+        })
+        .collect()
 }
 
 /// Delete an image file. Refused while any VM references it or another
