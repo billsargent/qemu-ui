@@ -4,10 +4,11 @@ A browser-based control plane for QEMU: every architecture, every machine type, 
 command-line option, real disk/network/display management, and VM sessions that survive
 closing the browser.
 
-> **Status: early development (milestone M0).** The daemon discovers every installed QEMU
-> binary and probes what it can do: machines, CPUs, devices, accelerators, firmware, and
-> backends. The web UI shows the results as a capability report. Creating and running VMs
-> arrives in M1. See [plan.md](plan.md) for the full specification and roadmap.
+> **Status: early development (milestone M1).** Create, configure, run and use VMs from
+> the browser: a spec editor that shows the exact QEMU command line, "Check with QEMU"
+> validation, browser graphics and serial consoles, and VMs that keep running when the
+> daemon or browser goes away. Storage, networking and hardening follow in M2–M6. See
+> [plan.md](plan.md) for the full specification and roadmap.
 
 ## Quick start
 
@@ -28,7 +29,12 @@ cd web && npm run dev         # UI on http://127.0.0.1:5173, proxied to the daem
 # or: npm run build, then open http://127.0.0.1:7480 (the daemon serves web/dist)
 
 cargo run -p qemu-ui-cli -- host   # the same data from the CLI
+cargo run -p qemu-ui-cli -- vms    # list VMs; also start/stop/force-stop/pause/resume <name>
 ```
+
+The API accepts same-origin requests from the web UI. Other clients (the CLI,
+curl) authenticate with the local token the daemon writes to `api-token` in its
+data directory; the CLI finds it automatically (`--data-dir` if you changed it).
 
 On Windows, run these from Git Bash. On Linux, install QEMU from your distribution
 (`apt install qemu-system qemu-utils ovmf`, or your distribution's equivalents). The daemon
