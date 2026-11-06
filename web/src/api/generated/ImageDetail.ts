@@ -21,4 +21,12 @@ used_by: Array<string>,
 /**
  * VMs currently running with this image open.
  */
-in_use_by: Array<string>, };
+in_use_by: Array<string>, 
+/**
+ * A template: never opened writable; clone it instead.
+ */
+template: boolean, 
+/**
+ * Other images (pool/name) that use this one as their backing file.
+ */
+dependents: Array<string>, };

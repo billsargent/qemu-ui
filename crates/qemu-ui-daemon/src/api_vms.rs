@@ -29,6 +29,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/vms/lint", post(lint))
         .route("/vms/{id}", get(detail).put(update).delete(delete))
         .route("/vms/{id}/actions/{action}", post(action))
+        .route("/vms/{id}/clone", post(clone))
         .route("/vms/{id}/serial-log", get(serial_log))
         .route("/vms/{id}/events", get(vm_events))
         .route("/events", get(events))
@@ -122,6 +123,36 @@ async fn action(
         other => sv.qmp_action(&id, other).await,
     };
     r.map(Json).map_err(op_err)
+}
+
+#[derive(Deserialize)]
+struct CloneBody {
+    name: String,
+    mode: crate::supervisor::CloneMode,
+    #[serde(default = "default_pool")]
+    pool: String,
+}
+
+fn default_pool() -> String {
+    crate::images::DEFAULT_POOL.into()
+}
+
+/// Clone a stopped VM: linked (ready at once, `{vm}`) or full (a job, `{job}`).
+async fn clone(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<String>,
+    Json(b): Json<CloneBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), OpErr> {
+    use crate::supervisor::CloneOutcome;
+    match app
+        .supervisor
+        .clone_vm(&id, b.name, b.mode, b.pool)
+        .await
+        .map_err(op_err)?
+    {
+        CloneOutcome::Vm(vm) => Ok((StatusCode::CREATED, Json(json!({"vm": vm, "job": null})))),
+        CloneOutcome::Job(job) => Ok((StatusCode::ACCEPTED, Json(json!({"vm": null, "job": job})))),
+    }
 }
 
 #[derive(Deserialize)]

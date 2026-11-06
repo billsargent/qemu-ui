@@ -130,6 +130,22 @@ export const api = {
     post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/compact`, { compress }),
   renameImage: (pool: string, name: string, newName: string) =>
     post<void>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/rename`, { new_name: newName }),
+  setTemplate: (pool: string, name: string, template: boolean) =>
+    request<void>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/template`, {
+      method: "PUT",
+      body: JSON.stringify({ template }),
+    }),
+  cloneImage: (pool: string, name: string, targetPool: string, targetName: string) =>
+    post<{ pool: string; name: string }>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/clone`, {
+      target_pool: targetPool,
+      target_name: targetName,
+    }),
+  flattenImage: (pool: string, name: string) =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/flatten`),
+  commitImage: (pool: string, name: string) =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/commit`),
+  cloneVm: (id: string, name: string, mode: "linked" | "full", pool: string) =>
+    post<{ vm: VmDetail | null; job: Job | null }>(`/vms/${id}/clone`, { name, mode, pool }),
 
   jobs: () => request<Job[]>("/jobs"),
   cancelJob: (id: string) => post<void>(`/jobs/${id}/cancel`),

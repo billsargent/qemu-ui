@@ -19,7 +19,7 @@ use qemu_ui_core::compile::{
     self, Compiled, Diagnostic, ResolvedFirmware, ResolvedImage, RunPaths, Severity, VncListen,
 };
 use qemu_ui_core::lint::{self, LintResult};
-use qemu_ui_core::spec::{FirmwareSpec, ImageRef, VmSpec};
+use qemu_ui_core::spec::{FirmwareSpec, ImageRef, Media, VmSpec, valid_name};
 use qemu_ui_core::vm::{VmDetail, VmEvent, VmState, VmSummary, mac_from_bytes, state_from_qmp};
 use qemu_ui_qmp::{Qmp, transport};
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,22 @@ pub struct Supervisor {
     ops: tokio::sync::Mutex<()>,
     /// Dry-lint results by (binary, lint spec) hash.
     lint_cache: Mutex<HashMap<String, LintResult>>,
+}
+
+/// How `clone_vm` copies writable disks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloneMode {
+    /// qcow2 overlays on template disks: instant, shares the base.
+    Linked,
+    /// Independent copies, made by a job.
+    Full,
+}
+
+/// A linked clone is ready at once; a full clone runs as a job.
+pub enum CloneOutcome {
+    Vm(Box<VmDetail>),
+    Job(Box<qemu_ui_core::storage::Job>),
 }
 
 /// What `build` is compiling for.
@@ -466,6 +482,21 @@ impl Supervisor {
                 message: msg,
             }]
         };
+        // Templates are immutable bases for linked clones (M2-05): writing to
+        // one would silently corrupt every clone built on it.
+        for (i, d) in spec.disks.iter().enumerate() {
+            if !d.readonly && d.media == Media::Disk && self.pools.is_template(&d.image) {
+                return Err(fail(
+                    &format!("disks[{i}].image"),
+                    "disk.template-writable",
+                    format!(
+                        "'{}' is a template and is never opened writable; attach it read-only, or clone the \
+                         VM or image instead",
+                        d.image.name
+                    ),
+                ));
+            }
+        }
         let qemu_img = self.qemu_img().await;
         let mut images: BTreeMap<ImageRef, ResolvedImage> = BTreeMap::new();
         for (i, d) in spec.disks.iter().enumerate() {
@@ -1076,6 +1107,227 @@ impl Supervisor {
             self.set_state(id, VmState::Crashed, None, Some(&msg));
         }
         self.emit(id, "exited", json!({"status": exit_status}));
+    }
+
+    /// The monitor of a running VM (for block jobs and other live operations).
+    pub fn live_qmp(&self, id: &str) -> Option<Qmp> {
+        self.live
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|l| l.qmp.clone())
+    }
+
+    /// The running VM (id) and disk index that have this image open.
+    pub fn find_open_disk(&self, r: &ImageRef) -> Option<(String, usize)> {
+        self.store.list_vms().ok()?.into_iter().find_map(|row| {
+            let run = self
+                .store
+                .last_run(&row.id)
+                .ok()
+                .flatten()
+                .filter(|r| r.ended_at.is_none())?;
+            let spec: VmSpec = serde_json::from_str(&run.spec_json).ok()?;
+            let i = spec.disks.iter().position(|d| &d.image == r)?;
+            Some((row.id, i))
+        })
+    }
+
+    // ---------------------------------------------------------------- clone
+
+    /// Clone a stopped VM (M2-05). `Linked` replaces each writable disk with
+    /// a qcow2 overlay on it (O(1), needs template disks); `Full` copies
+    /// every writable disk in a job. Read-only media (ISOs) are shared,
+    /// NVRAM is copied, MACs are new.
+    pub async fn clone_vm(
+        self: &Arc<Self>,
+        id: &str,
+        name: String,
+        mode: CloneMode,
+        pool: String,
+    ) -> OpResult<CloneOutcome> {
+        let row = self.store.get_vm(id)?.ok_or(OpError::NotFound)?;
+        if VmState::parse(&row.state).is_active() || self.live.lock().unwrap().contains_key(id) {
+            return Err(OpError::Conflict(
+                "stop the VM before cloning it: the disks of a running VM are not consistent"
+                    .into(),
+            ));
+        }
+        if !valid_name(&name) {
+            return Err(OpError::Invalid(vec![Diagnostic {
+                severity: Severity::Error,
+                field: "name".into(),
+                rule: "name.invalid".into(),
+                message:
+                    "use 1–63 letters, digits, '.', '_' or '-', starting with a letter or digit"
+                        .into(),
+            }]));
+        }
+        if self.store.vm_name_taken(&name, None)? {
+            return Err(OpError::Conflict(format!(
+                "a VM named '{name}' already exists"
+            )));
+        }
+        let qemu_img = self
+            .qemu_img()
+            .await
+            .ok_or_else(|| OpError::Failed(anyhow!("qemu-img is not installed")))?;
+        if self.pools.get(&pool)?.readonly {
+            return Err(OpError::Conflict(format!("pool '{pool}' is read-only")));
+        }
+        let src: VmSpec =
+            serde_json::from_str(&row.spec_json).map_err(|e| OpError::Failed(e.into()))?;
+
+        // Plan: which disks get a new image, and its name.
+        let mut plan: Vec<(usize, ImageRef, ImageRef)> = Vec::new();
+        let mut taken: Vec<String> = Vec::new();
+        for (i, d) in src.disks.iter().enumerate() {
+            if d.readonly || d.media == Media::Cdrom {
+                continue;
+            }
+            if mode == CloneMode::Linked && !self.pools.is_template(&d.image) {
+                return Err(OpError::Invalid(vec![Diagnostic {
+                    severity: Severity::Error,
+                    field: format!("disks[{i}].image"),
+                    rule: "clone.linked-needs-template".into(),
+                    message: format!(
+                        "linked clones are built on templates, which never change; mark '{}/{}' as a template \
+                         first (the source VM then stops using it writable), or make a full clone",
+                        d.image.pool, d.image.name
+                    ),
+                }]));
+            }
+            let mut n = self
+                .pools
+                .free_name(&pool, &format!("{name}-disk{i}"), "qcow2")?;
+            while taken.contains(&n) {
+                n = self.pools.free_name(
+                    &pool,
+                    &format!("{name}-disk{i}-{}", taken.len()),
+                    "qcow2",
+                )?;
+            }
+            taken.push(n.clone());
+            plan.push((
+                i,
+                d.image.clone(),
+                ImageRef {
+                    pool: pool.clone(),
+                    name: n,
+                },
+            ));
+        }
+
+        let mut spec = src.clone();
+        spec.name = name.clone();
+        for nic in &mut spec.nics {
+            nic.mac = None; // new addresses on create
+        }
+        for (i, _, dst) in &plan {
+            spec.disks[*i].image = dst.clone();
+        }
+        let vars_src = self.vm_dir(id).join("VARS.qcow2");
+
+        match mode {
+            CloneMode::Linked => {
+                let mut made = Vec::new();
+                for (_, base, dst) in &plan {
+                    match self.pools.linked_clone(&qemu_img, base, dst).await {
+                        Ok(p) => made.push(p),
+                        Err(e) => {
+                            made.iter().for_each(|p| drop(std::fs::remove_file(p)));
+                            return Err(OpError::Failed(e));
+                        }
+                    }
+                }
+                match self.create(spec).await {
+                    Ok(vm) => {
+                        if vars_src.exists() {
+                            let _ = std::fs::copy(
+                                &vars_src,
+                                self.vm_dir(&vm.summary.id).join("VARS.qcow2"),
+                            );
+                        }
+                        self.emit(
+                            &vm.summary.id,
+                            "cloned",
+                            json!({"from": id, "mode": "linked"}),
+                        );
+                        Ok(CloneOutcome::Vm(Box::new(vm)))
+                    }
+                    Err(e) => {
+                        made.iter().for_each(|p| drop(std::fs::remove_file(p)));
+                        Err(e)
+                    }
+                }
+            }
+            CloneMode::Full => {
+                // Validate the new spec now, so the job only fails on I/O.
+                let caps = self.caps_for(&spec.arch).await?;
+                let mut check = spec.clone();
+                for nic in &mut check.nics {
+                    nic.mac = Some(mac_from_bytes([0, 0, 1]));
+                }
+                Self::check(&check, &caps)?;
+                let mut need = 0u64;
+                let mut jobs_plan = Vec::new();
+                for (_, base, dst) in &plan {
+                    let src_path = self.pools.resolve(base)?;
+                    need += Pools::measure(&qemu_img, Some(&src_path), None, "qcow2")
+                        .await
+                        .map_or(0, |m| m.required);
+                    jobs_plan.push((src_path, self.pools.new_image_path(dst)?));
+                }
+                self.pools.check_quota(Some(&qemu_img), &pool, need).await?;
+                let this = self.clone();
+                let src_id = id.to_string();
+                let job = self.jobs.spawn(
+                    "vm.clone",
+                    &format!("Full clone of {} as {name}", row.name),
+                    json!({"vm": id, "name": name}),
+                    true,
+                    move |ctx| async move {
+                        let mut done: Vec<PathBuf> = Vec::new();
+                        let total = jobs_plan.len();
+                        let res: anyhow::Result<String> = async {
+                            for (k, (from, to)) in jobs_plan.iter().enumerate() {
+                                ctx.progress(
+                                    None,
+                                    Some(&format!("Copying disk {} of {total}", k + 1)),
+                                );
+                                let (f, t) = (from.display().to_string(), to.display().to_string());
+                                done.push(to.clone());
+                                ctx.run_qemu_img(&qemu_img, &["convert", "-O", "qcow2", &f, &t])
+                                    .await?;
+                            }
+                            ctx.check_cancelled()?;
+                            let vm = this
+                                .create(spec)
+                                .await
+                                .map_err(|e| anyhow!("creating the VM: {e:?}"))?;
+                            if vars_src.exists() {
+                                std::fs::copy(
+                                    &vars_src,
+                                    this.vm_dir(&vm.summary.id).join("VARS.qcow2"),
+                                )?;
+                            }
+                            this.emit(
+                                &vm.summary.id,
+                                "cloned",
+                                json!({"from": src_id, "mode": "full"}),
+                            );
+                            Ok(format!("Created {}", vm.summary.name))
+                        }
+                        .await;
+                        if res.is_err() {
+                            done.iter().for_each(|p| drop(std::fs::remove_file(p)));
+                        }
+                        res
+                    },
+                );
+                Ok(CloneOutcome::Job(Box::new(job)))
+            }
+        }
     }
 
     fn qmp_of(&self, id: &str) -> OpResult<Qmp> {

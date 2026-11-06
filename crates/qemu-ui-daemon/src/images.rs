@@ -262,13 +262,26 @@ impl Pools {
                 Some(q) => self.info(q, &path).await.unwrap_or_else(|_| fallback()),
                 None => fallback(),
             };
+            let backing = match qemu_img {
+                Some(q) => self
+                    .backing_of(q, &path)
+                    .await
+                    .and_then(|b| self.locate(&b)),
+                None => None,
+            }
+            .map(|r| format!("{}/{}", r.pool, r.name));
             images.push(ImageInfo {
+                template: self.is_template(&ImageRef {
+                    pool: pool.into(),
+                    name: name.clone(),
+                }),
                 pool: pool.into(),
                 name,
                 format,
                 virtual_size,
                 actual_size,
                 used_by: vec![],
+                backing,
             });
         }
         Ok(PoolInfo {
@@ -432,6 +445,86 @@ impl Pools {
             required: v["required"].as_u64().unwrap_or(0),
             fully_allocated: v["fully-allocated"].as_u64().unwrap_or(0),
         })
+    }
+
+    /// The backing file of an image, as an absolute path, if it has one.
+    pub async fn backing_of(&self, qemu_img: &Path, path: &Path) -> Option<PathBuf> {
+        let v = self.info_json(qemu_img, path).await.ok()?;
+        let b = v["full-backing-filename"]
+            .as_str()
+            .or(v["backing-filename"].as_str())?;
+        let b = PathBuf::from(b);
+        Some(if b.is_absolute() {
+            b
+        } else {
+            path.parent()?.join(b)
+        })
+    }
+
+    // ------------------------------------------------------------- templates
+
+    pub fn is_template(&self, r: &ImageRef) -> bool {
+        self.store.is_template(&r.pool, &r.name).unwrap_or(false)
+    }
+
+    /// Mark or unmark an existing image as a template.
+    pub fn set_template(&self, r: &ImageRef, template: bool) -> Result<()> {
+        if template {
+            self.resolve(r)?;
+        }
+        self.store.set_template(&r.pool, &r.name, template)
+    }
+
+    /// Create a linked clone: a qcow2 overlay backed by `base`, O(1).
+    ///
+    /// The overlay records the base's **absolute** path. That keeps the
+    /// chain valid across pools (which may sit on different drives) and
+    /// when the overlay's own pool is re-registered elsewhere; the cost is
+    /// that moving the base's pool directory breaks its clones until they
+    /// are rebased. Relative paths would survive moving one directory tree
+    /// as a whole but cannot cross drives, so absolute is the safer default.
+    pub async fn linked_clone(
+        &self,
+        qemu_img: &Path,
+        base: &ImageRef,
+        target: &ImageRef,
+    ) -> Result<PathBuf> {
+        let base_path = self.resolve(base)?;
+        let (format, _, _) = self.info(qemu_img, &base_path).await?;
+        let path = self.new_image_path(target)?;
+        // An empty overlay is a few hundred KiB.
+        self.check_quota(Some(qemu_img), &target.pool, 1 << 20)
+            .await?;
+        let out = command(qemu_img)
+            .args(["create", "-q", "-f", "qcow2", "-F", &format, "-b"])
+            .arg(&base_path)
+            .arg(&path)
+            .output()
+            .await?;
+        if !out.status.success() {
+            let _ = std::fs::remove_file(&path);
+            bail!(
+                "qemu-img create: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(path)
+    }
+
+    /// Pick an unused image name in `pool` based on `stem` and `ext`.
+    pub fn free_name(&self, pool: &str, stem: &str, ext: &str) -> Result<String> {
+        let dir = self.pool_dir(pool)?;
+        for i in 0..1000 {
+            let name = if i == 0 {
+                format!("{stem}.{ext}")
+            } else {
+                format!("{stem}-{i}.{ext}")
+            };
+            if valid_image_name(&name) && !dir.join(&name).exists() {
+                return Ok(name);
+            }
+        }
+        bail!("no free image name for '{stem}' in pool '{pool}'")
     }
 
     /// Images (across all pools) whose backing file is `target`.
