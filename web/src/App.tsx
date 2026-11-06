@@ -1,52 +1,50 @@
-import { useEffect, useState } from "react";
-import SystemPage from "./pages/SystemPage";
+import { useLiveInvalidation, useEventStreamConnected } from "./api/events";
 import DashboardPage from "./pages/DashboardPage";
-
-// Hash routing keeps M0 dependency-free; TanStack Router arrives with M1's
-// VM pages, when there are real routes with parameters.
-const PAGES = {
-  dashboard: { label: "Dashboard", component: DashboardPage },
-  system: { label: "System", component: SystemPage },
-} as const;
-type PageKey = keyof typeof PAGES;
-
-function currentPage(): PageKey {
-  const key = window.location.hash.replace(/^#\/?/, "");
-  return key in PAGES ? (key as PageKey) : "system";
-}
+import NewVmPage from "./pages/NewVmPage";
+import SystemPage from "./pages/SystemPage";
+import VmPage from "./pages/VmPage";
+import { useRoute } from "./router";
 
 export default function App() {
-  const [page, setPage] = useState<PageKey>(currentPage);
-  useEffect(() => {
-    const onHash = () => setPage(currentPage());
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
-  }, []);
-  const Page = PAGES[page].component;
+  const route = useRoute();
+  useLiveInvalidation();
+  const live = useEventStreamConnected();
+
+  const nav = [
+    { href: "#/dashboard", label: "Virtual machines", active: route.page === "dashboard" || route.page === "vm" || route.page === "new-vm" },
+    { href: "#/system", label: "System", active: route.page === "system" },
+  ];
 
   return (
     <div className="flex min-h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-      <nav className="w-52 shrink-0 border-r border-zinc-200 p-4 dark:border-zinc-800">
+      <nav className="flex w-52 shrink-0 flex-col border-r border-zinc-200 p-4 dark:border-zinc-800">
         <div className="mb-6 font-mono text-lg font-semibold tracking-tight">qemu-ui</div>
         <ul className="space-y-1 text-sm">
-          {(Object.keys(PAGES) as PageKey[]).map((key) => (
-            <li key={key}>
+          {nav.map((n) => (
+            <li key={n.href}>
               <a
-                href={`#/${key}`}
+                href={n.href}
                 className={`block rounded px-2 py-1.5 ${
-                  page === key
+                  n.active
                     ? "bg-zinc-200 font-medium dark:bg-zinc-800"
                     : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-900"
                 }`}
               >
-                {PAGES[key].label}
+                {n.label}
               </a>
             </li>
           ))}
         </ul>
+        <div className="mt-auto flex items-center gap-2 text-xs text-zinc-500" title="Live updates from the daemon">
+          <span className={`inline-block h-2 w-2 rounded-full ${live ? "bg-emerald-500" : "bg-zinc-400"}`} />
+          {live ? "live" : "reconnecting…"}
+        </div>
       </nav>
       <main className="min-w-0 flex-1 p-6">
-        <Page />
+        {route.page === "dashboard" && <DashboardPage />}
+        {route.page === "system" && <SystemPage />}
+        {route.page === "new-vm" && <NewVmPage />}
+        {route.page === "vm" && <VmPage key={route.id} id={route.id} tab={route.tab} />}
       </main>
     </div>
   );

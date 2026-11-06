@@ -480,7 +480,18 @@ impl Supervisor {
             let port = if run {
                 free_vnc_port().map_err(|e| fail("display.vnc", "vnc.port", e.to_string()))?
             } else {
-                5900
+                // Preview: show the port of the last run so the "changes since
+                // last start" diff is not polluted by port allocation.
+                self.store
+                    .last_run(id)
+                    .ok()
+                    .flatten()
+                    .and_then(|r| serde_json::from_str::<VncInfo>(r.vnc_json.as_deref()?).ok())
+                    .and_then(|v| match v {
+                        VncInfo::Tcp { port, .. } => Some(port),
+                        VncInfo::Unix { .. } => None,
+                    })
+                    .unwrap_or(5900)
             };
             Some(VncInfo::Tcp {
                 port,

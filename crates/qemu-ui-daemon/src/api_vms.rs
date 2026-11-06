@@ -147,7 +147,11 @@ async fn defaults(
                 format!("no qemu-system-{} installed", q.arch),
             )
         })?;
-    let (spec, diagnostics) = default_spec(q.name.as_deref().unwrap_or("new-vm"), bin);
+    let (mut spec, diagnostics) = default_spec(q.name.as_deref().unwrap_or("new-vm"), bin);
+    // Assign MACs now so the form and the argv preview show the same address.
+    for nic in &mut spec.nics {
+        nic.mac = Some(qemu_ui_core::vm::mac_from_bytes(rand::random()));
+    }
     Ok(Json(json!({"spec": spec, "diagnostics": diagnostics})))
 }
 
