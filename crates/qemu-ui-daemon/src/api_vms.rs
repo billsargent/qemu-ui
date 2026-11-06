@@ -57,7 +57,7 @@ impl IntoResponse for OpErr {
     }
 }
 
-fn op_err(e: OpError) -> OpErr {
+pub fn op_err(e: OpError) -> OpErr {
     OpErr(e)
 }
 

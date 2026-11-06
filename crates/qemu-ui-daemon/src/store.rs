@@ -90,7 +90,60 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX job_created ON job(created_at);
     "#,
+    // VM snapshots (M2-06)
+    r#"
+    CREATE TABLE snapshot (
+        id          TEXT NOT NULL PRIMARY KEY,
+        vm_id       TEXT NOT NULL REFERENCES vm(id) ON DELETE CASCADE,
+        name        TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        tag         TEXT NOT NULL,
+        parent_id   TEXT,
+        with_memory INTEGER NOT NULL,
+        auto        INTEGER NOT NULL DEFAULT 0,
+        disks_json  TEXT NOT NULL,
+        created_at  INTEGER NOT NULL
+    );
+    CREATE INDEX snapshot_vm ON snapshot(vm_id);
+    CREATE TABLE snapshot_head (
+        vm_id       TEXT NOT NULL PRIMARY KEY REFERENCES vm(id) ON DELETE CASCADE,
+        snapshot_id TEXT
+    );
+    "#,
 ];
+
+/// A snapshot row.
+#[derive(Debug, Clone)]
+pub struct SnapshotRow {
+    pub id: String,
+    pub vm_id: String,
+    pub name: String,
+    pub description: String,
+    pub tag: String,
+    pub parent_id: Option<String>,
+    pub with_memory: bool,
+    pub auto: bool,
+    pub disks_json: String,
+    pub created_at: u64,
+}
+
+fn snapshot_row(r: &rusqlite::Row) -> rusqlite::Result<SnapshotRow> {
+    Ok(SnapshotRow {
+        id: r.get(0)?,
+        vm_id: r.get(1)?,
+        name: r.get(2)?,
+        description: r.get(3)?,
+        tag: r.get(4)?,
+        parent_id: r.get(5)?,
+        with_memory: r.get(6)?,
+        auto: r.get(7)?,
+        disks_json: r.get(8)?,
+        created_at: r.get::<_, i64>(9)? as u64,
+    })
+}
+
+const SNAPSHOT_COLS: &str =
+    "id, vm_id, name, description, tag, parent_id, with_memory, auto, disks_json, created_at";
 
 /// A pool row.
 #[derive(Debug, Clone)]
@@ -617,6 +670,103 @@ impl Store {
     }
 }
 
+impl Store {
+    // ------------------------------------------------------------ snapshots
+
+    pub fn insert_snapshot(&self, s: &SnapshotRow) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                &format!("INSERT INTO snapshot ({SNAPSHOT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
+                params![
+                    s.id,
+                    s.vm_id,
+                    s.name,
+                    s.description,
+                    s.tag,
+                    s.parent_id,
+                    s.with_memory,
+                    s.auto,
+                    s.disks_json,
+                    s.created_at as i64
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn list_snapshots(&self, vm_id: &str) -> Result<Vec<SnapshotRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {SNAPSHOT_COLS} FROM snapshot WHERE vm_id = ?1 ORDER BY created_at, rowid"
+            ))?;
+            st.query_map([vm_id], snapshot_row)?.collect()
+        })
+    }
+
+    pub fn get_snapshot(&self, vm_id: &str, id: &str) -> Result<Option<SnapshotRow>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {SNAPSHOT_COLS} FROM snapshot WHERE vm_id = ?1 AND id = ?2"),
+                params![vm_id, id],
+                snapshot_row,
+            )
+            .optional()
+        })
+    }
+
+    /// Remove a snapshot and keep the tree whole: its children move up to
+    /// its parent, and the head moves to its parent if it pointed here.
+    pub fn delete_snapshot(&self, vm_id: &str, id: &str) -> Result<()> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let parent: Option<String> = tx
+            .query_row(
+                "SELECT parent_id FROM snapshot WHERE vm_id = ?1 AND id = ?2",
+                params![vm_id, id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        tx.execute(
+            "UPDATE snapshot SET parent_id = ?3 WHERE vm_id = ?1 AND parent_id = ?2",
+            params![vm_id, id, parent],
+        )?;
+        tx.execute(
+            "UPDATE snapshot_head SET snapshot_id = ?3 WHERE vm_id = ?1 AND snapshot_id = ?2",
+            params![vm_id, id, parent],
+        )?;
+        tx.execute(
+            "DELETE FROM snapshot WHERE vm_id = ?1 AND id = ?2",
+            params![vm_id, id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn snapshot_head(&self, vm_id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT snapshot_id FROM snapshot_head WHERE vm_id = ?1",
+                [vm_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+        })
+    }
+
+    pub fn set_snapshot_head(&self, vm_id: &str, snapshot_id: Option<&str>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO snapshot_head (vm_id, snapshot_id) VALUES (?1, ?2) \
+                 ON CONFLICT(vm_id) DO UPDATE SET snapshot_id = ?2",
+                params![vm_id, snapshot_id],
+            )
+            .map(|_| ())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,6 +842,44 @@ mod tests {
         assert_eq!(s.recent_jobs(10).unwrap()[0].status, "interrupted");
         s.delete_pool("big").unwrap();
         assert!(s.list_pools().unwrap().is_empty());
+    }
+
+    #[test]
+    fn snapshot_tree_reparents_on_delete() {
+        let s = Store::memory().unwrap();
+        s.insert_vm("v", "vm", "{}", 1).unwrap();
+        let snap = |id: &str, parent: Option<&str>| SnapshotRow {
+            id: id.into(),
+            vm_id: "v".into(),
+            name: id.into(),
+            description: String::new(),
+            tag: format!("qui-{id}"),
+            parent_id: parent.map(String::from),
+            with_memory: false,
+            auto: false,
+            disks_json: "[]".into(),
+            created_at: 1,
+        };
+        // a -> b -> {c, d}
+        s.insert_snapshot(&snap("a", None)).unwrap();
+        s.insert_snapshot(&snap("b", Some("a"))).unwrap();
+        s.insert_snapshot(&snap("c", Some("b"))).unwrap();
+        s.insert_snapshot(&snap("d", Some("b"))).unwrap();
+        s.set_snapshot_head("v", Some("b")).unwrap();
+        s.delete_snapshot("v", "b").unwrap();
+        let rows = s.list_snapshots("v").unwrap();
+        assert_eq!(rows.len(), 3);
+        for id in ["c", "d"] {
+            let r = rows.iter().find(|r| r.id == id).unwrap();
+            assert_eq!(r.parent_id.as_deref(), Some("a"), "{id} re-parented");
+        }
+        assert_eq!(
+            s.snapshot_head("v").unwrap().as_deref(),
+            Some("a"),
+            "head moved up"
+        );
+        s.delete_vm("v").unwrap();
+        assert!(s.list_snapshots("v").unwrap().is_empty(), "cascade");
     }
 
     #[test]

@@ -58,6 +58,10 @@ export function useLiveInvalidation() {
           qc.invalidateQueries({ queryKey: ["vms"] });
           qc.invalidateQueries({ queryKey: ["vm", ev.vm_id] });
         }
+        if (ev.kind === "snapshot") {
+          qc.invalidateQueries({ queryKey: ["snapshots", ev.vm_id] });
+          qc.invalidateQueries({ queryKey: ["image"] });
+        }
         qc.invalidateQueries({ queryKey: ["vm-events", ev.vm_id] });
       }),
     [qc],
