@@ -41,6 +41,12 @@ linux = { status = "native", note = "Device must not be mounted; opened by the p
 windows = { status = "needs-setup", note = "All volumes on the disk must be offline; administrator rights required." }
 
 [[row]]
+id = "direct-io"
+feature = "Direct (unbuffered) disk I/O: cache modes none / directsync"
+linux = { status = "native", note = "" }
+windows = { status = "impossible", note = "QEMU on Windows cannot open images with direct I/O; cache=none falls back to writeback and directsync to writethrough." }
+
+[[row]]
 id = "folder-share"
 feature = "Folder sharing (virtiofs / 9p)"
 linux = { status = "native", note = "virtiofsd, or 9p as fallback." }
