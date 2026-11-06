@@ -27,6 +27,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/vms", get(list).post(create))
         .route("/vms/defaults", get(defaults))
         .route("/vms/compile", post(compile_preview))
+        .route("/vms/lint", post(lint))
         .route("/vms/{id}", get(detail).put(update).delete(delete))
         .route("/vms/{id}/actions/{action}", post(action))
         .route("/vms/{id}/serial-log", get(serial_log))
@@ -216,6 +217,18 @@ async fn vm_events(
             })
             .collect(),
     ))
+}
+
+/// "Check config": validate with QEMU itself, without side effects (M1-10).
+async fn lint(
+    State(app): State<Arc<App>>,
+    Json(b): Json<CompileBody>,
+) -> OpResponse<qemu_ui_core::lint::LintResult> {
+    app.supervisor
+        .lint(b.vm_id.as_deref(), b.spec)
+        .await
+        .map(Json)
+        .map_err(op_err)
 }
 
 /// Serial output so far (from the persistent serial log), for scrollback.
