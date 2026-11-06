@@ -289,6 +289,9 @@ function ImagePanel({ pool, name }: { pool: string; name: string }) {
           {check.isError && <span className="text-xs text-rose-600">{check.error.message}</span>}
         </div>
       </Card>
+      <ResizeCard pool={pool} name={name} size={x.virtual_size} format={x.format} openIn={x.in_use_by} />
+      <CompactCard pool={pool} name={name} format={x.format} actual={x.actual_size} openIn={x.in_use_by} snapshots={x.snapshots.length} />
+      <RenameCard pool={pool} name={name} usedBy={x.used_by} />
       <Card title="Copy / convert">
         <form
           className="space-y-2"
@@ -339,5 +342,123 @@ function ImagePanel({ pool, name }: { pool: string; name: string }) {
         {del.isError && <p className="mt-1 text-xs text-rose-600">{del.error.message}</p>}
       </Card>
     </div>
+  );
+}
+
+function ResizeCard({ pool, name, size, format, openIn }: { pool: string; name: string; size: number; format: string; openIn: string[] }) {
+  const [gib, setGib] = useState(() => Math.ceil(size / GiB));
+  const newSize = Math.round(gib * GiB);
+  const shrinking = newSize < size;
+  const live = openIn.length > 0;
+  const resize = useMutation({ mutationFn: () => api.resizeImage(pool, name, newSize, shrinking) });
+  const supported = format === "qcow2" || format === "raw";
+  return (
+    <Card title="Resize">
+      <div className="flex flex-wrap items-end gap-2">
+        <Field label={`New size (GiB) — now ${formatBytes(size)}`}>
+          <input className={`${inputCls} w-28`} type="number" min={0.001} step={1} value={gib} onChange={(e) => setGib(Number(e.target.value))} />
+        </Field>
+        <Button
+          variant={shrinking ? "danger" : "default"}
+          disabled={!supported || resize.isPending || newSize === size || (live && shrinking)}
+          onClick={() =>
+            (!shrinking || window.confirm(`Shrink ${name}? Data beyond ${formatBytes(newSize)} is lost.`)) && resize.mutate()
+          }
+        >
+          {shrinking ? "Shrink" : "Grow"}
+        </Button>
+      </div>
+      <p className="mt-2 text-xs text-zinc-500">
+        {!supported
+          ? `Resizing ${format} images is not supported; convert to qcow2 first.`
+          : live
+            ? `Open in ${openIn.join(", ")}: grows live, and the guest sees the new size at once (extend the partition inside the guest). Shrinking needs the VM stopped.`
+            : "The VM is stopped: grows or shrinks the image file. Shrinking cuts off data at the end."}
+      </p>
+      {resize.isSuccess && <p className="mt-1 text-xs text-zinc-500">Started — see Jobs.</p>}
+      {resize.isError && <p className="mt-1 text-xs text-rose-600">{resize.error.message}</p>}
+    </Card>
+  );
+}
+
+function CompactCard({
+  pool,
+  name,
+  format,
+  actual,
+  openIn,
+  snapshots,
+}: {
+  pool: string;
+  name: string;
+  format: string;
+  actual: number;
+  openIn: string[];
+  snapshots: number;
+}) {
+  const [compress, setCompress] = useState(false);
+  const estimate = useQuery({
+    queryKey: ["measure", pool, name, format],
+    queryFn: () => api.measureImage(pool, name, format),
+    enabled: format === "qcow2" || format === "raw",
+  });
+  const compact = useMutation({ mutationFn: () => api.compactImage(pool, name, compress) });
+  const blocked = openIn.length
+    ? `Open in ${openIn.join(", ")}; stop it first.`
+    : snapshots
+      ? "Has internal snapshots, which compaction would discard."
+      : format !== "qcow2" && format !== "raw"
+        ? `Compacting ${format} images is not supported.`
+        : null;
+  return (
+    <Card title="Compact">
+      <p className="text-xs text-zinc-500">
+        Rewrites the image without unused space, verifies the copy, then replaces the original. Overlays keep their backing file.
+      </p>
+      <p className="mt-1 text-xs">
+        On disk now: {formatBytes(actual)}
+        {estimate.data && <> · after compaction about {formatBytes(estimate.data.required)}</>}
+      </p>
+      <div className="mt-2 flex items-center gap-3">
+        {format === "qcow2" && (
+          <label className="flex items-center gap-1 text-xs">
+            <input type="checkbox" checked={compress} onChange={(e) => setCompress(e.target.checked)} />
+            Compress (smaller, slower reads)
+          </label>
+        )}
+        <Button disabled={!!blocked || compact.isPending} onClick={() => compact.mutate()}>
+          Compact
+        </Button>
+      </div>
+      {blocked && <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">{blocked}</p>}
+      {compact.isSuccess && <p className="mt-1 text-xs text-zinc-500">Started — see Jobs.</p>}
+      {compact.isError && <p className="mt-1 text-xs text-rose-600">{compact.error.message}</p>}
+    </Card>
+  );
+}
+
+function RenameCard({ pool, name, usedBy }: { pool: string; name: string; usedBy: string[] }) {
+  const qc = useQueryClient();
+  const [to, setTo] = useState(name);
+  const rename = useMutation({
+    mutationFn: () => api.renameImage(pool, name, to),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["pool", pool] });
+      navigate(`/storage/${pool}/${encodeURIComponent(to)}`);
+    },
+  });
+  return (
+    <Card title="Rename">
+      <div className="flex items-end gap-2">
+        <Field label="New name">
+          <input className={inputCls} value={to} onChange={(e) => setTo(e.target.value)} />
+        </Field>
+        <Button disabled={usedBy.length > 0 || !to || to === name || rename.isPending} onClick={() => rename.mutate()}>
+          Rename
+        </Button>
+      </div>
+      {usedBy.length > 0 && <p className="mt-1 text-xs text-zinc-500">Used by {usedBy.join(", ")}; detach it first.</p>}
+      {rename.isError && <p className="mt-1 text-xs text-rose-600">{rename.error.message}</p>}
+    </Card>
   );
 }

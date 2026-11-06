@@ -8,6 +8,7 @@ import type { Diagnostic } from "./generated/Diagnostic";
 import type { CheckResult } from "./generated/CheckResult";
 import type { ImageDetail } from "./generated/ImageDetail";
 import type { Job } from "./generated/Job";
+import type { MeasureResult } from "./generated/MeasureResult";
 import type { PoolInfo } from "./generated/PoolInfo";
 import type { PoolSummary } from "./generated/PoolSummary";
 import type { ScanStatus } from "./generated/ScanStatus";
@@ -117,6 +118,18 @@ export const api = {
       target_name: targetName,
       format,
     }),
+
+  measureImage: (pool: string, name: string, format: string) =>
+    post<MeasureResult>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/measure`, { format }),
+  resizeImage: (pool: string, name: string, sizeBytes: number, shrink: boolean) =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/resize`, {
+      size_bytes: sizeBytes,
+      shrink,
+    }),
+  compactImage: (pool: string, name: string, compress: boolean) =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/compact`, { compress }),
+  renameImage: (pool: string, name: string, newName: string) =>
+    post<void>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/rename`, { new_name: newName }),
 
   jobs: () => request<Job[]>("/jobs"),
   cancelJob: (id: string) => post<void>(`/jobs/${id}/cancel`),
