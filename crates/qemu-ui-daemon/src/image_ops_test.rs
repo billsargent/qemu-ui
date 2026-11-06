@@ -354,7 +354,7 @@ fn one_operation_per_image() {
         pool: "p".into(),
         name: "x.qcow2".into(),
     };
-    let g = super::BusyGuard::acquire(&r).ok().expect("first acquire");
+    let g = super::BusyGuard::acquire(&r).expect("first acquire");
     assert!(super::BusyGuard::acquire(&r).is_err());
     drop(g);
     assert!(super::BusyGuard::acquire(&r).is_ok());

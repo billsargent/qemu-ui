@@ -862,6 +862,12 @@ impl Supervisor {
         std::fs::create_dir_all(&logs).map_err(|e| OpError::Failed(e.into()))?;
         let log = logs.join(format!("run-{}.log", now()));
 
+        // Hold the image locks until the run is recorded, so an image
+        // operation (e.g. compaction) cannot replace a disk this VM is about
+        // to open; see `image_ops::lock_for_start`.
+        let images: Vec<ImageRef> = spec.disks.iter().map(|d| d.image.clone()).collect();
+        let start_locks = crate::image_ops::lock_for_start(&images).map_err(OpError::Conflict)?;
+
         self.store.clear_vm_error(id)?;
         self.set_state(id, VmState::Starting, None, None);
         tracing::info!(vm = %row.name, "starting: {}", compile::display_command(&compiled.program, &compiled.args));
@@ -900,6 +906,8 @@ impl Supervisor {
                 shutdown_seen: false,
             },
         );
+        // The run is recorded: image operations now see this VM as a user.
+        drop(start_locks);
 
         // Reap the child while we are its parent; report how it exited.
         let (exit_tx, exit_rx) = oneshot::channel::<String>();

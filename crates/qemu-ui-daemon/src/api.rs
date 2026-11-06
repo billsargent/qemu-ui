@@ -43,6 +43,7 @@ impl App {
     }
 }
 
+#[derive(Debug)]
 pub struct ApiError(pub StatusCode, pub String);
 
 impl IntoResponse for ApiError {

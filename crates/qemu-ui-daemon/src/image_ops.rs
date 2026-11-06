@@ -60,6 +60,27 @@ impl Drop for BusyGuard {
     }
 }
 
+/// Image locks held by a VM start from before QEMU is spawned until its run
+/// is recorded. Together with the open-check done under the same lock by
+/// compaction, this closes the window where a VM could open an image that
+/// is about to be replaced.
+pub struct StartLocks(#[allow(dead_code)] Vec<BusyGuard>);
+
+/// Lock every image a starting VM will open, or fail naming the busy one.
+pub fn lock_for_start(images: &[ImageRef]) -> Result<StartLocks, String> {
+    let mut guards = Vec::new();
+    for r in images {
+        if guards.iter().any(|g: &BusyGuard| &g.0 == r) {
+            continue;
+        }
+        match BusyGuard::acquire(r) {
+            Ok(g) => guards.push(g),
+            Err(ApiError(_, msg)) => return Err(format!("{msg}; try again when it finishes")),
+        }
+    }
+    Ok(StartLocks(guards))
+}
+
 fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
     ApiError(code, msg.into())
 }
@@ -365,7 +386,10 @@ async fn compact(
                 ctx.run_qemu_img(&q, &args).await?;
                 ctx.progress(None, Some("Verifying"));
                 run_check(&ctx, &q, &format, &tmp).await?;
-                // The image must still be closed before it is replaced.
+                // The image must still be closed before it is replaced. This
+                // job holds the image's busy lock, and a VM start holds the
+                // same lock until its run is recorded, so a VM either shows up
+                // here or cannot start until the swap is done.
                 if sv.image_users().1.contains_key(&r) {
                     anyhow::bail!(
                         "a VM opened the image during compaction; the original is unchanged"
@@ -456,3 +480,34 @@ async fn rename(
 #[cfg(test)]
 #[path = "image_ops_test.rs"]
 mod tests;
+
+#[cfg(test)]
+mod start_lock_tests {
+    use super::*;
+
+    fn img(n: &str) -> ImageRef {
+        ImageRef {
+            pool: "lock-test".into(),
+            name: n.into(),
+        }
+    }
+
+    #[test]
+    fn start_and_image_operations_exclude_each_other() {
+        // An operation in flight blocks a start that would open the image.
+        let op = BusyGuard::acquire(&img("a.qcow2")).unwrap();
+        let err = lock_for_start(&[img("b.qcow2"), img("a.qcow2")])
+            .err()
+            .unwrap();
+        assert!(err.contains("a.qcow2"), "{err}");
+        // A failed start releases what it had already locked.
+        assert!(BusyGuard::acquire(&img("b.qcow2")).is_ok());
+        drop(op);
+
+        // A start in progress blocks a new operation; duplicates are fine.
+        let start = lock_for_start(&[img("a.qcow2"), img("a.qcow2")]).unwrap();
+        assert!(BusyGuard::acquire(&img("a.qcow2")).is_err());
+        drop(start);
+        assert!(BusyGuard::acquire(&img("a.qcow2")).is_ok());
+    }
+}
