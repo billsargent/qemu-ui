@@ -45,6 +45,8 @@ fn caps(monitor_objects: bool) -> BinaryCaps {
         "VGA",
         "virtio-serial-pci",
         "virtserialport",
+        "virtio-9p-pci",
+        "vhost-user-fs-pci",
     ]
     .into_iter()
     .map(|n| DeviceInfo {
@@ -56,7 +58,7 @@ fn caps(monitor_objects: bool) -> BinaryCaps {
         no_user: false,
     })
     .collect();
-    let mut objects = vec!["secret".to_string()];
+    let mut objects = vec!["secret".to_string(), "memory-backend-memfd".to_string()];
     if monitor_objects {
         objects.push("monitor-qmp".into());
     }
@@ -181,6 +183,7 @@ fn base_spec() -> VmSpec {
             vdagent: false,
         },
         input: InputSpec { usb_tablet: true },
+        shares: vec![],
         passthrough: vec![],
     }
 }
@@ -243,6 +246,7 @@ fn linux_q35_virtio() {
     let caps = caps(true);
     let images = images();
     let ctx = Context {
+        shares: vec![],
         caps: &caps,
         os: "linux",
         run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
@@ -284,6 +288,7 @@ fn windows_uefi_secure_boot_cdrom_with_comma() {
     spec.display.vdagent = true;
     spec.passthrough = vec!["-global".into(), "ICH9-LPC.disable_s3=1".into()];
     let ctx = Context {
+        shares: vec![],
         caps: &caps,
         os: "windows",
         run: RunPaths {
@@ -327,6 +332,7 @@ fn old_qemu_uses_mon() {
     let caps = caps(false);
     let images = images();
     let ctx = Context {
+        shares: vec![],
         caps: &caps,
         os: "linux",
         run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
@@ -349,6 +355,7 @@ fn keyval_paths_double_commas() {
     let mut run = run_paths(VncListen::Unix("/run/a,b/vnc.sock".into()));
     run.serial = "/run/a,b/serial.sock".into();
     let ctx = Context {
+        shares: vec![],
         caps: &caps,
         os: "linux",
         run,
@@ -368,6 +375,7 @@ fn errors(spec: &VmSpec) -> Vec<String> {
     let caps = caps(true);
     let images = images();
     let ctx = Context {
+        shares: vec![],
         caps: &caps,
         os: "linux",
         run: run_paths(VncListen::Unix("/x".into())),
@@ -439,6 +447,7 @@ fn exposed_forward_is_a_warning_not_an_error() {
     let NicBackend::User { forwards } = &mut s.nics[0].backend;
     forwards[0].host_addr = "0.0.0.0".into();
     let ctx = Context {
+        shares: vec![],
         caps: &caps,
         os: "linux",
         run: run_paths(VncListen::Unix("/x".into())),
@@ -462,6 +471,148 @@ fn spec_roundtrips_through_json_and_migrate() {
     let s = base_spec();
     let v = serde_json::to_value(&s).unwrap();
     assert_eq!(migrate(v).unwrap(), s);
+}
+
+fn share(root: &str, path: &str, tag: &str, readonly: bool) -> ShareSpec {
+    ShareSpec {
+        root: root.into(),
+        path: path.into(),
+        tag: tag.into(),
+        readonly,
+    }
+}
+
+#[test]
+fn linux_shares_9p() {
+    let caps = caps(true);
+    let images = images();
+    let mut spec = base_spec();
+    spec.shares = vec![
+        share("src", "projects/web", "src", false),
+        share("docs", "", "docs", true),
+    ];
+    let ctx = Context {
+        shares: vec![
+            ResolvedShare {
+                path: "/srv/src/projects/web, v2".into(),
+                backend: ShareBackend::NineP,
+            },
+            ResolvedShare {
+                path: "/srv/docs".into(),
+                backend: ShareBackend::NineP,
+            },
+        ],
+        caps: &caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
+        images: &images,
+        firmware: None,
+    };
+    let c = compile(&spec, &ctx).unwrap();
+    // The comma in the folder is doubled in keyval syntax.
+    assert!(c.args.iter().any(
+        |a| a == "local,id=qui-fs0,path=/srv/src/projects/web,, v2,security_model=mapped-xattr"
+    ));
+    assert!(c.args.iter().any(|a| a == "local,id=qui-fs1,path=/srv/docs,security_model=mapped-xattr,readonly=on"));
+    assert!(
+        !c.args.iter().any(|a| a.contains("memory-backend-memfd")),
+        "9p needs no shared memory"
+    );
+    golden("linux-shares-9p", &c);
+}
+
+#[test]
+fn linux_shares_virtiofs() {
+    let caps = caps(true);
+    let images = images();
+    let mut spec = base_spec();
+    spec.shares = vec![share("src", "", "src", false)];
+    let ctx = Context {
+        shares: vec![ResolvedShare {
+            path: "/srv/src".into(),
+            backend: ShareBackend::VirtioFs {
+                socket: "/run/qui/vm1/vfs0.sock".into(),
+            },
+        }],
+        caps: &caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
+        images: &images,
+        firmware: None,
+    };
+    let c = compile(&spec, &ctx).unwrap();
+    assert!(
+        c.args
+            .iter()
+            .any(|a| a == "memory-backend-memfd,id=qui-mem,size=4096M,share=on")
+    );
+    assert!(
+        c.args
+            .windows(2)
+            .any(|w| w[0] == "-numa" && w[1] == "node,memdev=qui-mem")
+    );
+    golden("linux-shares-virtiofs", &c);
+}
+
+#[test]
+fn shares_on_windows_shaped_qemu_are_refused_with_the_reason() {
+    // The Windows build has no virtio-9p device and no fsdev support.
+    let mut caps = caps(true);
+    caps.devices
+        .retain(|d| d.name != "virtio-9p-pci" && d.name != "vhost-user-fs-pci");
+    let mut spec = base_spec();
+    spec.shares = vec![
+        share("src", "", "src", false),
+        share("docs", "", "docs", true),
+    ];
+    let d = validate(&spec, &caps);
+    let unsupported: Vec<_> = d.iter().filter(|x| x.rule == "share.unsupported").collect();
+    assert_eq!(unsupported.len(), 2);
+    assert_eq!(unsupported[0].field, "shares[0]");
+    assert!(
+        unsupported[0].message.contains("Windows"),
+        "{}",
+        unsupported[0].message
+    );
+    assert_eq!(unsupported[0].severity, Severity::Error);
+}
+
+#[test]
+fn share_validation_rules() {
+    let caps = caps(true);
+    let mut spec = base_spec();
+    spec.shares = vec![
+        share("src", "../etc", "data", false),
+        share("src", "", "data", false),
+        share("", "", "x y", false),
+    ];
+    let rules: Vec<(String, String)> = validate(&spec, &caps)
+        .into_iter()
+        .filter(|d| d.rule.starts_with("share."))
+        .map(|d| (d.field, d.rule))
+        .collect();
+    assert_eq!(
+        rules,
+        [
+            (
+                "shares[0].path".to_string(),
+                "share.path-invalid".to_string()
+            ),
+            (
+                "shares[1].tag".to_string(),
+                "share.tag-duplicate".to_string()
+            ),
+            (
+                "shares[2].root".to_string(),
+                "share.root-invalid".to_string()
+            ),
+            ("shares[2].tag".to_string(), "share.tag-invalid".to_string()),
+        ]
+    );
+    // The daemon must resolve every share before compiling.
+    let mut spec = base_spec();
+    spec.shares = vec![share("src", "", "src", false)];
+    assert_eq!(errors(&spec), ["share.unresolved"]);
 }
 
 #[test]

@@ -38,6 +38,7 @@ export default function StoragePage({ pool, image }: { pool?: string; image?: st
           <div className="space-y-4">
             <Uploader pool={current} />
             <CreateDisk pool={current} />
+            <ShareRoots />
           </div>
         )}
       </div>
@@ -583,6 +584,76 @@ function ClonesCard({
         )}
         {err && <p className="text-xs text-rose-600">{err.message}</p>}
       </div>
+    </Card>
+  );
+}
+
+/** Folders VMs may share subfolders of (M2-13, Linux hosts). */
+function ShareRoots() {
+  const qc = useQueryClient();
+  const info = useQuery({ queryKey: ["shares"], queryFn: api.shares });
+  const [name, setName] = useState("");
+  const [path, setPath] = useState("");
+  const add = useMutation({
+    mutationFn: () => api.addShareRoot(name, path),
+    onSuccess: () => {
+      setName("");
+      setPath("");
+      qc.invalidateQueries({ queryKey: ["shares"] });
+    },
+  });
+  const remove = useMutation({
+    mutationFn: (n: string) => api.removeShareRoot(n),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["shares"] }),
+  });
+  if (!info.data) return null;
+  return (
+    <Card title="Shared folder roots">
+      {!info.data.supported ? (
+        <p className="text-sm text-zinc-500">{info.data.reason}</p>
+      ) : (
+        <div className="space-y-3">
+          <p className="text-xs text-zinc-500">
+            VMs can share folders inside these roots. Roots may not overlap storage pools.{" "}
+            {info.data.virtiofs ? "Writable shares use virtiofs; read-only shares use 9p." : "Shares use 9p (install virtiofsd for faster writable shares)."}
+          </p>
+          {info.data.roots.length > 0 && (
+            <ul className="space-y-1 text-sm">
+              {info.data.roots.map((r) => (
+                <li key={r.name} className="flex items-center gap-2">
+                  <span className="font-medium">{r.name}</span>
+                  <span className="truncate font-mono text-xs text-zinc-500" title={r.path}>
+                    {r.path}
+                  </span>
+                  <span className="ml-auto">
+                    <Button variant="ghost" disabled={remove.isPending} onClick={() => remove.mutate(r.name)}>
+                      Remove
+                    </Button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <form
+            className="flex flex-wrap items-end gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              add.mutate();
+            }}
+          >
+            <Field label="Name">
+              <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="projects" />
+            </Field>
+            <Field label="Folder (must exist)">
+              <input className={`${inputCls} font-mono`} value={path} onChange={(e) => setPath(e.target.value)} />
+            </Field>
+            <Button type="submit" disabled={!name || !path || add.isPending}>
+              Add root
+            </Button>
+          </form>
+          {(add.error ?? remove.error) && <p className="text-xs text-rose-600">{(add.error ?? remove.error)?.message}</p>}
+        </div>
+      )}
     </Card>
   );
 }

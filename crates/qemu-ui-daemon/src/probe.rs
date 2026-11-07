@@ -574,6 +574,7 @@ mod compile_smoke {
             vnc,
         };
         let ctx = Context {
+            shares: vec![],
             caps,
             os: std::env::consts::OS,
             run,
@@ -717,6 +718,7 @@ mod compile_smoke {
                 vdagent: true,
             },
             input: InputSpec { usb_tablet: true },
+            shares: vec![],
             passthrough: vec![],
         };
         start_and_check(&caps, &spec, &images, None, &dir).await;

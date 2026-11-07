@@ -341,6 +341,34 @@
       ],
       "type": "object"
     },
+    "ShareSpec": {
+      "description": "A host folder shared into the guest (M2-13).\n\nLike images, shares never hold host paths: they name a registered\n*share root* and a folder relative to it, which the daemon canonicalises\nand confines to that root. The guest mounts the share by its tag:\n`mount -t 9p -o trans=virtio <tag> /mnt` or `mount -t virtiofs <tag> /mnt`.",
+      "properties": {
+        "path": {
+          "default": "",
+          "description": "Folder inside the root, `/`-separated; empty for the root itself.",
+          "type": "string"
+        },
+        "readonly": {
+          "default": false,
+          "description": "The guest cannot write. Read-only shares always use 9p.",
+          "type": "boolean"
+        },
+        "root": {
+          "description": "Name of a registered share root.",
+          "type": "string"
+        },
+        "tag": {
+          "description": "Mount tag the guest uses (letters, digits, `-`, `_`; up to 31).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "tag"
+      ],
+      "type": "object"
+    },
     "Topology": {
       "properties": {
         "cores": {
@@ -431,6 +459,14 @@
       "description": "Raw argv tokens appended after generated options (§5.3).",
       "items": {
         "type": "string"
+      },
+      "type": "array"
+    },
+    "shares": {
+      "default": [],
+      "description": "Host folders shared into the guest (Linux hosts; plan.md §9.6).",
+      "items": {
+        "$ref": "#/$defs/ShareSpec"
       },
       "type": "array"
     },

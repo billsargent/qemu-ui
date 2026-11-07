@@ -132,6 +132,21 @@ const MIGRATIONS: &[&str] = &[
         UNIQUE (pool, name)
     );
     "#,
+    // 7: shared folders (M2-13): share roots and per-run sidecar processes
+    r#"
+    CREATE TABLE share_root (
+        name       TEXT NOT NULL PRIMARY KEY,
+        path       TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL
+    );
+    CREATE TABLE run_sidecar (
+        run_id     INTEGER NOT NULL REFERENCES vm_run(id) ON DELETE CASCADE,
+        kind       TEXT NOT NULL,
+        pid        INTEGER NOT NULL,
+        proc_start INTEGER NOT NULL
+    );
+    CREATE INDEX run_sidecar_run ON run_sidecar(run_id);
+    "#,
 ];
 
 /// A resumable upload session row.
@@ -906,6 +921,64 @@ impl Store {
     }
 }
 
+impl Store {
+    // ----------------------------------------------------------- share roots
+
+    pub fn insert_share_root(&self, name: &str, path: &str, now: u64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO share_root (name, path, created_at) VALUES (?1, ?2, ?3)",
+                params![name, path, now as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// (name, path), by name.
+    pub fn list_share_roots(&self) -> Result<Vec<(String, String)>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT name, path FROM share_root ORDER BY name")?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+        })
+    }
+
+    pub fn delete_share_root(&self, name: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM share_root WHERE name = ?1", [name])
+                .map(|_| ())
+        })
+    }
+
+    // -------------------------------------------------------------- sidecars
+
+    /// Record a helper process (e.g. `virtiofsd`) belonging to a run.
+    pub fn insert_sidecar(&self, run_id: i64, kind: &str, pid: u32, proc_start: u64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO run_sidecar (run_id, kind, pid, proc_start) VALUES (?1, ?2, ?3, ?4)",
+                params![run_id, kind, pid as i64, proc_start as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// (kind, pid, process start time) of a run's helpers.
+    pub fn sidecars(&self, run_id: i64) -> Result<Vec<(String, u32, u64)>> {
+        self.with(|c| {
+            let mut st =
+                c.prepare("SELECT kind, pid, proc_start FROM run_sidecar WHERE run_id = ?1")?;
+            st.query_map([run_id], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get::<_, i64>(1)? as u32,
+                    r.get::<_, i64>(2)? as u64,
+                ))
+            })?
+            .collect()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,6 +999,40 @@ mod tests {
         s.put_kv("k", "v").unwrap();
         s.put_kv("k", "w").unwrap();
         assert_eq!(s.get_kv("k").unwrap().as_deref(), Some("w"));
+    }
+
+    #[test]
+    fn share_roots_and_sidecars() {
+        let s = Store::memory().unwrap();
+        s.insert_share_root("src", "/srv/src", 1).unwrap();
+        assert!(
+            s.insert_share_root("dup", "/srv/src", 1).is_err(),
+            "unique path"
+        );
+        assert_eq!(
+            s.list_share_roots().unwrap(),
+            [("src".to_string(), "/srv/src".to_string())]
+        );
+        s.delete_share_root("src").unwrap();
+        assert!(s.list_share_roots().unwrap().is_empty());
+
+        s.insert_vm("v1", "alpha", "{}", 1).unwrap();
+        let run = s
+            .insert_run(&NewRun {
+                vm_id: "v1",
+                args_json: "[]",
+                spec_json: "{}",
+                accel: "tcg",
+                pid: 1,
+                proc_start: 2,
+                run_dir: "/r",
+                vnc_json: None,
+                log_path: "/l",
+                started_at: 3,
+            })
+            .unwrap();
+        s.insert_sidecar(run, "virtiofsd", 42, 7).unwrap();
+        assert_eq!(s.sidecars(run).unwrap(), [("virtiofsd".to_string(), 42, 7)]);
     }
 
     #[test]

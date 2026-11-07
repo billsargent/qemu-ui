@@ -19,7 +19,7 @@ use ts_rs::TS;
 use crate::caps::BinaryCaps;
 use crate::spec::{
     CacheMode, DiskBus, DiskSpec, FirmwareSpec, ImageRef, Media, NicBackend, VmSpec,
-    valid_image_name, valid_mac, valid_name,
+    valid_image_name, valid_mac, valid_name, valid_share_path, valid_share_tag,
 };
 
 /// Prefix reserved for ids we generate.
@@ -92,6 +92,24 @@ pub struct ResolvedImage {
     pub format: String,
 }
 
+/// How a shared folder reaches the guest; chosen by the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShareBackend {
+    /// virtio-9p: built into QEMU, works everywhere QEMU has fsdev support.
+    NineP,
+    /// virtiofs: faster, needs a `virtiofsd` sidecar listening on `socket`
+    /// and the guest RAM in shared memory.
+    VirtioFs { socket: String },
+}
+
+/// A share after the daemon resolved its root and folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedShare {
+    /// Canonical host folder, confined to its share root.
+    pub path: String,
+    pub backend: ShareBackend,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedFirmware {
     pub code: String,
@@ -112,6 +130,8 @@ pub struct Context<'a> {
     pub images: &'a BTreeMap<ImageRef, ResolvedImage>,
     /// Required when the spec uses `FirmwareSpec::Descriptor`.
     pub firmware: Option<ResolvedFirmware>,
+    /// One per `spec.shares`, in order.
+    pub shares: Vec<ResolvedShare>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +191,65 @@ pub fn resolve_accel(spec: &VmSpec, caps: &BinaryCaps) -> Result<String, Diagnos
             format!("this QEMU does not support accelerator '{}'", spec.accel),
         )),
     }
+}
+
+/// The virtio-9p device this binary offers, if folder sharing via 9p works.
+/// Absent on Windows builds ("fsdev support is disabled").
+pub fn ninep_device(caps: &BinaryCaps) -> Option<&'static str> {
+    ["virtio-9p-pci", "virtio-9p-device"]
+        .into_iter()
+        .find(|d| has_device(caps, d))
+}
+
+/// Can this binary attach a virtiofs share (given a `virtiofsd`)?
+pub fn virtiofs_supported(caps: &BinaryCaps) -> bool {
+    has_device(caps, "vhost-user-fs-pci") && caps.backends.has_object("memory-backend-memfd")
+}
+
+fn validate_shares(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
+    let mut d = Vec::new();
+    let supported = ninep_device(caps).is_some() || virtiofs_supported(caps);
+    let mut tags = BTreeMap::new();
+    for (i, s) in spec.shares.iter().enumerate() {
+        let f = |x: &str| format!("shares[{i}].{x}");
+        if !supported {
+            d.push(Diagnostic::error(
+                format!("shares[{i}]"),
+                "share.unsupported",
+                "this QEMU has no folder sharing (no virtio-9p device). QEMU on Windows hosts cannot \
+                 share host folders at all (platform support: folder sharing); use an SMB share or \
+                 SFTP inside the guest instead",
+            ));
+        }
+        if !crate::storage::valid_pool_name(&s.root) {
+            d.push(Diagnostic::error(
+                f("root"),
+                "share.root-invalid",
+                "choose a registered share root",
+            ));
+        }
+        if !valid_share_path(&s.path) {
+            d.push(Diagnostic::error(
+                f("path"),
+                "share.path-invalid",
+                "use a folder inside the root, like 'projects/web' (no '..', no absolute paths)",
+            ));
+        }
+        if !valid_share_tag(&s.tag) {
+            d.push(Diagnostic::error(
+                f("tag"),
+                "share.tag-invalid",
+                "mount tags use 1-31 letters, digits, '-' or '_', starting with a letter or digit",
+            ));
+        } else if let Some(prev) = tags.insert(s.tag.clone(), i) {
+            d.push(Diagnostic::error(
+                f("tag"),
+                "share.tag-duplicate",
+                format!("tag '{}' is also used by share {prev}", s.tag),
+            ));
+        }
+    }
+    d
 }
 
 fn has_device(caps: &BinaryCaps, name: &str) -> bool {
@@ -546,6 +625,7 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
         ));
     }
 
+    d.extend(validate_shares(spec, caps));
     d.extend(validate_passthrough(&spec.passthrough));
     d
 }
@@ -639,6 +719,22 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
                     "image '{}' was not found in pool '{}'",
                     disk.image.name, disk.image.pool
                 ),
+            ));
+        }
+    }
+    if ctx.shares.len() != spec.shares.len() {
+        diags.push(Diagnostic::error(
+            "shares",
+            "share.unresolved",
+            "shared folders could not be resolved",
+        ));
+    }
+    for (i, r) in ctx.shares.iter().enumerate() {
+        if matches!(r.backend, ShareBackend::VirtioFs { .. }) && !virtiofs_supported(caps) {
+            diags.push(Diagnostic::error(
+                format!("shares[{i}]"),
+                "share.virtiofs-unsupported",
+                "this QEMU cannot attach virtiofs shares",
             ));
         }
     }
@@ -860,6 +956,64 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
             ),
         );
     }
+    // Shared folders
+    let mut shared_memory = false;
+    for (i, (share, r)) in spec.shares.iter().zip(&ctx.shares).enumerate() {
+        match &r.backend {
+            ShareBackend::NineP => {
+                let dev = ninep_device(caps).expect("validated");
+                let mut fsdev = format!(
+                    "local,id=qui-fs{i},path={},security_model=mapped-xattr",
+                    kv(&r.path)
+                );
+                if share.readonly {
+                    fsdev.push_str(",readonly=on");
+                }
+                push(&mut a, "-fsdev", fsdev);
+                push(
+                    &mut a,
+                    "-device",
+                    json_arg(json!({
+                        "driver": dev,
+                        "id": format!("qui-share{i}"),
+                        "fsdev": format!("qui-fs{i}"),
+                        "mount_tag": share.tag,
+                    })),
+                );
+            }
+            ShareBackend::VirtioFs { socket } => {
+                shared_memory = true;
+                push(
+                    &mut a,
+                    "-chardev",
+                    format!("socket,id=qui-vfs{i},path={}", kv(socket)),
+                );
+                push(
+                    &mut a,
+                    "-device",
+                    json_arg(json!({
+                        "driver": "vhost-user-fs-pci",
+                        "id": format!("qui-share{i}"),
+                        "chardev": format!("qui-vfs{i}"),
+                        "tag": share.tag,
+                    })),
+                );
+            }
+        }
+    }
+    if shared_memory {
+        // vhost-user devices need the guest RAM in shared memory.
+        push(
+            &mut a,
+            "-object",
+            format!(
+                "memory-backend-memfd,id=qui-mem,size={}M,share=on",
+                spec.memory.size_mib
+            ),
+        );
+        push(&mut a, "-numa", "node,memdev=qui-mem".into());
+    }
+
     // Never open a local window (Windows builds default to SDL/GTK).
     push(&mut a, "-display", "none".into());
     if spec.display.vnc {

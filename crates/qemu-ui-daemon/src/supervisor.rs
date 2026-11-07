@@ -59,6 +59,10 @@ pub struct Supervisor {
     pub scanner: Arc<Scanner>,
     pub pools: Arc<Pools>,
     pub jobs: Arc<crate::jobs::Jobs>,
+    /// Registered share roots for shared folders (M2-13).
+    pub shares: crate::shares::ShareRoots,
+    /// `virtiofsd`, when installed: writable shares then use virtiofs.
+    pub virtiofsd: Option<PathBuf>,
     data_dir: PathBuf,
     run_root: PathBuf,
     events: broadcast::Sender<VmEvent>,
@@ -148,6 +152,17 @@ impl Supervisor {
         let jobs = crate::jobs::Jobs::new(store.clone(), events.clone(), data_dir.join("jobs"))?;
         Ok(Arc::new(Supervisor {
             pools: Arc::new(Pools::new(data_dir, store.clone())?),
+            shares: crate::shares::ShareRoots::new(store.clone()),
+            virtiofsd: {
+                let v = crate::shares::find_virtiofsd();
+                if let Some(p) = &v {
+                    tracing::info!(
+                        "virtiofsd found at {}; writable shares use virtiofs",
+                        p.display()
+                    );
+                }
+                v
+            },
             jobs,
             store,
             scanner,
@@ -709,8 +724,148 @@ impl Supervisor {
             },
             images: &images,
             firmware,
+            shares: self.resolve_shares(spec, caps, &dir, scratch.is_some())?,
         };
         compile::compile(spec, &ctx).map(|c| (c, vnc))
+    }
+
+    /// Resolve each share to a confined host folder and pick its backend:
+    /// virtiofs for writable shares when `virtiofsd` is installed and the
+    /// binary supports it, else 9p. "Check config" always uses 9p (no
+    /// sidecar runs during a lint). When this QEMU has no folder sharing at
+    /// all, placeholders are returned and the compiler reports why.
+    fn resolve_shares(
+        &self,
+        spec: &VmSpec,
+        caps: &BinaryCaps,
+        run_dir: &Path,
+        lint: bool,
+    ) -> Result<Vec<compile::ResolvedShare>, Vec<Diagnostic>> {
+        let ninep = compile::ninep_device(caps).is_some();
+        let virtiofs = !lint && self.virtiofsd.is_some() && compile::virtiofs_supported(caps);
+        let mut out = Vec::new();
+        let mut errors = Vec::new();
+        for (i, share) in spec.shares.iter().enumerate() {
+            if !ninep && !virtiofs {
+                out.push(compile::ResolvedShare {
+                    path: String::new(),
+                    backend: compile::ShareBackend::NineP,
+                });
+                continue;
+            }
+            let path = match self.shares.resolve(&share.root, &share.path) {
+                Ok(p) => path_str(&p),
+                Err(e) => {
+                    errors.push(Diagnostic {
+                        severity: Severity::Error,
+                        field: format!("shares[{i}]"),
+                        rule: "share.unresolved".into(),
+                        message: format!("{e:#}"),
+                    });
+                    continue;
+                }
+            };
+            // Read-only is enforced by 9p (`readonly=on`); virtiofs is used
+            // for writable shares only.
+            let backend = if virtiofs && !share.readonly {
+                compile::ShareBackend::VirtioFs {
+                    socket: path_str(&run_dir.join(format!("vfs{i}.sock"))),
+                }
+            } else if ninep {
+                compile::ShareBackend::NineP
+            } else {
+                errors.push(Diagnostic {
+                    severity: Severity::Error,
+                    field: format!("shares[{i}].readonly"),
+                    rule: "share.readonly-needs-9p".into(),
+                    message: "this QEMU has no virtio-9p, and read-only shares need it".into(),
+                });
+                continue;
+            };
+            out.push(compile::ResolvedShare { path, backend });
+        }
+        if errors.is_empty() {
+            Ok(out)
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Start one `virtiofsd` per virtiofs share and wait for its socket.
+    /// The sidecars are detached like QEMU: they survive a daemon restart and
+    /// exit by themselves when QEMU disconnects; `finish` also terminates any
+    /// that are left once the run is over.
+    async fn start_sidecars(
+        &self,
+        spec: &VmSpec,
+        caps: &BinaryCaps,
+        run_dir: &Path,
+        logs: &Path,
+    ) -> Result<Vec<ProcId>> {
+        let shares = self
+            .resolve_shares(spec, caps, run_dir, false)
+            .map_err(|d| {
+                anyhow!(
+                    "{}",
+                    d.iter()
+                        .map(|x| x.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            })?;
+        let mut started = Vec::new();
+        for (i, r) in shares.iter().enumerate() {
+            let compile::ShareBackend::VirtioFs { socket } = &r.backend else {
+                continue;
+            };
+            let Some(bin) = &self.virtiofsd else {
+                bail!("virtiofsd is not installed")
+            };
+            let args: Vec<String> = vec![
+                format!("--socket-path={socket}"),
+                format!("--shared-dir={}", r.path),
+                // Unprivileged daemon: no namespace/chroot sandbox available.
+                "--sandbox=none".into(),
+                "--cache=auto".into(),
+            ];
+            let log = logs.join(format!("run-{}.virtiofsd{i}.log", now()));
+            let (child, id) = match procs::spawn_detached(&path_str(bin), &args, &log) {
+                Ok(x) => x,
+                Err(e) => {
+                    for p in &started {
+                        procs::terminate(*p, true);
+                    }
+                    return Err(e);
+                }
+            };
+            std::thread::spawn(move || {
+                let mut child = child;
+                let _ = child.wait();
+            });
+            started.push(id);
+            let sock = PathBuf::from(socket);
+            let mut ready = false;
+            for _ in 0..100 {
+                if sock.exists() {
+                    ready = true;
+                    break;
+                }
+                if !procs::alive(id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if !ready {
+                for p in &started {
+                    procs::terminate(*p, true);
+                }
+                bail!(
+                    "virtiofsd for share {i} did not start: {}",
+                    procs::log_tail(&log, 5)
+                );
+            }
+        }
+        Ok(started)
     }
 
     /// Compile without side effects, for the live argv drawer.
@@ -872,10 +1027,20 @@ impl Supervisor {
         self.set_state(id, VmState::Starting, None, None);
         tracing::info!(vm = %row.name, "starting: {}", compile::display_command(&compiled.program, &compiled.args));
 
+        let sidecars = match self.start_sidecars(&spec, &caps, &run_dir, &logs).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_state(id, VmState::Crashed, None, Some(&format!("{e:#}")));
+                return Err(OpError::Failed(e));
+            }
+        };
         let (child, proc_id) = match procs::spawn_detached(&compiled.program, &compiled.args, &log)
         {
             Ok(x) => x,
             Err(e) => {
+                for p in &sidecars {
+                    procs::terminate(*p, true);
+                }
                 self.set_state(id, VmState::Crashed, None, Some(&format!("{e:#}")));
                 return Err(OpError::Failed(e));
             }
@@ -906,6 +1071,11 @@ impl Supervisor {
                 shutdown_seen: false,
             },
         );
+        for p in &sidecars {
+            let _ = self
+                .store
+                .insert_sidecar(run_id, "virtiofsd", p.pid, p.start_time);
+        }
         // The run is recorded: image operations now see this VM as a user.
         drop(start_locks);
 
@@ -1098,6 +1268,16 @@ impl Supervisor {
             .as_ref()
             .is_some_and(|l| l.stop_requested || l.shutdown_seen);
         let _ = self.store.end_run(run_id, now(), exit_status);
+        // Helpers (virtiofsd) normally exit with QEMU; make sure.
+        for (_, pid, start) in self.store.sidecars(run_id).unwrap_or_default() {
+            let p = ProcId {
+                pid,
+                start_time: start,
+            };
+            if procs::alive(p) {
+                procs::terminate(p, true);
+            }
+        }
         let _ = std::fs::remove_dir_all(self.run_dir(id));
         if expected && error.is_none() {
             self.set_state(id, VmState::Stopped, None, None);

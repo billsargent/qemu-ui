@@ -39,6 +39,9 @@ pub struct VmSpec {
     pub display: DisplaySpec,
     #[serde(default)]
     pub input: InputSpec,
+    /// Host folders shared into the guest (Linux hosts; plan.md §9.6).
+    #[serde(default)]
+    pub shares: Vec<ShareSpec>,
     /// Raw argv tokens appended after generated options (§5.3).
     #[serde(default)]
     pub passthrough: Vec<String>,
@@ -246,6 +249,42 @@ impl Default for InputSpec {
     }
 }
 
+/// A host folder shared into the guest (M2-13).
+///
+/// Like images, shares never hold host paths: they name a registered
+/// *share root* and a folder relative to it, which the daemon canonicalises
+/// and confines to that root. The guest mounts the share by its tag:
+/// `mount -t 9p -o trans=virtio <tag> /mnt` or `mount -t virtiofs <tag> /mnt`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
+#[ts(export)]
+pub struct ShareSpec {
+    /// Name of a registered share root.
+    pub root: String,
+    /// Folder inside the root, `/`-separated; empty for the root itself.
+    #[serde(default)]
+    pub path: String,
+    /// Mount tag the guest uses (letters, digits, `-`, `_`; up to 31).
+    pub tag: String,
+    /// The guest cannot write. Read-only shares always use 9p.
+    #[serde(default)]
+    pub readonly: bool,
+}
+
+/// Is `tag` usable as a 9p/virtiofs mount tag?
+pub fn valid_share_tag(tag: &str) -> bool {
+    let mut c = tag.chars();
+    matches!(c.next(), Some(x) if x.is_ascii_alphanumeric())
+        && tag.len() <= 31
+        && c.all(|x| x.is_ascii_alphanumeric() || x == '-' || x == '_')
+}
+
+/// Is `path` a safe relative folder path (`a/b`, or empty for the root)?
+/// Every component must be a plain name: no `..`, `.`, separators, drive
+/// letters, device names or hidden components.
+pub fn valid_share_path(path: &str) -> bool {
+    path.is_empty() || (path.len() <= 1024 && path.split('/').all(valid_image_name))
+}
+
 /// Is `name` an acceptable VM name?
 pub fn valid_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -344,6 +383,23 @@ mod tests {
             valid_image_name("console.iso"),
             "only exact device names are reserved"
         );
+    }
+
+    #[test]
+    fn share_tags_and_paths() {
+        assert!(valid_share_tag("data"));
+        assert!(valid_share_tag("host_src-2"));
+        assert!(!valid_share_tag(""));
+        assert!(!valid_share_tag("-x"));
+        assert!(!valid_share_tag("a b"));
+        assert!(!valid_share_tag(&"a".repeat(32)));
+        assert!(valid_share_path(""));
+        assert!(valid_share_path("projects/web"));
+        for bad in [
+            "..", "a/../b", "/abs", "a//b", "a/", "C:/x", "a\\b", ".git", "a/nul", "a/./b",
+        ] {
+            assert!(!valid_share_path(bad), "{bad}");
+        }
     }
 
     #[test]
