@@ -14,6 +14,7 @@ mod jobs;
 mod probe;
 mod procs;
 mod scan;
+mod shares;
 mod store;
 mod supervisor;
 

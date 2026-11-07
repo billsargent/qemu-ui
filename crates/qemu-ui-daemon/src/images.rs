@@ -166,6 +166,13 @@ impl Pools {
                 bail!("{} overlaps pool '{}' ({})", dir.display(), p.name, p.path);
             }
         }
+        // A guest writing through a shared folder must never reach VM disks.
+        for (share, path) in self.store.list_share_roots()? {
+            let other = Path::new(&path);
+            if dir.starts_with(other) || other.starts_with(&dir) {
+                bail!("{} overlaps share root '{share}' ({path})", dir.display());
+            }
+        }
         let row = PoolRow {
             name: name.into(),
             path: dir.display().to_string(),

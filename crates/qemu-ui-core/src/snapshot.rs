@@ -141,6 +141,7 @@ mod tests {
             nics: vec![],
             display: DisplaySpec::default(),
             input: InputSpec::default(),
+            shares: vec![],
             passthrough: vec![],
         }
     }

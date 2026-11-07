@@ -183,6 +183,7 @@ mod tests {
             }],
             display: DisplaySpec::default(),
             input: InputSpec::default(),
+            shares: vec![],
             passthrough: vec!["-global".into(), "ICH9-LPC.bogus=1".into()],
         }
     }

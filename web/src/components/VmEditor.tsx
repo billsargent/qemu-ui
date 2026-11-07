@@ -11,6 +11,7 @@ import type { Firmware } from "../api/generated/Firmware";
 import type { LintResult } from "../api/generated/LintResult";
 import type { Media } from "../api/generated/Media";
 import type { NicSpec } from "../api/generated/NicSpec";
+import type { ShareSpec } from "../api/generated/ShareSpec";
 import type { VmSpec } from "../api/generated/VmSpec";
 import { Badge, Button, Card, Field, inputCls } from "./ui";
 
@@ -536,6 +537,13 @@ export function VmEditor({
           <Diags list={[...diagsFor("display"), ...diagsFor("input")]} />
         </Card>
 
+        <SharesCard
+          shares={spec.shares}
+          onChange={(shares) => set({ shares })}
+          diagsFor={(i) => diagsFor(`shares[${i}]`)}
+          other={diagsFor("shares").filter((d) => d.field === "shares")}
+        />
+
         <Card title="Extra QEMU options (passthrough)">
           <p className="mb-2 text-xs text-zinc-500">
             One argv token per line, appended verbatim after the generated options. Options the editor manages are refused.
@@ -678,5 +686,94 @@ function ArgvDrawer({
         </p>
       </Card>
     </div>
+  );
+}
+
+/** Host folders shared into the guest (M2-13). Linux hosts only. */
+function SharesCard({
+  shares,
+  onChange,
+  diagsFor,
+  other,
+}: {
+  shares: ShareSpec[];
+  onChange: (s: ShareSpec[]) => void;
+  diagsFor: (i: number) => Diagnostic[];
+  other: Diagnostic[];
+}) {
+  const info = useQuery({ queryKey: ["shares"], queryFn: api.shares });
+  const roots = info.data?.roots ?? [];
+  const update = (i: number, patch: Partial<ShareSpec>) => onChange(shares.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  const supported = info.data?.supported ?? true;
+  return (
+    <Card
+      title="Shared folders"
+      actions={
+        supported && (
+          <Button
+            variant="ghost"
+            disabled={!roots.length}
+            title={roots.length ? undefined : "Register a share root on the Storage page first"}
+            onClick={() =>
+              onChange([...shares, { root: roots[0]?.name ?? "", path: "", tag: `share${shares.length}`, readonly: false }])
+            }
+          >
+            Add folder
+          </Button>
+        )
+      }
+    >
+      {!supported ? (
+        <p className="text-sm text-zinc-500">{info.data?.reason}</p>
+      ) : shares.length === 0 ? (
+        <p className="text-sm text-zinc-500">
+          No shared folders.{" "}
+          {roots.length ? "" : "Register a folder as a share root on the Storage page to share it with VMs."}
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {shares.map((s, i) => (
+            <div key={i} className="rounded border border-zinc-200 p-2 dark:border-zinc-800">
+              <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                <Field label="Share root">
+                  <select className={inputCls} value={s.root} onChange={(e) => update(i, { root: e.target.value })}>
+                    {!roots.some((r) => r.name === s.root) && <option value={s.root}>{s.root || "— choose —"}</option>}
+                    {roots.map((r) => (
+                      <option key={r.name} value={r.name} title={r.path}>
+                        {r.name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Folder inside it">
+                  <input className={`${inputCls} font-mono`} value={s.path} placeholder="(the whole root)" onChange={(e) => update(i, { path: e.target.value })} />
+                </Field>
+                <Field label="Mount tag">
+                  <input className={`${inputCls} font-mono`} value={s.tag} onChange={(e) => update(i, { tag: e.target.value })} />
+                </Field>
+                <label className="flex items-end gap-2 pb-1 text-xs">
+                  <input type="checkbox" checked={s.readonly} onChange={(e) => update(i, { readonly: e.target.checked })} />
+                  Read-only
+                </label>
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <code className="text-xs text-zinc-500">
+                  {s.readonly || !info.data?.virtiofs
+                    ? `mount -t 9p -o trans=virtio,version=9p2000.L ${s.tag} /mnt`
+                    : `mount -t virtiofs ${s.tag} /mnt`}
+                </code>
+                <span className="ml-auto">
+                  <Button variant="ghost" onClick={() => onChange(shares.filter((_, j) => j !== i))}>
+                    Remove
+                  </Button>
+                </span>
+              </div>
+              <Diags list={diagsFor(i)} />
+            </div>
+          ))}
+        </div>
+      )}
+      <Diags list={other} />
+    </Card>
   );
 }

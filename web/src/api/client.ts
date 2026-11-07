@@ -14,6 +14,8 @@ import type { PoolSummary } from "./generated/PoolSummary";
 import type { UploadProgress } from "./generated/UploadProgress";
 import type { UploadSession } from "./generated/UploadSession";
 import type { ScanStatus } from "./generated/ScanStatus";
+import type { ShareRoot } from "./generated/ShareRoot";
+import type { SharesInfo } from "./generated/SharesInfo";
 import type { SnapshotList } from "./generated/SnapshotList";
 import type { VmDetail } from "./generated/VmDetail";
 import type { VmEvent } from "./generated/VmEvent";
@@ -91,6 +93,10 @@ export const api = {
   },
   consoleTicket: (id: string, kind: "vnc" | "serial") => post<ConsoleTicket>(`/vms/${id}/consoles/${kind}/ticket`),
 
+  shares: () => request<SharesInfo>("/shares"),
+  addShareRoot: (name: string, path: string) => post<ShareRoot>("/shares/roots", { name, path }),
+  removeShareRoot: (name: string) =>
+    request<void>(`/shares/roots/${encodeURIComponent(name)}`, { method: "DELETE" }),
   pools: () => request<PoolSummary[]>("/pools"),
   addPool: (name: string, path: string, quotaBytes: number | null) =>
     post<void>("/pools", { name, path, quota_bytes: quotaBytes }),
