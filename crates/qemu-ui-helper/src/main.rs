@@ -7,6 +7,7 @@
 mod disks;
 mod exports;
 mod server;
+mod taps;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -133,9 +134,11 @@ async fn main() -> Result<()> {
     #[cfg(windows)]
     let (secret, allowed_uid) = (Some(load_or_create_secret(&state)?), None);
 
+    let taps = taps::Taps::open(state.join("taps.json"), Box::new(taps::HostRunner));
     let helper = Arc::new(server::Helper::new(
         config,
         exports,
+        taps,
         secret,
         allowed_uid,
         state.join("audit.log"),

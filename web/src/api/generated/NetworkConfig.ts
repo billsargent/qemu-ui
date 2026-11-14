@@ -4,4 +4,12 @@ export type NetworkConfig = { "kind": "nat",
 /**
  * IPv4 subnet in CIDR form; `None` uses QEMU's 10.0.2.0/24.
  */
-subnet: string | null, };
+subnet: string | null, } | { "kind": "bridged", 
+/**
+ * Host bridge interface, e.g. `br0`.
+ */
+bridge: string, } | { "kind": "host-only", } | { "kind": "tap", 
+/**
+ * The adapter's name (`Get-NetAdapter` Name), e.g. `Ethernet 3`.
+ */
+adapter: string, };

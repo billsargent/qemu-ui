@@ -4,8 +4,8 @@
 //! * Guest agent: when the VM has a `qui-ga0` chardev (the device arrives
 //!   with M7-02), `guest-network-get-interfaces` over its socket.
 //! * slirp NAT: `info usernet` per `qui-net<i>` netdev.
-//! * Host neighbour table: for bridged/host-only NICs once M3-05 adds them;
-//!   the parsing lives in core (`parse_ip_neigh`, `parse_net_neighbor_json`).
+//! * Host neighbour table: for NICs on bridged, host-only and TAP networks
+//!   (`hostnet::neighbors`; parsing in core).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -54,6 +54,19 @@ pub async fn guest_net(sv: &Supervisor, id: &str) -> OpResult<GuestNetInfo> {
     };
 
     let networks = sv.networks.list().unwrap_or_default();
+    // The neighbour table, only when some NIC is on a tap-backed network.
+    let tap_backed = spec.nics.iter().any(|n| {
+        matches!(&n.backend, NicBackend::Network { network, .. }
+            if networks.iter().any(|x| &x.id == network && x.config.is_tap()))
+    });
+    let neighbors = if tap_backed {
+        crate::hostnet::neighbors().await.unwrap_or_else(|e| {
+            tracing::debug!(vm = %id, "neighbour table: {e:#}");
+            vec![]
+        })
+    } else {
+        vec![]
+    };
     let hubs = usernet(&qmp).await.unwrap_or_else(|e| {
         tracing::debug!(vm = %id, "info usernet: {e:#}");
         vec![]
@@ -85,10 +98,19 @@ pub async fn guest_net(sv: &Supervisor, id: &str) -> OpResult<GuestNetInfo> {
                 NicBackend::Network { network, .. } => networks
                     .iter()
                     .find(|n| &n.id == network)
-                    .map(|n| match &n.config {
-                        NetworkConfig::Nat { subnet } => subnet.clone(),
+                    .and_then(|n| match &n.config {
+                        NetworkConfig::Nat { subnet } => Some(subnet.clone()),
+                        // Tap-backed: the guest is on a host bridge/adapter.
+                        NetworkConfig::Bridged { .. }
+                        | NetworkConfig::HostOnly {}
+                        | NetworkConfig::Tap { .. } => None,
                     }),
             };
+            if nat_subnet.is_none()
+                && let Some(mac) = &nic.mac
+            {
+                addrs.extend(qemu_ui_core::guest_net::lookup_neighbors(&neighbors, mac));
+            }
             if let Some(subnet) = nat_subnet {
                 let netdev = format!("qui-net{i}");
                 let hub = hubs.iter().find(|h| h.netdev == netdev);

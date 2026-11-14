@@ -32,7 +32,7 @@ windows = { status = "native", note = "-netdev dgram / stream" }
 id = "net-bridged"
 feature = "Bridged and host-only networking"
 linux = { status = "native", note = "tap + bridge, set up by the privileged helper." }
-windows = { status = "needs-setup", note = "Requires the TAP-Windows driver and administrator rights." }
+windows = { status = "needs-setup", note = "Install the TAP-Windows driver; an administrator bridges the TAP adapter to the LAN once in Network Connections. Single queue." }
 
 [[row]]
 id = "physical-disk"

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { NetworkConfig } from "../api/generated/NetworkConfig";
 import type { NetworkInfo } from "../api/generated/NetworkInfo";
+import type { HostNetInfo } from "../api/generated/HostNetInfo";
 import { Badge, Button, Card, Field, inputCls } from "../components/ui";
 
 /** What each kind of network does, for the picker and the list. */
@@ -12,7 +13,38 @@ export const NETWORK_KINDS: { kind: NetworkConfig["kind"]; label: string; about:
     label: "NAT",
     about: "Outbound internet through the host. Each VM gets its own private NAT; reach guests through port forwards.",
   },
+  {
+    kind: "bridged",
+    label: "Bridged",
+    about:
+      "Linux: guests join an existing host bridge and the LAN behind it, reachable directly. Needs the qemu-ui helper with the bridge allowlisted in helper.toml.",
+  },
+  {
+    kind: "host-only",
+    label: "Host-only",
+    about:
+      "Linux: guests share a private bridge with the host and each other, with no outside access. Needs the qemu-ui helper with [network.host_only] in helper.toml.",
+  },
+  {
+    kind: "tap",
+    label: "TAP",
+    about:
+      "Windows: guests use a TAP-Windows adapter. Bridge it to your physical adapter in Network Connections (admin) to put guests on the LAN.",
+  },
 ];
+
+/** Which host OS a kind runs on (null: any). */
+export function kindOs(kind: NetworkConfig["kind"]): string | null {
+  switch (kind) {
+    case "bridged":
+    case "host-only":
+      return "linux";
+    case "tap":
+      return "windows";
+    default:
+      return null;
+  }
+}
 
 export function kindLabel(c: NetworkConfig): string {
   return NETWORK_KINDS.find((k) => k.kind === c.kind)?.label ?? c.kind;
@@ -23,6 +55,12 @@ export function networkSummary(c: NetworkConfig): string {
   switch (c.kind) {
     case "nat":
       return c.subnet ? `subnet ${c.subnet}` : "default subnet (10.0.2.0/24)";
+    case "bridged":
+      return `bridge ${c.bridge}`;
+    case "host-only":
+      return "helper-managed bridge, no uplink";
+    case "tap":
+      return `adapter ${c.adapter}`;
   }
 }
 
@@ -30,12 +68,80 @@ function blank(kind: NetworkConfig["kind"]): NetworkConfig {
   switch (kind) {
     case "nat":
       return { kind: "nat", subnet: null };
+    case "bridged":
+      return { kind: "bridged", bridge: "" };
+    case "host-only":
+      return { kind: "host-only" };
+    case "tap":
+      return { kind: "tap", adapter: "" };
   }
 }
 
+/** Why this kind cannot be used on this host, if it cannot. */
+function hostProblem(kind: NetworkConfig["kind"], host?: HostNetInfo): string | null {
+  const os = kindOs(kind);
+  if (!host || !os) return null;
+  const label = NETWORK_KINDS.find((k) => k.kind === kind)?.label ?? kind;
+  if (host.os !== os) return `${label} networks need a ${os === "linux" ? "Linux" : "Windows"} host.`;
+  if (kind === "tap") return host.adapters.some((a) => a.is_tap) ? null : host.reason;
+  if (!host.helper) return `The qemu-ui helper is not available: ${host.reason ?? "install and start it"}`;
+  if (kind === "host-only" && !host.host_only) return "Host-only networking is disabled in the helper's helper.toml ([network.host_only]).";
+  if (kind === "bridged" && host.bridges.length === 0) return "The helper allows no bridges; add them to [network] bridges in helper.toml.";
+  return null;
+}
+
 /** Kind-specific settings. */
-function ConfigFields({ config, onChange }: { config: NetworkConfig; onChange: (c: NetworkConfig) => void }) {
+function ConfigFields({
+  config,
+  onChange,
+  host,
+}: {
+  config: NetworkConfig;
+  onChange: (c: NetworkConfig) => void;
+  host?: HostNetInfo;
+}) {
   switch (config.kind) {
+    case "bridged":
+      return (
+        <Field label="Bridge" hint="allowlisted in helper.toml">
+          <input
+            className={`${inputCls} w-40 font-mono`}
+            list="qui-bridges"
+            placeholder="br0"
+            value={config.bridge}
+            onChange={(e) => onChange({ ...config, bridge: e.target.value.trim() })}
+          />
+          <datalist id="qui-bridges">
+            {(host?.bridges ?? []).map((b) => (
+              <option key={b} value={b} />
+            ))}
+          </datalist>
+        </Field>
+      );
+    case "host-only":
+      return null;
+    case "tap": {
+      const taps = (host?.adapters ?? []).filter((a) => a.is_tap);
+      return (
+        <Field label="Adapter" hint="a TAP-Windows adapter">
+          {taps.length > 0 ? (
+            <select className={inputCls} value={config.adapter} onChange={(e) => onChange({ ...config, adapter: e.target.value })}>
+              <option value="">choose…</option>
+              {taps.map((a) => (
+                <option key={a.name} value={a.name}>
+                  {a.name} ({a.status})
+                </option>
+              ))}
+              {config.adapter && !taps.some((a) => a.name === config.adapter) && (
+                <option value={config.adapter}>{config.adapter} (not found)</option>
+              )}
+            </select>
+          ) : (
+            <input className={inputCls} value={config.adapter} onChange={(e) => onChange({ ...config, adapter: e.target.value })} />
+          )}
+        </Field>
+      );
+    }
     case "nat":
       return (
         <Field label="Subnet" hint="IPv4 CIDR; empty for QEMU's default">
@@ -55,6 +161,7 @@ function NetworkRow({ n }: { n: NetworkInfo }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(n.name);
   const [config, setConfig] = useState<NetworkConfig>(n.config);
+  const host = useQuery({ queryKey: ["host-net"], queryFn: api.hostNet, staleTime: 30_000 });
   const done = () => qc.invalidateQueries({ queryKey: ["networks"] });
   const save = useMutation({
     mutationFn: () => api.updateNetwork(n.id, name, config),
@@ -101,7 +208,7 @@ function NetworkRow({ n }: { n: NetworkInfo }) {
           <Field label="Name">
             <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} />
           </Field>
-          <ConfigFields config={config} onChange={setConfig} />
+          <ConfigFields config={config} onChange={setConfig} host={host.data} />
           <Button type="submit" disabled={!name || save.isPending}>
             Save
           </Button>
@@ -137,6 +244,8 @@ export default function NetworksPage() {
     },
   });
   const about = NETWORK_KINDS.find((k) => k.kind === config.kind)?.about;
+  const host = useQuery({ queryKey: ["host-net"], queryFn: api.hostNet, staleTime: 30_000 });
+  const problem = hostProblem(config.kind, host.data);
 
   return (
     <div className="max-w-4xl space-y-6">
@@ -178,12 +287,17 @@ export default function NetworksPage() {
                 ))}
               </select>
             </Field>
-            <ConfigFields config={config} onChange={setConfig} />
+            <ConfigFields config={config} onChange={setConfig} host={host.data} />
             <Button type="submit" disabled={!name || create.isPending}>
               Create
             </Button>
           </div>
           {about && <p className="text-xs text-zinc-500">{about}</p>}
+          {problem && (
+            <p className="text-xs text-amber-700 dark:text-amber-400">
+              <Badge tone="amber">needs setup</Badge> {problem}
+            </p>
+          )}
           {create.error && <p className="text-xs text-rose-600">{create.error.message}</p>}
         </form>
       </Card>

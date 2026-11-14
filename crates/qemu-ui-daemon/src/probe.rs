@@ -597,6 +597,7 @@ mod compile_smoke {
             vnc,
         };
         let ctx = Context {
+            taps: Default::default(),
             networks: &[],
             shares: vec![],
             caps,
