@@ -183,14 +183,22 @@ impl Jobs {
             id: id.clone(),
             kind: kind.into(),
             title: title.into(),
-            status: JobStatus::Queued.as_str().into(),
+            // Unthrottled jobs never wait for a slot, so they are running from
+            // the moment they exist (callers may observe them immediately).
+            status: if throttled {
+                JobStatus::Queued
+            } else {
+                JobStatus::Running
+            }
+            .as_str()
+            .into(),
             progress: None,
-            message: Some("Waiting for a free slot".into()),
+            message: throttled.then(|| "Waiting for a free slot".into()),
             error: None,
             target_json: target.to_string(),
             log_path: Some(log.display().to_string()),
             created_at: now(),
-            started_at: None,
+            started_at: (!throttled).then(now),
             finished_at: None,
         };
         if let Err(e) = self.store.insert_job(&row) {
