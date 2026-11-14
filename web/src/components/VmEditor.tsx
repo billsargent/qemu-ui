@@ -78,6 +78,22 @@ const BUS_LABEL: Record<DiskBus, string> = {
   ide: "IDE / SATA (works with any installer)",
   usb: "USB storage",
 };
+// Trade-offs shown under the Bus and Cache fields (M2-09).
+const BUS_HINT: Record<DiskBus, string> = {
+  virtio: "Fastest. Linux has drivers built in; Windows needs the virtio-win drivers during setup.",
+  scsi: "virtio-scsi: many disks, discard/TRIM, CD-ROMs, hotplug. Needs virtio drivers on Windows.",
+  nvme: "Fast and natively supported by modern OSes; one controller per disk.",
+  ide: "IDE/SATA works with every installer, but is slow and cannot be hotplugged.",
+  usb: "USB storage: removable, hotpluggable, slow. Handy for small images.",
+};
+const CACHE_HINT: Record<CacheMode, string> = {
+  none: "Bypasses the host page cache (best default). Windows hosts cannot do direct I/O and use writeback.",
+  writeback: "Uses the host cache; fast, and safe as long as the guest flushes.",
+  writethrough: "Every write reaches the disk before it completes; safe but slow.",
+  directsync: "Direct I/O plus synchronous writes; safest, slowest.",
+  unsafe: "Ignores flushes. Only for throwaway VMs: a host crash can corrupt the image.",
+};
+
 const CACHE_LABEL: Record<CacheMode, string> = {
   none: "none (direct I/O)",
   writeback: "writeback",
@@ -114,6 +130,14 @@ export function VmEditor({
   const caps = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
   const pool = useQuery({ queryKey: ["images", "all"], queryFn: api.allImages });
   const bin: BinaryCaps | undefined = caps.data?.caps?.binaries.find((b) => b.arch === spec.arch);
+  // Which disk buses this machine actually has (from QEMU introspection).
+  const busSupport = useQuery({
+    queryKey: ["buses", spec.arch, spec.machine.type],
+    queryFn: () => api.diskBuses(spec.arch, spec.machine.type),
+    enabled: !!spec.machine.type,
+    staleTime: Infinity,
+  });
+  const busInfo = (b: DiskBus) => busSupport.data?.find((s) => s.bus === b);
 
   // Live argv (M1-14): compile on every change, debounced.
   const debounced = useDebounced(spec, 300);
@@ -366,13 +390,21 @@ export function VmEditor({
                       <option value="cdrom">CD-ROM</option>
                     </select>
                   </Field>
-                  <Field label="Bus">
+                  <Field
+                    label="Bus"
+                    hint={busInfo(d.bus)?.available === false ? busInfo(d.bus)?.reason : BUS_HINT[d.bus]}
+                  >
                     <select className={inputCls} value={d.bus} onChange={(e) => updateDisk(i, { bus: e.target.value as DiskBus })}>
-                      {(Object.keys(BUS_LABEL) as DiskBus[]).map((b) => (
-                        <option key={b} value={b}>
-                          {BUS_LABEL[b]}
-                        </option>
-                      ))}
+                      {(Object.keys(BUS_LABEL) as DiskBus[]).map((b) => {
+                        const s = busInfo(b);
+                        const unavailable = s?.available === false;
+                        return (
+                          <option key={b} value={b} disabled={unavailable && b !== d.bus} title={unavailable ? (s?.reason ?? "") : BUS_HINT[b]}>
+                            {BUS_LABEL[b]}
+                            {unavailable ? " — not on this machine" : ""}
+                          </option>
+                        );
+                      })}
                     </select>
                   </Field>
                   <Field label="Boot order">
@@ -385,13 +417,29 @@ export function VmEditor({
                       onChange={(e) => updateDisk(i, { boot_index: e.target.value === "" ? null : Number(e.target.value) })}
                     />
                   </Field>
-                  <Field label="Cache">
+                  <Field label="Cache" hint={CACHE_HINT[d.cache]}>
                     <select className={inputCls} value={d.cache} onChange={(e) => updateDisk(i, { cache: e.target.value as CacheMode })}>
                       {(Object.keys(CACHE_LABEL) as CacheMode[]).map((c) => (
                         <option key={c} value={c}>
                           {CACHE_LABEL[c]}
                         </option>
                       ))}
+                    </select>
+                  </Field>
+                  <Field
+                    label="I/O mode"
+                    hint={
+                      d.aio === "io_uring"
+                        ? "Linux 5.1+ hosts with a QEMU built with io_uring; Check with QEMU confirms."
+                        : d.aio === "native"
+                          ? "Linux AIO; needs cache none or directsync (direct I/O)."
+                          : "Thread pool: works on every host."
+                    }
+                  >
+                    <select className={inputCls} value={d.aio ?? ""} onChange={(e) => updateDisk(i, { aio: e.target.value || null })}>
+                      <option value="">threads (default)</option>
+                      <option value="native">native (Linux)</option>
+                      <option value="io_uring">io_uring (Linux)</option>
                     </select>
                   </Field>
                   <label className="flex items-end gap-2 pb-1 text-xs">

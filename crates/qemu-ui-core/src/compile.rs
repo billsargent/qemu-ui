@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use ts_rs::TS;
 
+use crate::buses::{MachineBuses, SPARE_ROOT_PORTS};
 use crate::caps::BinaryCaps;
 use crate::spec::{
     CacheMode, DiskBus, DiskSpec, FirmwareSpec, ImageRef, Media, NicBackend, VmSpec,
@@ -112,6 +113,10 @@ pub struct Context<'a> {
     pub images: &'a BTreeMap<ImageRef, ResolvedImage>,
     /// Required when the spec uses `FirmwareSpec::Descriptor`.
     pub firmware: Option<ResolvedFirmware>,
+    /// The machine's buses, from introspection (M2-09). When known, disk
+    /// buses are validated against it and, on PCIe machines, PCI disks are
+    /// placed behind root ports so they can be hot-(un)plugged.
+    pub machine: Option<&'a MachineBuses>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -425,6 +430,17 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
         }
     }
 
+    let mut indices = BTreeMap::new();
+    for (i, disk) in spec.disks.iter().enumerate() {
+        if let Some(prev) = indices.insert(disk.node_index(i), i) {
+            d.push(Diagnostic::error(
+                format!("disks[{i}].slot"),
+                "disk.slot-duplicate",
+                format!("disk {i} uses the same QEMU id index as disk {prev}"),
+            ));
+        }
+    }
+
     // NICs
     for (i, nic) in spec.nics.iter().enumerate() {
         let f = |s: &str| format!("nics[{i}].{s}");
@@ -548,6 +564,50 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
 
     d.extend(validate_passthrough(&spec.passthrough));
     d
+}
+
+/// Check disk buses against what the machine actually provides (M2-09).
+pub fn validate_buses(spec: &VmSpec, caps: &BinaryCaps, machine: &MachineBuses) -> Vec<Diagnostic> {
+    let mut d = Vec::new();
+    for (i, disk) in spec.disks.iter().enumerate() {
+        let s = machine.support(caps, disk.bus);
+        if !s.available {
+            d.push(Diagnostic::error(
+                format!("disks[{i}].bus"),
+                "disk.bus-unavailable",
+                s.reason
+                    .unwrap_or_else(|| "this bus is not available on this machine".into()),
+            ));
+        }
+    }
+    d
+}
+
+/// Whether a disk on `bus` is a PCI device of its own (and so goes behind a
+/// PCIe root port on PCIe machines).
+pub fn is_pci_disk(bus: DiskBus) -> bool {
+    matches!(bus, DiskBus::Virtio | DiskBus::Nvme)
+}
+
+/// Root ports to create: one per PCI disk plus spares for hotplug, when the
+/// machine's PCI root is PCIe and this QEMU has `pcie-root-port`.
+pub fn root_port_count(spec: &VmSpec, caps: &BinaryCaps, machine: Option<&MachineBuses>) -> usize {
+    let Some(m) = machine else { return 0 };
+    if !m.pcie_root() || !caps.devices.iter().any(|x| x.name == "pcie-root-port") {
+        return 0;
+    }
+    spec.disks.iter().filter(|d| is_pci_disk(d.bus)).count() + SPARE_ROOT_PORTS
+}
+
+/// The `-device` JSON for root port `k` on root bus `root`.
+pub fn root_port_device(k: usize, root: &str) -> Value {
+    json!({
+        "driver": "pcie-root-port",
+        "id": format!("qui-rp{k}"),
+        "bus": root,
+        "chassis": k + 1,
+        "port": 16 + k,
+    })
 }
 
 fn validate_passthrough(tokens: &[String]) -> Vec<Diagnostic> {
@@ -682,6 +742,9 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
             ));
         }
     }
+    if let Some(m) = ctx.machine {
+        diags.extend(validate_buses(spec, caps, m));
+    }
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(diags);
     }
@@ -802,10 +865,31 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
         );
     }
 
+    // PCIe root ports: one per PCI disk, plus spares for hotplug.
+    let ports = root_port_count(spec, caps, ctx.machine);
+    if ports > 0 {
+        let root = ctx
+            .machine
+            .and_then(|m| m.pci_root())
+            .map(|b| b.name.clone())
+            .unwrap_or_default();
+        for k in 0..ports {
+            push(&mut a, "-device", json_arg(root_port_device(k, &root)));
+        }
+    }
+
     // Disks
+    let mut next_port = 0;
     for (i, disk) in spec.disks.iter().enumerate() {
         let img = &ctx.images[&disk.image];
-        a.extend(disk_args(i, disk, img, ctx.os));
+        let (file, format, mut dev) = disk_objects(disk.node_index(i), disk, img, ctx.os);
+        if ports > 0 && is_pci_disk(disk.bus) {
+            dev["bus"] = format!("qui-rp{next_port}").into();
+            next_port += 1;
+        }
+        for (opt, v) in [("-blockdev", file), ("-blockdev", format), ("-device", dev)] {
+            push(&mut a, opt, v.to_string());
+        }
     }
 
     // NICs
@@ -914,7 +998,16 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
     })
 }
 
-fn disk_args(i: usize, disk: &DiskSpec, img: &ResolvedImage, os: &str) -> Vec<String> {
+/// The protocol node, format node and device for disk index `i` (its
+/// `node_index`): the same JSON serves `-blockdev`/`-device` on the command
+/// line and `blockdev-add`/`device_add` for hotplug. The caller sets the
+/// device's `bus` when it must go behind a root port.
+pub fn disk_objects(
+    i: usize,
+    disk: &DiskSpec,
+    img: &ResolvedImage,
+    os: &str,
+) -> (Value, Value, Value) {
     let (direct, no_flush, write_cache) = cache_flags(effective_cache(disk.cache, os));
     let readonly = disk.readonly || disk.media == Media::Cdrom;
     // `threads` works everywhere; io_uring/native are opt-in until the probe
@@ -967,14 +1060,7 @@ fn disk_args(i: usize, disk: &DiskSpec, img: &ResolvedImage, os: &str) -> Vec<St
     if let Some(b) = disk.boot_index {
         dev["bootindex"] = b.into();
     }
-    vec![
-        "-blockdev".into(),
-        file.to_string(),
-        "-blockdev".into(),
-        format.to_string(),
-        "-device".into(),
-        dev.to_string(),
-    ]
+    (file, format, dev)
 }
 
 /// Render argv for display/copying, quoting for a POSIX shell. Never executed.

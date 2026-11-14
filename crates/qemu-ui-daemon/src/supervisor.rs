@@ -14,12 +14,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
+use qemu_ui_core::buses::MachineBuses;
 use qemu_ui_core::caps::BinaryCaps;
 use qemu_ui_core::compile::{
     self, Compiled, Diagnostic, ResolvedFirmware, ResolvedImage, RunPaths, Severity, VncListen,
 };
 use qemu_ui_core::lint::{self, LintResult};
-use qemu_ui_core::spec::{FirmwareSpec, ImageRef, Media, VmSpec, valid_name};
+use qemu_ui_core::spec::{FirmwareSpec, ImageRef, Media, VmSpec, disk_node, valid_name};
 use qemu_ui_core::vm::{VmDetail, VmEvent, VmState, VmSummary, mac_from_bytes, state_from_qmp};
 use qemu_ui_qmp::{Qmp, transport};
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,7 @@ use crate::procs::{self, ProcId};
 use crate::scan::Scanner;
 use crate::store::{NewRun, RunRow, Store};
 
+mod disks;
 mod snapshots;
 
 const QMP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -67,6 +69,8 @@ pub struct Supervisor {
     ops: tokio::sync::Mutex<()>,
     /// Dry-lint results by (binary, lint spec) hash.
     lint_cache: Mutex<HashMap<String, LintResult>>,
+    /// Machine buses by (binary sha256, machine), probed lazily (M2-09).
+    bus_cache: Mutex<HashMap<(String, String), Option<MachineBuses>>>,
 }
 
 /// How `clone_vm` copies writable disks.
@@ -157,6 +161,7 @@ impl Supervisor {
             live: Mutex::default(),
             ops: tokio::sync::Mutex::new(()),
             lint_cache: Mutex::default(),
+            bus_cache: Mutex::default(),
         }))
     }
 
@@ -194,7 +199,7 @@ impl Supervisor {
             for (i, d) in spec.disks.iter().enumerate() {
                 if &d.image == image {
                     let ro = d.readonly || d.media == qemu_ui_core::spec::Media::Cdrom;
-                    out.push((row.name.clone(), qmp.clone(), format!("qui-disk{i}"), ro));
+                    out.push((row.name.clone(), qmp.clone(), disk_node(&spec, i), ro));
                 }
             }
         }
@@ -342,14 +347,19 @@ impl Supervisor {
     pub fn detail(&self, id: &str) -> OpResult<VmDetail> {
         let row = self.store.get_vm(id)?.ok_or(OpError::NotFound)?;
         let spec = serde_json::from_str(&row.spec_json).map_err(|e| OpError::Failed(e.into()))?;
-        let last_run_args = self
-            .store
-            .last_run(id)?
+        let last = self.store.last_run(id)?;
+        let last_run_args = last
+            .as_ref()
             .and_then(|r| serde_json::from_str::<Vec<String>>(&r.args_json).ok());
+        let live_spec = last
+            .as_ref()
+            .filter(|r| r.ended_at.is_none())
+            .and_then(|r| serde_json::from_str(&r.spec_json).ok());
         Ok(VmDetail {
             summary: self.summary(&row),
             spec,
             last_run_args,
+            live_spec,
         })
     }
 
@@ -392,6 +402,37 @@ impl Supervisor {
         Ok((spec, caps))
     }
 
+    /// The buses `machine` provides on this binary, probed once and cached.
+    /// `None` when the probe fails (unknown: buses are then not checked).
+    pub async fn machine_buses(&self, caps: &BinaryCaps, machine: &str) -> Option<MachineBuses> {
+        let key = (caps.binary.sha256.clone(), machine.to_string());
+        if let Some(hit) = self.bus_cache.lock().unwrap().get(&key) {
+            return hit.clone();
+        }
+        let probed = crate::probe::machine_buses(Path::new(&caps.binary.path), machine)
+            .await
+            .map_err(|e| tracing::warn!(machine, "probing buses: {e:#}"))
+            .ok()
+            .map(|buses| MachineBuses {
+                machine: machine.to_string(),
+                buses,
+            });
+        self.bus_cache.lock().unwrap().insert(key, probed.clone());
+        probed
+    }
+
+    /// Disk buses that cannot exist on the spec's machine are errors.
+    async fn check_buses(&self, spec: &VmSpec, caps: &BinaryCaps) -> OpResult<()> {
+        let Some(m) = self.machine_buses(caps, &spec.machine.type_name).await else {
+            return Ok(());
+        };
+        let diags = compile::validate_buses(spec, caps, &m);
+        if diags.iter().any(|d| d.severity == Severity::Error) {
+            return Err(OpError::Invalid(diags));
+        }
+        Ok(())
+    }
+
     fn check(spec: &VmSpec, caps: &BinaryCaps) -> OpResult<Vec<Diagnostic>> {
         let diags = compile::validate(spec, caps);
         if diags.iter().any(|d| d.severity == Severity::Error) {
@@ -404,6 +445,7 @@ impl Supervisor {
         let _g = self.ops.lock().await;
         let (spec, caps) = self.normalise(spec).await?;
         Self::check(&spec, &caps)?;
+        self.check_buses(&spec, &caps).await?;
         if self.store.vm_name_taken(&spec.name, None)? {
             return Err(OpError::Conflict(format!(
                 "a VM named '{}' already exists",
@@ -428,6 +470,7 @@ impl Supervisor {
         self.store.get_vm(id)?.ok_or(OpError::NotFound)?;
         let (spec, caps) = self.normalise(spec).await?;
         Self::check(&spec, &caps)?;
+        self.check_buses(&spec, &caps).await?;
         if self.store.vm_name_taken(&spec.name, Some(id))? {
             return Err(OpError::Conflict(format!(
                 "a VM named '{}' already exists",
@@ -696,8 +739,10 @@ impl Supervisor {
             Some(VncInfo::Unix { path }) => VncListen::Unix(path.clone()),
             None => VncListen::Unix(String::new()),
         };
+        let machine = self.machine_buses(caps, &spec.machine.type_name).await;
         let ctx = compile::Context {
             caps,
+            machine: machine.as_ref(),
             os: std::env::consts::OS,
             run: RunPaths {
                 qmp: s("qmp.sock"),
@@ -1058,6 +1103,10 @@ impl Supervisor {
     }
 
     async fn on_event(&self, id: &str, qmp: &Qmp, kind: String, data: Value) {
+        if kind == "DEVICE_DELETED" {
+            // A disk unplug the guest acknowledged late: free its nodes.
+            self.disk_device_deleted(qmp, &data).await;
+        }
         self.emit(id, &kind, data);
         match kind.as_str() {
             "SHUTDOWN" => {
@@ -1128,7 +1177,8 @@ impl Supervisor {
             .and_then(|l| l.qmp.clone())
     }
 
-    /// The running VM (id) and disk index that have this image open.
+    /// The running VM (id) and disk node index (`qui-disk<N>`) that have
+    /// this image open.
     pub fn find_open_disk(&self, r: &ImageRef) -> Option<(String, usize)> {
         self.store.list_vms().ok()?.into_iter().find_map(|row| {
             let run = self
@@ -1139,7 +1189,7 @@ impl Supervisor {
                 .filter(|r| r.ended_at.is_none())?;
             let spec: VmSpec = serde_json::from_str(&run.spec_json).ok()?;
             let i = spec.disks.iter().position(|d| &d.image == r)?;
-            Some((row.id, i))
+            Some((row.id, spec.disks[i].node_index(i)))
         })
     }
 
@@ -1618,6 +1668,28 @@ pub(crate) mod test_support {
         );
     }
 
+    /// Kills every QEMU the test's store still records as running when it
+    /// is dropped, including during a panic. VMs are spawned detached, so
+    /// without this a failing assertion leaves them running.
+    pub struct KillVmsOnDrop(pub PathBuf);
+
+    impl Drop for KillVmsOnDrop {
+        fn drop(&mut self) {
+            let Ok(store) = Store::open(&self.0.join("t.db")) else {
+                return;
+            };
+            for run in store.open_runs().unwrap_or_default() {
+                procs::terminate(
+                    ProcId {
+                        pid: run.pid,
+                        start_time: run.proc_start,
+                    },
+                    true,
+                );
+            }
+        }
+    }
+
     /// A short data dir (unix socket paths are limited to 108 bytes).
     pub fn short_data_dir(tag: &str) -> PathBuf {
         let base = if cfg!(windows) {
@@ -1655,6 +1727,7 @@ pub(crate) mod test_support {
             cache: CacheMode::None,
             aio: None,
             discard: true,
+            slot: None,
         });
         sv.create(spec)
             .await
@@ -1719,6 +1792,7 @@ mod lifecycle {
                 cache: CacheMode::Writeback,
                 aio: None,
                 discard: true,
+                slot: None,
             });
             let vm = sv.create(spec).await.map_err(|e| format!("{e:?}")).unwrap();
             let id = vm.summary.id.clone();

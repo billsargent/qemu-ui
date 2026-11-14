@@ -40,7 +40,7 @@ pub fn lint_spec(spec: &VmSpec) -> VmSpec {
 }
 
 /// Which spec field a reserved id belongs to.
-fn field_for_id(id: &str) -> Option<String> {
+fn field_for_id(id: &str, spec: &VmSpec) -> Option<String> {
     let num = |prefix: &str| {
         id.strip_prefix(prefix).and_then(|r| {
             let digits: String = r.chars().take_while(char::is_ascii_digit).collect();
@@ -48,7 +48,12 @@ fn field_for_id(id: &str) -> Option<String> {
         })
     };
     if let Some(n) = num("qui-dev").or_else(|| num("qui-disk")) {
-        return Some(format!("disks[{n}]"));
+        // Ids use the disk's slot, which may differ from its position.
+        let pos = crate::spec::disk_position(spec, n).unwrap_or(n);
+        return Some(format!("disks[{pos}]"));
+    }
+    if id.starts_with("qui-rp") {
+        return Some("disks".into());
     }
     if let Some(n) = num("qui-nic").or_else(|| num("qui-net")) {
         return Some(format!("nics[{n}]"));
@@ -75,7 +80,7 @@ fn field_for_line(line: &str, spec: &VmSpec) -> String {
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
             .collect();
-        if let Some(f) = field_for_id(&id) {
+        if let Some(f) = field_for_id(&id, spec) {
             return f;
         }
         rest = &rest[i + 4..];

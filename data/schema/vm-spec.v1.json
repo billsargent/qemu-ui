@@ -132,6 +132,15 @@
         "readonly": {
           "default": false,
           "type": "boolean"
+        },
+        "slot": {
+          "description": "Index used in this disk's QEMU ids (`qui-disk<N>`, `qui-dev<N>`).\nAbsent: the disk's position in `disks`. Hotplug pins it so a disk\nkeeps its ids when others are added or removed while the VM runs\n(and across restarts). Must be unique within a spec.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [

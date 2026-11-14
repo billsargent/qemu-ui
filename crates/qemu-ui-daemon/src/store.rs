@@ -527,6 +527,18 @@ impl Store {
         })
     }
 
+    /// Replace the spec a run is recorded with (disks hotplugged while it
+    /// runs), so live state and `restart_pending` stay accurate.
+    pub fn update_run_spec(&self, run_id: i64, spec_json: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE vm_run SET spec_json = ?2 WHERE id = ?1",
+                params![run_id, spec_json],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn end_run(&self, run_id: i64, now: u64, exit_status: &str) -> Result<()> {
         self.with(|c| {
             c.execute(

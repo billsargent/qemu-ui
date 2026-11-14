@@ -421,6 +421,29 @@ fn remediation(accel: &str, reason: &str) -> Option<String> {
     })
 }
 
+/// The buses a machine type provides (M2-09): start it paused with TCG and
+/// no default devices, read QEMU's device tree, quit. Lazy and cached by the
+/// caller per (binary, machine).
+pub async fn machine_buses(
+    path: &Path,
+    machine: &str,
+) -> Result<Vec<qemu_ui_core::buses::BusInfo>> {
+    let (qmp, child) = spawn_qmp(path, &["-machine", machine, "-accel", "tcg"]).await?;
+    let res = qmp
+        .execute(
+            "human-monitor-command",
+            Some(json!({"command-line": "info qtree"})),
+        )
+        .await;
+    quit(&qmp, child).await;
+    let tree = res?;
+    let buses = qemu_ui_core::buses::parse_qtree(tree.as_str().unwrap_or_default());
+    if buses.is_empty() {
+        anyhow::bail!("QEMU reported no buses for machine '{machine}'");
+    }
+    Ok(buses)
+}
+
 /// `device-list-properties` for one device type (lazy, cached by the caller).
 pub async fn device_properties(path: &Path, device: &str) -> Result<Vec<DeviceProperty>> {
     let (qmp, child) = spawn_qmp(path, &["-machine", "none"]).await?;
@@ -579,6 +602,7 @@ mod compile_smoke {
             run,
             images,
             firmware: fw,
+            machine: None,
         };
         let c = compile::compile(spec, &ctx).unwrap_or_else(|d| panic!("compile failed: {d:#?}"));
         let _ = std::fs::remove_file(dir.join("qemu.pid"));
@@ -705,6 +729,7 @@ mod compile_smoke {
                 cache: CacheMode::None, // the default; must work on Windows too
                 aio: None,
                 discard: true,
+                slot: None,
             }],
             nics: vec![NicSpec {
                 backend: NicBackend::User { forwards: vec![] },
@@ -748,6 +773,7 @@ mod compile_smoke {
                 cache: CacheMode::None,
                 aio: None,
                 discard: false,
+                slot: None,
             });
             let fw = ResolvedFirmware {
                 code: code.display().to_string(),

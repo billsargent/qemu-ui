@@ -162,6 +162,7 @@ fn base_spec() -> VmSpec {
             cache: CacheMode::None,
             aio: None,
             discard: true,
+            slot: None,
         }],
         nics: vec![NicSpec {
             backend: NicBackend::User {
@@ -248,6 +249,7 @@ fn linux_q35_virtio() {
         run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
         images: &images,
         firmware: None,
+        machine: None,
     };
     let c = compile(&base_spec(), &ctx).unwrap();
     assert_eq!(c.accel, "kvm");
@@ -280,6 +282,7 @@ fn windows_uefi_secure_boot_cdrom_with_comma() {
         cache: CacheMode::Writeback,
         aio: None,
         discard: false,
+        slot: None,
     });
     spec.display.vdagent = true;
     spec.passthrough = vec!["-global".into(), "ICH9-LPC.disable_s3=1".into()];
@@ -303,6 +306,7 @@ fn windows_uefi_secure_boot_cdrom_with_comma() {
             secure_boot: true,
             requires_smm: true,
         }),
+        machine: None,
     };
     let c = compile(&spec, &ctx).unwrap();
     // Direct I/O is unavailable on Windows hosts: buffered fallback + warning.
@@ -332,6 +336,7 @@ fn old_qemu_uses_mon() {
         run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
         images: &images,
         firmware: None,
+        machine: None,
     };
     let c = compile(&base_spec(), &ctx).unwrap();
     assert!(
@@ -354,6 +359,7 @@ fn keyval_paths_double_commas() {
         run,
         images: &images,
         firmware: None,
+        machine: None,
     };
     let c = compile(&base_spec(), &ctx).unwrap();
     assert!(c.args.contains(&"unix:/run/a,,b/vnc.sock".to_string()));
@@ -373,6 +379,7 @@ fn errors(spec: &VmSpec) -> Vec<String> {
         run: run_paths(VncListen::Unix("/x".into())),
         images: &images,
         firmware: None,
+        machine: None,
     };
     match compile(spec, &ctx) {
         Ok(_) => vec![],
@@ -444,6 +451,7 @@ fn exposed_forward_is_a_warning_not_an_error() {
         run: run_paths(VncListen::Unix("/x".into())),
         images: &images,
         firmware: None,
+        machine: None,
     };
     let c = compile(&s, &ctx).unwrap();
     assert!(c.warnings.iter().any(|w| w.rule == "forward.exposed"));
@@ -471,4 +479,130 @@ fn display_command_quotes() {
         &["-device".into(), r#"{"a":"b c"}"#.into(), "-S".into()],
     );
     assert_eq!(s, r#"qemu -device '{"a":"b c"}' -S"#);
+}
+
+// ------------------------------------------------------------------ M2-09
+
+fn machine_buses(fixture: &str, name: &str) -> qemu_ui_core::buses::MachineBuses {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(fixture);
+    qemu_ui_core::buses::MachineBuses {
+        machine: name.into(),
+        buses: qemu_ui_core::buses::parse_qtree(&std::fs::read_to_string(path).unwrap()),
+    }
+}
+
+fn caps_with_ports() -> BinaryCaps {
+    let mut c = caps(true);
+    c.devices.push(DeviceInfo {
+        name: "pcie-root-port".into(),
+        category: String::new(),
+        bus: None,
+        alias: None,
+        description: None,
+        no_user: false,
+    });
+    c
+}
+
+fn compile_on(
+    spec: &VmSpec,
+    caps: &BinaryCaps,
+    m: &qemu_ui_core::buses::MachineBuses,
+) -> Result<Compiled, Vec<Diagnostic>> {
+    let images = images();
+    let ctx = Context {
+        caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/x".into())),
+        images: &images,
+        firmware: None,
+        machine: Some(m),
+    };
+    compile(spec, &ctx)
+}
+
+#[test]
+fn pcie_machine_puts_pci_disks_behind_root_ports() {
+    let caps = caps_with_ports();
+    let q35 = machine_buses("qtree-x86_64-q35.txt", "pc-q35-11.1");
+    let c = compile_on(&base_spec(), &caps, &q35).unwrap();
+    let devs: Vec<&String> = c
+        .args
+        .iter()
+        .filter(|a| a.contains("pcie-root-port"))
+        .collect();
+    assert_eq!(
+        devs.len(),
+        1 + qemu_ui_core::buses::SPARE_ROOT_PORTS,
+        "one per PCI disk plus spares"
+    );
+    assert!(devs[0].contains(r#""bus":"pcie.0""#));
+    let disk = c
+        .args
+        .iter()
+        .find(|a| a.contains(r#""driver":"virtio-blk-pci""#))
+        .unwrap();
+    assert!(disk.contains(r#""bus":"qui-rp0""#), "{disk}");
+
+    // A PCI root (i440fx) needs no ports: devices hotplug directly.
+    let pc = machine_buses("qtree-x86_64-pc.txt", "pc-q35-11.1");
+    let c = compile_on(&base_spec(), &caps, &pc).unwrap();
+    assert!(!c.args.iter().any(|a| a.contains("pcie-root-port")));
+}
+
+#[test]
+fn unavailable_bus_is_an_error_with_the_reason() {
+    let caps = caps_with_ports();
+    let virt = machine_buses("qtree-aarch64-virt.txt", "virt-11.1");
+    let mut s = base_spec();
+    s.disks[0].bus = DiskBus::Ide;
+    let errs = compile_on(&s, &caps, &virt).unwrap_err();
+    let e = errs
+        .iter()
+        .find(|d| d.rule == "disk.bus-unavailable")
+        .expect("bus error");
+    assert_eq!(e.field, "disks[0].bus");
+    assert!(
+        e.message.contains("no IDE/SATA controller"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn slots_name_disks_and_must_be_unique() {
+    let caps = caps(true);
+    let images = images();
+    let ctx = Context {
+        caps: &caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/x".into())),
+        images: &images,
+        firmware: None,
+        machine: None,
+    };
+    let mut s = base_spec();
+    s.disks[0].slot = Some(7);
+    let c = compile(&s, &ctx).unwrap();
+    assert!(
+        c.args
+            .iter()
+            .any(|a| a.contains(r#""node-name":"qui-disk7""#))
+    );
+    assert!(c.args.iter().any(|a| a.contains(r#""id":"qui-dev7""#)));
+    assert_eq!(disk_node(&s, 0), "qui-disk7");
+    assert_eq!(disk_position(&s, 7), Some(0));
+
+    let mut dup = s.clone();
+    let mut second = dup.disks[0].clone();
+    second.image.name = "install, disc 1.iso".into();
+    second.media = Media::Cdrom;
+    second.bus = DiskBus::Ide;
+    second.boot_index = None;
+    dup.disks.push(second); // position 1, but slot 7 again
+    let errs = compile(&dup, &ctx).unwrap_err();
+    assert!(errs.iter().any(|d| d.rule == "disk.slot-duplicate"));
+    assert_eq!(next_disk_index(&[&dup]), 8);
 }

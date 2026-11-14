@@ -169,6 +169,49 @@ pub struct DiskSpec {
     pub aio: Option<String>,
     #[serde(default = "yes")]
     pub discard: bool,
+    /// Index used in this disk's QEMU ids (`qui-disk<N>`, `qui-dev<N>`).
+    /// Absent: the disk's position in `disks`. Hotplug pins it so a disk
+    /// keeps its ids when others are added or removed while the VM runs
+    /// (and across restarts). Must be unique within a spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub slot: Option<u32>,
+}
+
+impl DiskSpec {
+    /// The index in this disk's QEMU ids, given its position in `disks`.
+    pub fn node_index(&self, position: usize) -> usize {
+        self.slot.map_or(position, |s| s as usize)
+    }
+}
+
+/// QEMU format node name of the disk at `position` (`qui-disk<N>`).
+pub fn disk_node(spec: &VmSpec, position: usize) -> String {
+    format!("qui-disk{}", spec.disks[position].node_index(position))
+}
+
+/// Position in `disks` of the disk whose ids use index `n`.
+pub fn disk_position(spec: &VmSpec, n: usize) -> Option<usize> {
+    spec.disks
+        .iter()
+        .enumerate()
+        .position(|(i, d)| d.node_index(i) == n)
+}
+
+/// The next index no disk of `spec` uses, for a disk added while running.
+pub fn next_disk_index(specs: &[&VmSpec]) -> usize {
+    specs
+        .iter()
+        .flat_map(|s| s.disks.iter().enumerate().map(|(i, d)| d.node_index(i) + 1))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Pin every disk's slot to its current node index (no change to any id).
+pub fn pin_disk_slots(spec: &mut VmSpec) {
+    for (i, d) in spec.disks.iter_mut().enumerate() {
+        d.slot = Some(d.node_index(i) as u32);
+    }
 }
 
 fn yes() -> bool {

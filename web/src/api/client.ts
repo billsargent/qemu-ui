@@ -3,6 +3,9 @@
 import type { CapabilitiesResponse } from "./generated/CapabilitiesResponse";
 import type { CompileResponse } from "./generated/CompileResponse";
 import type { DeviceProperty } from "./generated/DeviceProperty";
+import type { DiskBusSupport } from "./generated/DiskBusSupport";
+import type { DiskChange } from "./generated/DiskChange";
+import type { DiskSpec } from "./generated/DiskSpec";
 import type { LintResult } from "./generated/LintResult";
 import type { Diagnostic } from "./generated/Diagnostic";
 import type { CheckResult } from "./generated/CheckResult";
@@ -85,6 +88,18 @@ export const api = {
     ),
   compile: (spec: VmSpec, vmId?: string) => post<CompileResponse>("/vms/compile", { spec, vm_id: vmId }),
   lint: (spec: VmSpec, vmId?: string) => post<LintResult>("/vms/lint", { spec, vm_id: vmId }),
+  /** Disk-bus support for a machine; `null` when it could not be probed. */
+  diskBuses: (arch: string, machine: string) =>
+    request<DiskBusSupport[] | null>(
+      `/host/buses?arch=${encodeURIComponent(arch)}&machine=${encodeURIComponent(machine)}`,
+    ),
+  /** Add a disk; hotplugged when the VM runs. */
+  addDisk: (id: string, disk: DiskSpec) => post<DiskChange>(`/vms/${id}/disks`, { disk }),
+  /** Remove disk `n` (its `qui-disk<n>` index); hot-unplugged when running. */
+  removeDisk: (id: string, n: number, force = false) =>
+    request<DiskChange>(`/vms/${id}/disks/${n}?force=${force}`, { method: "DELETE" }),
+  changeMedia: (id: string, n: number, pool: string, name: string) =>
+    post<DiskChange>(`/vms/${id}/disks/${n}/media`, { image: { pool, name } }),
   serialLog: async (id: string) => {
     const res = await fetch(`/api/v1/vms/${id}/serial-log`);
     return res.ok ? res.text() : "";
