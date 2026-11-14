@@ -6,6 +6,7 @@ export type Route =
   | { page: "system" }
   | { page: "storage"; pool?: string; image?: string }
   | { page: "jobs" }
+  | { page: "networks" }
   | { page: "new-vm" }
   | { page: "vm"; id: string; tab: string };
 
@@ -14,6 +15,7 @@ export function parseRoute(hash: string): Route {
   if (parts[0] === "system") return { page: "system" };
   if (parts[0] === "storage") return { page: "storage", pool: parts[1], image: parts[2] && decodeURIComponent(parts[2]) };
   if (parts[0] === "jobs") return { page: "jobs" };
+  if (parts[0] === "networks") return { page: "networks" };
   if (parts[0] === "vms" && parts[1] === "new") return { page: "new-vm" };
   if (parts[0] === "vms" && parts[1]) return { page: "vm", id: parts[1], tab: parts[2] ?? "overview" };
   return { page: "dashboard" };

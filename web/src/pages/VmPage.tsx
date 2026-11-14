@@ -1,3 +1,4 @@
+import { ConnectCards } from "../components/ConnectCards";
 import { DisksCard } from "../components/DisksCard";
 import { ForwardsCard } from "../components/ForwardsCard";
 import { useState } from "react";
@@ -142,6 +143,7 @@ function Overview({ d }: { d: VmDetail }) {
           ))}
         </ul>
       </Card>
+      <ConnectCards vm={d} />
       <div className="lg:col-span-2">
         <ForwardsCard vm={d} />
       </div>

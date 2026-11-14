@@ -20,7 +20,9 @@ use qemu_ui_core::compile::{
     self, Compiled, Diagnostic, ResolvedFirmware, ResolvedImage, RunPaths, Severity, VncListen,
 };
 use qemu_ui_core::lint::{self, LintResult};
-use qemu_ui_core::spec::{FirmwareSpec, ImageRef, Media, VmSpec, disk_node, valid_name};
+use qemu_ui_core::spec::{
+    FirmwareSpec, ImageRef, Media, NicBackend, VmSpec, disk_node, valid_name,
+};
 use qemu_ui_core::vm::{VmDetail, VmEvent, VmState, VmSummary, mac_from_bytes, state_from_qmp};
 use qemu_ui_qmp::{Qmp, transport};
 use serde::{Deserialize, Serialize};
@@ -34,6 +36,7 @@ use crate::store::{NewRun, RunRow, Store};
 
 mod disks;
 mod forwards;
+mod nics;
 mod snapshots;
 
 const QMP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -64,8 +67,14 @@ pub struct Supervisor {
     pub jobs: Arc<crate::jobs::Jobs>,
     /// Registered share roots for shared folders (M2-13).
     pub shares: crate::shares::ShareRoots,
+    /// Network objects NICs attach to (M3-01).
+    pub networks: crate::networks::Networks,
+    /// Switches of isolated networks, started with their first VM (M3-04).
+    pub switches: crate::netswitch::Switches,
     /// `virtiofsd`, when installed: writable shares then use virtiofs.
     pub virtiofsd: Option<PathBuf>,
+    /// `passt`, when installed (Linux): passt NAT networks need it (M3-03).
+    pub passt: Option<PathBuf>,
     data_dir: PathBuf,
     run_root: PathBuf,
     events: broadcast::Sender<VmEvent>,
@@ -160,6 +169,15 @@ impl Supervisor {
         Ok(Arc::new(Supervisor {
             pools: Arc::new(Pools::new(data_dir, store.clone())?),
             shares: crate::shares::ShareRoots::new(store.clone()),
+            networks: crate::networks::Networks::new(store.clone()),
+            switches: crate::netswitch::Switches::new(run_root.clone()),
+            passt: {
+                let p = crate::passt::find_passt();
+                if let Some(p) = &p {
+                    tracing::info!("passt found at {}; passt networks available", p.display());
+                }
+                p
+            },
             virtiofsd: {
                 let v = crate::shares::find_virtiofsd();
                 if let Some(p) = &v {
@@ -413,11 +431,7 @@ impl Supervisor {
         {
             spec.machine.type_name = pinned;
         }
-        for nic in &mut spec.nics {
-            if nic.mac.is_none() {
-                nic.mac = Some(mac_from_bytes(rand::random()));
-            }
-        }
+        self.assign_macs(&mut spec.nics);
         Ok((spec, caps))
     }
 
@@ -772,7 +786,39 @@ impl Supervisor {
             None => VncListen::Unix(String::new()),
         };
         let machine = self.machine_buses(caps, &spec.machine.type_name).await;
+        let networks = self
+            .networks
+            .list()
+            .map_err(|e| fail("nics", "nic.networks-unreadable", format!("{e:#}")))?;
+        // Isolated networks: a switch socket per network. Only a start
+        // brings the switch up; previews just show where it will listen.
+        let mut switch_sockets = std::collections::BTreeMap::new();
+        for nic in &spec.nics {
+            let NicBackend::Network { network, .. } = &nic.backend else {
+                continue;
+            };
+            if !networks
+                .iter()
+                .any(|n| &n.id == network && n.config.needs_switch())
+            {
+                continue;
+            }
+            let path = if run {
+                self.switches.acquire(network, id).map_err(|e| {
+                    fail(
+                        "nics",
+                        "nic.switch-failed",
+                        format!("starting the isolated network's switch: {e}"),
+                    )
+                })?
+            } else {
+                self.switches.socket_path(network)
+            };
+            switch_sockets.insert(network.clone(), path_str(&path));
+        }
         let ctx = compile::Context {
+            switch_sockets: &switch_sockets,
+            networks: &networks,
             caps,
             machine: machine.as_ref(),
             os: std::env::consts::OS,
@@ -853,11 +899,38 @@ impl Supervisor {
         }
     }
 
+    /// Start the run's sidecars: one `passt` per NIC on a passt network
+    /// (M3-03) and one `virtiofsd` per virtiofs share, waiting for each
+    /// socket. Returned with their kind, for the `run_sidecar` table.
+    async fn start_sidecars(
+        &self,
+        spec: &VmSpec,
+        caps: &BinaryCaps,
+        run_dir: &Path,
+        logs: &Path,
+    ) -> Result<Vec<(&'static str, ProcId)>> {
+        let networks = self.networks.list()?;
+        let qmp = path_str(&run_dir.join("qmp.sock"));
+        let plans = crate::passt::plan(&spec.nics, &networks, &qmp);
+        let passt = crate::passt::start(self.passt.as_deref(), &plans, logs, now()).await?;
+        let mut all: Vec<(&'static str, ProcId)> = passt.iter().map(|p| ("passt", *p)).collect();
+        match self.start_virtiofsd(spec, caps, run_dir, logs).await {
+            Ok(v) => all.extend(v.into_iter().map(|p| ("virtiofsd", p))),
+            Err(e) => {
+                for p in &passt {
+                    procs::terminate(*p, true);
+                }
+                return Err(e);
+            }
+        }
+        Ok(all)
+    }
+
     /// Start one `virtiofsd` per virtiofs share and wait for its socket.
     /// The sidecars are detached like QEMU: they survive a daemon restart and
     /// exit by themselves when QEMU disconnects; `finish` also terminates any
     /// that are left once the run is over.
-    async fn start_sidecars(
+    async fn start_virtiofsd(
         &self,
         spec: &VmSpec,
         caps: &BinaryCaps,
@@ -944,6 +1017,7 @@ impl Supervisor {
             Ok((c, _)) => {
                 let mut w = c.warnings.clone();
                 w.extend(self.forward_conflicts(id, &spec));
+                w.extend(self.shared_mac_warnings(id, &spec));
                 Ok((c, w))
             }
             Err(d) => Err(OpError::Invalid(d)),
@@ -1073,6 +1147,13 @@ impl Supervisor {
         let spec: VmSpec =
             serde_json::from_str(&row.spec_json).map_err(|e| OpError::Failed(e.into()))?;
         let caps = self.caps_for(&spec.arch).await?;
+        // Releases any isolated-network switches `build` acquires unless the
+        // run gets recorded (then `finish` releases them).
+        let mut lease = SwitchLease {
+            sv: self,
+            vm: id,
+            keep: false,
+        };
         let (compiled, vnc) = self
             .build(id, &spec, &caps, &BuildMode::Run)
             .await
@@ -1106,7 +1187,7 @@ impl Supervisor {
         {
             Ok(x) => x,
             Err(e) => {
-                for p in &sidecars {
+                for (_, p) in &sidecars {
                     procs::terminate(*p, true);
                 }
                 self.set_state(id, VmState::Crashed, None, Some(&format!("{e:#}")));
@@ -1139,10 +1220,9 @@ impl Supervisor {
                 shutdown_seen: false,
             },
         );
-        for p in &sidecars {
-            let _ = self
-                .store
-                .insert_sidecar(run_id, "virtiofsd", p.pid, p.start_time);
+        lease.keep = true;
+        for (kind, p) in &sidecars {
+            let _ = self.store.insert_sidecar(run_id, kind, p.pid, p.start_time);
         }
         // The run is recorded: image operations now see this VM as a user.
         drop(start_locks);
@@ -1337,6 +1417,7 @@ impl Supervisor {
     fn finish(&self, id: &str, run_id: i64, exit_status: &str, error: Option<&str>) {
         let live = self.live.lock().unwrap().remove(id);
         self.release_host_disks(id);
+        self.switches.release(id);
         let expected = live
             .as_ref()
             .is_some_and(|l| l.stop_requested || l.shutdown_seen);
@@ -1529,8 +1610,8 @@ impl Supervisor {
                 // Validate the new spec now, so the job only fails on I/O.
                 let caps = self.caps_for(&spec.arch).await?;
                 let mut check = spec.clone();
-                for nic in &mut check.nics {
-                    nic.mac = Some(mac_from_bytes([0, 0, 1]));
+                for (i, nic) in check.nics.iter_mut().enumerate() {
+                    nic.mac = Some(mac_from_bytes([0, 0, i as u8]));
                 }
                 Self::check(&check, &caps)?;
                 let mut need = 0u64;
@@ -1714,6 +1795,8 @@ impl Supervisor {
             self.finish(&id, run.id, "exited while the daemon was not running", None);
             return;
         }
+        // Bring back the switches of its isolated networks; QEMU reconnects.
+        self.reacquire_switches(&id, &run.spec_json);
         let sock = PathBuf::from(&run.run_dir).join("qmp.sock");
         let qmp = match connect_with_retry(&sock, proc_id, Duration::from_secs(10)).await {
             Ok(q) => q,
@@ -1791,6 +1874,45 @@ fn random_password() -> String {
     (0..8)
         .map(|_| ALPHABET[rand::random::<u32>() as usize % ALPHABET.len()] as char)
         .collect()
+}
+
+// ------------------------------------------------------ isolated networks
+
+/// Releases a VM's switches when dropped, unless the run was recorded.
+struct SwitchLease<'a> {
+    sv: &'a Supervisor,
+    vm: &'a str,
+    keep: bool,
+}
+
+impl Drop for SwitchLease<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            self.sv.switches.release(self.vm);
+        }
+    }
+}
+
+impl Supervisor {
+    /// A reattached VM's isolated networks need their switches again.
+    fn reacquire_switches(&self, vm_id: &str, spec_json: &str) {
+        let Ok(spec) = serde_json::from_str::<VmSpec>(spec_json) else {
+            return;
+        };
+        let networks = self.networks.list().unwrap_or_default();
+        for nic in &spec.nics {
+            let NicBackend::Network { network, .. } = &nic.backend else {
+                continue;
+            };
+            if networks
+                .iter()
+                .any(|n| &n.id == network && n.config.needs_switch())
+                && let Err(e) = self.switches.acquire(network, vm_id)
+            {
+                tracing::warn!(vm = %vm_id, "isolated network switch: {e}");
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------- host disks
@@ -2254,8 +2376,7 @@ mod dry_lint {
             let id = small_vm(&sv, &caps, "linted").await;
             // Give it a port forward the lint must not try to bind again.
             let mut spec = sv.detail(&id).ok().unwrap().spec;
-            let NicBackend::User { forwards } = &mut spec.nics[0].backend;
-            forwards.push(PortForward {
+            spec.nics[0].backend.forwards_mut().push(PortForward {
                 proto: "tcp".into(),
                 host_addr: "127.0.0.1".into(),
                 host_port: 45222,

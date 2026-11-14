@@ -18,6 +18,7 @@ use ts_rs::TS;
 
 use crate::buses::{MachineBuses, SPARE_ROOT_PORTS};
 use crate::caps::BinaryCaps;
+use crate::network::{Network, NetworkConfig};
 use crate::spec::{
     CacheMode, DiskBus, DiskSpec, FirmwareSpec, ImageRef, Media, NicBackend, PortForward, VmSpec,
     valid_image_name, valid_mac, valid_name, valid_share_path, valid_share_tag,
@@ -47,7 +48,7 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    fn error(field: impl Into<String>, rule: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn error(field: impl Into<String>, rule: &str, message: impl Into<String>) -> Self {
         Diagnostic {
             severity: Severity::Error,
             field: field.into(),
@@ -55,7 +56,11 @@ impl Diagnostic {
             message: message.into(),
         }
     }
-    fn warning(field: impl Into<String>, rule: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn warning(
+        field: impl Into<String>,
+        rule: &str,
+        message: impl Into<String>,
+    ) -> Self {
         Diagnostic {
             severity: Severity::Warning,
             field: field.into(),
@@ -147,6 +152,10 @@ pub struct Context<'a> {
     /// buses are validated against it and, on PCIe machines, PCI disks are
     /// placed behind root ports so they can be hot-(un)plugged.
     pub machine: Option<&'a MachineBuses>,
+    /// Network objects NICs may reference (M3-01).
+    pub networks: &'a [Network],
+    /// Switch socket per isolated network id (M3-04), resolved by the daemon.
+    pub switch_sockets: &'a BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -561,8 +570,7 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
             )),
             _ => {}
         }
-        let NicBackend::User { forwards } = &nic.backend;
-        for (j, fw) in forwards.iter().enumerate() {
+        for (j, fw) in nic.backend.forwards().iter().enumerate() {
             let ff = format!("nics[{i}].backend.forwards[{j}]");
             if !matches!(fw.proto.as_str(), "tcp" | "udp") {
                 d.push(Diagnostic::error(
@@ -597,6 +605,7 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
         }
     }
     d.extend(validate_forward_duplicates(spec));
+    d.extend(crate::nic::validate_nics(&spec.nics));
 
     // Display / input
     if let Some(dev) = &spec.display.device
@@ -757,6 +766,11 @@ pub fn validate_buses(spec: &VmSpec, caps: &BinaryCaps, machine: &MachineBuses) 
             ));
         }
     }
+    d.extend(crate::nic::validate_nic_buses(
+        &spec.nics,
+        &caps.devices,
+        machine,
+    ));
     d
 }
 
@@ -862,6 +876,63 @@ fn controller_for(bus: DiskBus) -> Option<&'static str> {
 
 /// Compile a spec. Errors are returned as diagnostics; warnings travel with
 /// the result.
+/// NICs attached to network objects: the network exists and takes what the
+/// NIC asks of it (M3-01).
+/// Where NIC `nic`'s passt sidecar listens: in the run directory, next to
+/// the QMP socket `qmp` (short root, so the AF_UNIX path limit holds).
+pub fn passt_socket(qmp: &str, nic: usize) -> String {
+    let name = format!("passt{nic}.sock");
+    match std::path::Path::new(qmp).parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(name).display().to_string(),
+        _ => name,
+    }
+}
+
+/// Network kinds this host cannot run (passt off Linux, M3-03).
+fn validate_network_hosts(spec: &VmSpec, networks: &[Network], os: &str) -> Vec<Diagnostic> {
+    let mut d = Vec::new();
+    for (i, nic) in spec.nics.iter().enumerate() {
+        if let NicBackend::Network { network, .. } = &nic.backend
+            && let Some(why) = networks
+                .iter()
+                .find(|n| &n.id == network)
+                .and_then(|n| n.config.host_unsupported_reason(os))
+        {
+            d.push(Diagnostic::error(
+                format!("nics[{i}].backend.network"),
+                "net.passt-unsupported",
+                why,
+            ));
+        }
+    }
+    d
+}
+
+pub fn validate_networks(spec: &VmSpec, networks: &[Network]) -> Vec<Diagnostic> {
+    let mut d = Vec::new();
+    for (i, nic) in spec.nics.iter().enumerate() {
+        let f = |s: &str| format!("nics[{i}].{s}");
+        if let NicBackend::Network { network, forwards } = &nic.backend {
+            match networks.iter().find(|n| &n.id == network) {
+                None => d.push(Diagnostic::error(
+                    f("backend.network"),
+                    "nic.network-missing",
+                    format!("network '{network}' does not exist (deleted?); pick another"),
+                )),
+                Some(n) if !forwards.is_empty() && !n.config.supports_forwards() => {
+                    d.push(Diagnostic::error(
+                        f("backend.forwards"),
+                        "forward.unsupported",
+                        n.config.forwards_unsupported_reason(),
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    d
+}
+
 pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>> {
     let caps = ctx.caps;
     let mut diags = validate(spec, caps);
@@ -937,6 +1008,23 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
     }
     if let Some(m) = ctx.machine {
         diags.extend(validate_buses(spec, caps, m));
+    }
+    diags.extend(validate_networks(spec, ctx.networks));
+    diags.extend(validate_network_hosts(spec, ctx.networks, ctx.os));
+    for (i, nic) in spec.nics.iter().enumerate() {
+        if let NicBackend::Network { network, .. } = &nic.backend {
+            let needs = ctx
+                .networks
+                .iter()
+                .any(|n| &n.id == network && n.config.needs_switch());
+            if needs && !ctx.switch_sockets.contains_key(network) {
+                diags.push(Diagnostic::error(
+                    format!("nics[{i}].backend.network"),
+                    "nic.switch-missing",
+                    "the isolated network's switch is not running",
+                ));
+            }
+        }
     }
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(diags);
@@ -1087,9 +1175,44 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
 
     // NICs
     for (i, nic) in spec.nics.iter().enumerate() {
-        let NicBackend::User { forwards } = &nic.backend;
         let mut netdev = json!({"type": "user", "id": format!("qui-net{i}")});
-        if !forwards.is_empty() {
+        let mut passt = false;
+        if let NicBackend::Network { network, .. } = &nic.backend {
+            // Validated above; a missing network never reaches here.
+            if let Some(n) = ctx.networks.iter().find(|n| &n.id == network) {
+                match &n.config {
+                    NetworkConfig::Nat { subnet } => {
+                        if let Some(s) = subnet {
+                            netdev["net"] = s.as_str().into();
+                        }
+                    }
+                    NetworkConfig::Isolated {} => {
+                        // A stream client of the daemon's switch; it keeps
+                        // reconnecting, so a daemon restart heals the link.
+                        netdev = json!({
+                            "type": "stream",
+                            "id": format!("qui-net{i}"),
+                            "server": false,
+                            "addr": {"type": "unix", "path": ctx.switch_sockets.get(network).cloned().unwrap_or_default()},
+                            "reconnect-ms": 1000,
+                        });
+                    }
+                    // QEMU connects to the NIC's passt sidecar, which the
+                    // daemon starts (with the forwards) before QEMU.
+                    NetworkConfig::Passt { .. } => {
+                        passt = true;
+                        netdev = json!({
+                            "type": "stream",
+                            "id": format!("qui-net{i}"),
+                            "server": false,
+                            "addr": {"type": "unix", "path": passt_socket(&ctx.run.qmp, i)},
+                        });
+                    }
+                }
+            }
+        }
+        let forwards = nic.backend.forwards();
+        if !forwards.is_empty() && !passt {
             netdev["hostfwd"] = forwards
                 .iter()
                 .map(|f| json!({"str": hostfwd_rule(f)}))
@@ -1100,6 +1223,7 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
         if let Some(mac) = &nic.mac {
             dev["mac"] = mac.as_str().into();
         }
+        crate::nic::device_props(nic, &mut dev);
         push(&mut a, "-device", json_arg(dev));
     }
 
@@ -1384,8 +1508,8 @@ fn validate_forward_duplicates(spec: &VmSpec) -> Vec<Diagnostic> {
         .iter()
         .enumerate()
         .flat_map(|(i, nic)| {
-            let NicBackend::User { forwards } = &nic.backend;
-            forwards
+            nic.backend
+                .forwards()
                 .iter()
                 .enumerate()
                 .map(move |(j, f)| (format!("nics[{i}].backend.forwards[{j}]"), f))
@@ -1431,9 +1555,18 @@ mod forward_tests {
     fn overlap_rules() {
         let a = fw("tcp", "127.0.0.1", 2222);
         assert!(forwards_overlap(&a, &fw("tcp", "127.0.0.1", 2222)));
-        assert!(forwards_overlap(&a, &fw("tcp", "0.0.0.0", 2222)), "wildcard");
-        assert!(!forwards_overlap(&a, &fw("udp", "127.0.0.1", 2222)), "protocol");
-        assert!(!forwards_overlap(&a, &fw("tcp", "127.0.0.2", 2222)), "address");
+        assert!(
+            forwards_overlap(&a, &fw("tcp", "0.0.0.0", 2222)),
+            "wildcard"
+        );
+        assert!(
+            !forwards_overlap(&a, &fw("udp", "127.0.0.1", 2222)),
+            "protocol"
+        );
+        assert!(
+            !forwards_overlap(&a, &fw("tcp", "127.0.0.2", 2222)),
+            "address"
+        );
         assert!(!forwards_overlap(&a, &fw("tcp", "127.0.0.1", 2223)), "port");
     }
 
@@ -1444,9 +1577,7 @@ mod forward_tests {
             serde_json::json!({"backend": {"kind": "user", "forwards": fs},
                 "model": "e1000", "mac": "52:54:00:00:00:01"})
         };
-        let f = |proto: &str, addr: &str| {
-            serde_json::json!({"proto": proto, "host_addr": addr, "host_port": 2222, "guest_port": 22})
-        };
+        let f = |proto: &str, addr: &str| serde_json::json!({"proto": proto, "host_addr": addr, "host_port": 2222, "guest_port": 22});
         let spec: VmSpec = serde_json::from_value(serde_json::json!({
             "spec_version": crate::spec::SPEC_VERSION, "name": "t", "arch": "x86_64",
             "machine": {"type": "pc"}, "cpu": {"count": 1}, "memory": {"size_mib": 128},

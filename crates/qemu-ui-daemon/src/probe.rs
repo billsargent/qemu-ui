@@ -597,6 +597,8 @@ mod compile_smoke {
             vnc,
         };
         let ctx = Context {
+            networks: &[],
+            switch_sockets: &Default::default(),
             shares: vec![],
             caps,
             os: std::env::consts::OS,
@@ -738,6 +740,8 @@ mod compile_smoke {
                 backend: NicBackend::User { forwards: vec![] },
                 model: "virtio-net-pci".into(),
                 mac: Some("52:54:00:00:00:01".into()),
+                queues: None,
+                virtio: None,
             }],
             display: DisplaySpec {
                 device: Some("virtio-vga".into()),

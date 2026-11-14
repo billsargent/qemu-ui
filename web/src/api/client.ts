@@ -11,10 +11,12 @@ import type { PortForward } from "./generated/PortForward";
 import type { LintResult } from "./generated/LintResult";
 import type { Diagnostic } from "./generated/Diagnostic";
 import type { CheckResult } from "./generated/CheckResult";
+import type { GuestNetInfo } from "./generated/GuestNetInfo";
 import type { HostDisk } from "./generated/HostDisk";
 import type { ImageDetail } from "./generated/ImageDetail";
 import type { Job } from "./generated/Job";
 import type { MeasureResult } from "./generated/MeasureResult";
+import type { NicModel } from "./generated/NicModel";
 import type { PoolInfo } from "./generated/PoolInfo";
 import type { PoolSummary } from "./generated/PoolSummary";
 import type { HostUsb } from "./generated/HostUsb";
@@ -24,6 +26,9 @@ import type { UploadSession } from "./generated/UploadSession";
 import type { ScanStatus } from "./generated/ScanStatus";
 import type { ShareRoot } from "./generated/ShareRoot";
 import type { SharesInfo } from "./generated/SharesInfo";
+import type { Network } from "./generated/Network";
+import type { NetworkConfig } from "./generated/NetworkConfig";
+import type { NetworkInfo } from "./generated/NetworkInfo";
 import type { SnapshotList } from "./generated/SnapshotList";
 import type { VmDetail } from "./generated/VmDetail";
 import type { VmEvent } from "./generated/VmEvent";
@@ -100,6 +105,9 @@ export const api = {
     request<DiskBusSupport[] | null>(
       `/host/buses?arch=${encodeURIComponent(arch)}&machine=${encodeURIComponent(machine)}`,
     ),
+  /** NIC models for a machine, recommended first (M3-07). */
+  nicModels: (arch: string, machine: string) =>
+    request<NicModel[]>(`/host/nic-models?arch=${encodeURIComponent(arch)}&machine=${encodeURIComponent(machine)}`),
   /** Add a disk; hotplugged when the VM runs. */
   addDisk: (id: string, disk: DiskSpec) => post<DiskChange>(`/vms/${id}/disks`, { disk }),
   /** Remove disk `n` (its `qui-disk<n>` index); hot-unplugged when running. */
@@ -119,6 +127,11 @@ export const api = {
   },
   consoleTicket: (id: string, kind: "vnc" | "serial") => post<ConsoleTicket>(`/vms/${id}/consoles/${kind}/ticket`),
 
+  networks: () => request<NetworkInfo[]>("/networks"),
+  createNetwork: (name: string, config: NetworkConfig) => post<Network>("/networks", { name, config }),
+  updateNetwork: (id: string, name: string, config: NetworkConfig) =>
+    request<Network>(`/networks/${id}`, { method: "PUT", body: JSON.stringify({ name, config }) }),
+  deleteNetwork: (id: string) => request<void>(`/networks/${id}`, { method: "DELETE" }),
   shares: () => request<SharesInfo>("/shares"),
   addShareRoot: (name: string, path: string) => post<ShareRoot>("/shares/roots", { name, path }),
   removeShareRoot: (name: string) =>
@@ -228,6 +241,9 @@ export const api = {
     post<Job>(`/vms/${vmId}/snapshots/${snapshotId}/revert`, { safety_snapshot: safetySnapshot }),
   deleteSnapshot: (vmId: string, snapshotId: string) =>
     request<Job>(`/vms/${vmId}/snapshots/${snapshotId}`, { method: "DELETE" }),
+
+  /** Guest addresses per NIC, best source first (M3-08). */
+  guestNet: (vmId: string) => request<GuestNetInfo>(`/vms/${vmId}/guest-net`),
 };
 
 export function wsUrl(path: string): string {

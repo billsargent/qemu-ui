@@ -31,9 +31,10 @@ pub struct LintResult {
 /// The spec as linted: no side effects on the host.
 pub fn lint_spec(spec: &VmSpec) -> VmSpec {
     let mut s = spec.clone();
+    // Network objects may need host resources (switch sockets, passt,
+    // taps); the check runs every NIC on a plain NAT without forwards.
     for nic in &mut s.nics {
-        let NicBackend::User { forwards } = &mut nic.backend;
-        forwards.clear();
+        nic.backend = NicBackend::User { forwards: vec![] };
     }
     s.display.vnc = false;
     // Passing a real USB device through would take it away from the host
@@ -198,6 +199,8 @@ mod tests {
                 },
                 model: "e1000".into(),
                 mac: Some("52:54:00:00:00:01".into()),
+                queues: None,
+                virtio: None,
             }],
             display: DisplaySpec::default(),
             input: InputSpec::default(),
@@ -230,8 +233,28 @@ mod tests {
     #[test]
     fn lint_spec_removes_host_side_effects() {
         let s = lint_spec(&spec());
-        let NicBackend::User { forwards } = &s.nics[0].backend;
-        assert!(forwards.is_empty());
+        assert!(s.nics[0].backend.forwards().is_empty());
+
+        // Network-attached NICs are linted on plain NAT: no host resources.
+        let mut on_net = spec();
+        on_net.nics[0].backend = NicBackend::Network {
+            network: "iso".into(),
+            forwards: vec![],
+        };
+        let l = lint_spec(&on_net);
+        assert_eq!(l.nics[0].backend, NicBackend::User { forwards: vec![] });
+        // A passt NIC with forwards: checked as NAT, no sidecar, no binds.
+        on_net.nics[0].backend = NicBackend::Network {
+            network: "fast".into(),
+            forwards: vec![PortForward {
+                proto: "tcp".into(),
+                host_addr: "127.0.0.1".into(),
+                host_port: 2222,
+                guest_port: 22,
+            }],
+        };
+        let l = lint_spec(&on_net);
+        assert_eq!(l.nics[0].backend, NicBackend::User { forwards: vec![] });
         assert!(!s.display.vnc);
     }
 

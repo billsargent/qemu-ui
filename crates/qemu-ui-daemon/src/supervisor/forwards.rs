@@ -1,4 +1,4 @@
-//! Port forwards on slirp NICs (plan.md §10.2, M3-02).
+//! Port forwards on NAT NICs (plan.md §10.2, M3-02).
 //!
 //! A forward is part of the NIC's spec, so a cold start passes it as
 //! `-netdev user,hostfwd=…`. On a running VM it is applied live through the
@@ -7,12 +7,18 @@
 //! same way disk hotplug is (see `disks.rs`), so it survives a restart and
 //! `restart_pending` stays meaningful.
 //!
+//! A VM's own NAT (`user`) and NAT network objects are both a slirp netdev
+//! `qui-net<i>`, so both change live. passt networks take forwards as
+//! sidecar arguments fixed at start: they change only while the VM is
+//! stopped. Isolated networks have no forwards (network validation says so).
+//!
 //! HMP reports results as text in a successful reply: `hostfwd_add` is
 //! silent on success, `hostfwd_remove` says "… removed"; anything else is
 //! QEMU's error message.
 
 use super::*;
 use qemu_ui_core::compile::{forwards_overlap, hostfwd_host, hostfwd_rule};
+use qemu_ui_core::network::{Network, NetworkConfig};
 use qemu_ui_core::spec::{NicBackend, PortForward};
 use qemu_ui_core::vm::ForwardChange;
 
@@ -25,15 +31,39 @@ fn invalid(field: String, rule: &str, msg: String) -> OpError {
     }])
 }
 
-/// The slirp forwards of NIC `i`, or why it has none.
-fn user_forwards(spec: &mut VmSpec, i: usize) -> OpResult<&mut Vec<PortForward>> {
-    let nic = spec.nics.get_mut(i).ok_or(OpError::NotFound)?;
-    match &mut nic.backend {
-        NicBackend::User { forwards } => Ok(forwards),
-        #[allow(unreachable_patterns)]
-        _ => Err(OpError::Conflict(
-            "port forwards apply to NAT (user-mode) network adapters only".into(),
+/// The forwards of NIC `i`.
+fn nic_forwards(spec: &mut VmSpec, i: usize) -> OpResult<&mut Vec<PortForward>> {
+    Ok(spec
+        .nics
+        .get_mut(i)
+        .ok_or(OpError::NotFound)?
+        .backend
+        .forwards_mut())
+}
+
+/// Can NIC `i` of a running VM (its live spec) change forwards now? Only
+/// slirp netdevs can.
+fn live_forwardable(live: &VmSpec, i: usize, networks: &[Network]) -> OpResult<()> {
+    let nic = live.nics.get(i).ok_or_else(|| {
+        OpError::Conflict(
+            "this adapter was added after the VM started; restart the VM to change its forwards"
+                .into(),
+        )
+    })?;
+    let NicBackend::Network { network, .. } = &nic.backend else {
+        return Ok(());
+    };
+    match networks.iter().find(|n| &n.id == network).map(|n| &n.config) {
+        Some(NetworkConfig::Nat { .. }) => Ok(()),
+        Some(NetworkConfig::Passt { .. }) => Err(OpError::Conflict(
+            "forwards on a passt network are set when the VM starts and can't change while it runs; \
+             stop the VM to change them (restart the VM to apply)"
+                .into(),
         )),
+        Some(c) => Err(OpError::Conflict(c.forwards_unsupported_reason())),
+        None => Err(OpError::Conflict(format!(
+            "network '{network}' no longer exists; restart the VM to change its forwards"
+        ))),
     }
 }
 
@@ -64,22 +94,30 @@ impl Supervisor {
         let mut saved: VmSpec =
             serde_json::from_str(&row.spec_json).map_err(|e| OpError::Failed(e.into()))?;
         let caps = self.caps_for(&saved.arch).await?;
-        let pos = user_forwards(&mut saved, i)?.len();
+        let networks = self.networks.list().map_err(OpError::Failed)?;
+        let pos = nic_forwards(&mut saved, i)?.len();
         let field = format!("nics[{i}].backend.forwards[{pos}]");
 
-        // The same checks as a save, for this forward only.
+        // The same checks as a save, for this forward and this NIC's network.
         let mut check = saved.clone();
-        user_forwards(&mut check, i)?.push(fw.clone());
+        nic_forwards(&mut check, i)?.push(fw.clone());
+        let nic_fwds = format!("nics[{i}].backend.forwards");
         let errs: Vec<Diagnostic> = compile::validate(&check, &caps)
             .into_iter()
-            .filter(|d| d.severity == Severity::Error && d.field.starts_with(&field))
+            .filter(|d| d.field.starts_with(&field))
+            .chain(
+                compile::validate_networks(&check, &networks)
+                    .into_iter()
+                    .filter(|d| d.field.starts_with(&nic_fwds)),
+            )
+            .filter(|d| d.severity == Severity::Error)
             .collect();
         if !errs.is_empty() {
             return Err(OpError::Invalid(errs));
         }
 
         let Some(run) = self.active_run(id) else {
-            user_forwards(&mut saved, i)?.push(fw);
+            nic_forwards(&mut saved, i)?.push(fw);
             self.save_spec(id, &saved)?;
             return Ok(ForwardChange {
                 live: false,
@@ -90,11 +128,8 @@ impl Supervisor {
 
         let mut live: VmSpec =
             serde_json::from_str(&run.spec_json).map_err(|e| OpError::Failed(e.into()))?;
-        let live_fwds = user_forwards(&mut live, i).map_err(|_| {
-            OpError::Conflict(
-                "this adapter changed since the VM started; restart it to add forwards live".into(),
-            )
-        })?;
+        live_forwardable(&live, i, &networks)?;
+        let live_fwds = nic_forwards(&mut live, i)?;
         if live_fwds.iter().any(|g| forwards_overlap(&fw, g)) {
             return Err(invalid(
                 field,
@@ -125,7 +160,7 @@ impl Supervisor {
         })?;
 
         live_fwds.push(fw.clone());
-        user_forwards(&mut saved, i)?.push(fw.clone());
+        nic_forwards(&mut saved, i)?.push(fw.clone());
         let live_json = serde_json::to_string(&live).map_err(|e| OpError::Failed(e.into()))?;
         self.store.update_run_spec(run.id, &live_json)?;
         self.save_spec(id, &saved)?;
@@ -147,7 +182,7 @@ impl Supervisor {
         let row = self.store.get_vm(id)?.ok_or(OpError::NotFound)?;
         let mut saved: VmSpec =
             serde_json::from_str(&row.spec_json).map_err(|e| OpError::Failed(e.into()))?;
-        let fwds = user_forwards(&mut saved, i)?;
+        let fwds = nic_forwards(&mut saved, i)?;
         if j >= fwds.len() {
             return Err(OpError::NotFound);
         }
@@ -157,9 +192,13 @@ impl Supervisor {
         if let Some(run) = self.active_run(id) {
             let mut live: VmSpec =
                 serde_json::from_str(&run.spec_json).map_err(|e| OpError::Failed(e.into()))?;
-            if let Ok(live_fwds) = user_forwards(&mut live, i)
-                && let Some(k) = live_fwds.iter().position(|g| *g == fw)
-            {
+            let k = live
+                .nics
+                .get(i)
+                .and_then(|n| n.backend.forwards().iter().position(|g| *g == fw));
+            if let Some(k) = k {
+                let networks = self.networks.list().map_err(OpError::Failed)?;
+                live_forwardable(&live, i, &networks)?;
                 let qmp = self.qmp_of(id)?;
                 hmp(
                     &qmp,
@@ -167,7 +206,7 @@ impl Supervisor {
                     Some("removed"),
                 )
                 .await?;
-                live_fwds.remove(k);
+                nic_forwards(&mut live, i)?.remove(k);
                 let live_json =
                     serde_json::to_string(&live).map_err(|e| OpError::Failed(e.into()))?;
                 self.store.update_run_spec(run.id, &live_json)?;
@@ -211,19 +250,11 @@ impl Supervisor {
             .collect();
         let mut d = Vec::new();
         for (i, nic) in spec.nics.iter().enumerate() {
-            #[allow(irrefutable_let_patterns)]
-            let NicBackend::User { forwards } = &nic.backend else {
-                continue;
-            };
-            for (j, f) in forwards.iter().enumerate() {
+            for (j, f) in nic.backend.forwards().iter().enumerate() {
                 let holder = others.iter().find(|(_, s)| {
-                    s.nics.iter().any(|n| {
-                        #[allow(irrefutable_let_patterns)]
-                        let NicBackend::User { forwards } = &n.backend else {
-                            return false;
-                        };
-                        forwards.iter().any(|g| forwards_overlap(f, g))
-                    })
+                    s.nics
+                        .iter()
+                        .any(|n| n.backend.forwards().iter().any(|g| forwards_overlap(f, g)))
                 });
                 if let Some((name, _)) = holder {
                     d.push(Diagnostic {
@@ -239,6 +270,54 @@ impl Supervisor {
             }
         }
         d
+    }
+}
+
+#[cfg(test)]
+mod rules {
+    use super::*;
+
+    fn net(id: &str, config: NetworkConfig) -> Network {
+        Network {
+            id: id.into(),
+            name: id.into(),
+            config,
+        }
+    }
+
+    fn spec_on(backend: serde_json::Value) -> VmSpec {
+        serde_json::from_value(json!({
+            "spec_version": qemu_ui_core::spec::SPEC_VERSION, "name": "t", "arch": "x86_64",
+            "machine": {"type": "pc"}, "cpu": {"count": 1}, "memory": {"size_mib": 128},
+            "nics": [{"backend": backend, "model": "e1000", "mac": "52:54:00:00:00:01"}],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn which_nics_change_forwards_live() {
+        let nets = [
+            net("nat", NetworkConfig::Nat { subnet: None }),
+            net("passt", NetworkConfig::Passt { mtu: None }),
+            net("iso", NetworkConfig::Isolated {}),
+        ];
+        let on = |n: &str| spec_on(json!({"kind": "network", "network": n}));
+        assert!(live_forwardable(&spec_on(json!({"kind": "user"})), 0, &nets).is_ok());
+        assert!(live_forwardable(&on("nat"), 0, &nets).is_ok());
+        let passt = format!("{:?}", live_forwardable(&on("passt"), 0, &nets));
+        assert!(passt.contains("restart the VM to apply"), "{passt}");
+        assert!(matches!(
+            live_forwardable(&on("iso"), 0, &nets),
+            Err(OpError::Conflict(_))
+        ));
+        assert!(matches!(
+            live_forwardable(&on("gone"), 0, &nets),
+            Err(OpError::Conflict(_))
+        ));
+        assert!(
+            matches!(live_forwardable(&on("nat"), 1, &nets), Err(OpError::Conflict(m)) if m.contains("added after")),
+            "a NIC the run does not have"
+        );
     }
 }
 
@@ -262,8 +341,7 @@ mod real {
             .lines()
             .filter(|l| l.contains("HOST_FORWARD"))
             .collect::<Vec<_>>()
-            .join("
-")
+            .join("\n")
     }
 
     fn free_port() -> u16 {
@@ -272,6 +350,10 @@ mod real {
             .local_addr()
             .unwrap()
             .port()
+    }
+
+    fn ok<T>(r: OpResult<T>) -> T {
+        r.map_err(|e| format!("{e:?}")).unwrap()
     }
 
     #[test]
@@ -286,7 +368,8 @@ mod real {
             let caps = host_caps(&qemu, &img).await;
             let sv = make(&data, &caps).await;
             let id = small_vm(&sv, &caps, "fwd").await;
-            // Run the body as a task so a failure still stops QEMU.
+            // Run the body as a task with a deadline, so a failure or a hang
+            // still stops QEMU.
             let body = tokio::spawn(tokio::time::timeout(
                 Duration::from_secs(180),
                 scenario(sv.clone(), id.clone()),
@@ -305,106 +388,102 @@ mod real {
     }
 
     async fn scenario(sv: Arc<Supervisor>, id: String) {
-        {
-            let base = sv.detail(&id).ok().unwrap().spec.nics[0].clone();
-            let NicBackend::User { forwards } = &base.backend;
-            let before = forwards.len();
-            let port = free_port();
-            let fw = PortForward {
-                proto: "tcp".into(),
-                host_addr: "127.0.0.1".into(),
-                host_port: port,
-                guest_port: 8080,
-            };
+        let before = sv.detail(&id).ok().unwrap().spec.nics[0]
+            .backend
+            .forwards()
+            .len();
+        let port = free_port();
+        let fw = PortForward {
+            proto: "tcp".into(),
+            host_addr: "127.0.0.1".into(),
+            host_port: port,
+            guest_port: 8080,
+        };
 
-            // Stopped: saved only.
-            let c = sv
-                .add_forward(&id, 0, fw.clone())
-                .await
-                .map_err(|e| format!("{e:?}"))
-                .unwrap();
-            assert!(!c.live);
-            assert!(
-                matches!(sv.add_forward(&id, 0, fw.clone()).await, Err(OpError::Invalid(d)) if d[0].rule == "forward.duplicate"),
-                "duplicates are refused"
-            );
-            sv.remove_forward(&id, 0, before)
-                .await
-                .map_err(|e| format!("{e:?}"))
-                .unwrap();
+        // Stopped: saved only.
+        let c = ok(sv.add_forward(&id, 0, fw.clone()).await);
+        assert!(!c.live);
+        assert!(
+            matches!(sv.add_forward(&id, 0, fw.clone()).await, Err(OpError::Invalid(d)) if d[0].rule == "forward.duplicate"),
+            "duplicates are refused"
+        );
+        ok(sv.remove_forward(&id, 0, before).await);
 
-            // Running: applied live.
-            sv.start(&id).await.map_err(|e| format!("{e:?}")).unwrap();
-            let qmp = sv.live_qmp(&id).unwrap();
-            assert!(!usernet(&qmp).await.contains(&port.to_string()));
-            let c = sv
-                .add_forward(&id, 0, fw.clone())
-                .await
-                .map_err(|e| format!("{e:?}"))
-                .unwrap();
-            assert!(c.live, "{}", c.message);
-            let un = usernet(&qmp).await;
-            assert!(un.contains(&port.to_string()), "{un}");
-            // The host port really listens.
-            std::net::TcpStream::connect(("127.0.0.1", port)).expect("forward listens");
-            let d = sv.detail(&id).ok().unwrap();
-            assert!(!d.summary.restart_pending, "live and saved stay in step");
-            let NicBackend::User { forwards } = &d.spec.nics[0].backend;
-            assert_eq!(forwards.last(), Some(&fw));
+        // Running: applied live.
+        ok(sv.start(&id).await);
+        let qmp = sv.live_qmp(&id).unwrap();
+        assert!(!usernet(&qmp).await.contains(&port.to_string()));
+        let c = ok(sv.add_forward(&id, 0, fw.clone()).await);
+        assert!(c.live, "{}", c.message);
+        let un = usernet(&qmp).await;
+        assert!(un.contains(&port.to_string()), "{un}");
+        // The host port really listens.
+        std::net::TcpStream::connect(("127.0.0.1", port)).expect("forward listens");
+        let d = sv.detail(&id).ok().unwrap();
+        assert!(!d.summary.restart_pending, "live and saved stay in step");
+        assert_eq!(d.spec.nics[0].backend.forwards().last(), Some(&fw));
 
-            // A port already bound on the host is a clear error.
-            let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let busy = PortForward {
-                host_port: held.local_addr().unwrap().port(),
-                ..fw.clone()
-            };
-            let e = sv
-                .add_forward(&id, 0, busy)
-                .await
-                .err()
-                .map(|e| format!("{e:?}"))
-                .unwrap_or_default();
-            assert!(e.contains("forward.bind"), "{e}");
-            drop(held);
+        // A port already bound on the host is a clear error.
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy = PortForward {
+            host_port: held.local_addr().unwrap().port(),
+            ..fw.clone()
+        };
+        let e = sv
+            .add_forward(&id, 0, busy)
+            .await
+            .err()
+            .map(|e| format!("{e:?}"))
+            .unwrap_or_default();
+        assert!(e.contains("forward.bind"), "{e}");
+        drop(held);
 
-            // Remove live.
-            let c = sv
-                .remove_forward(&id, 0, before)
-                .await
-                .map_err(|e| format!("{e:?}"))
-                .unwrap();
-            assert!(c.live, "{}", c.message);
-            assert!(!usernet(&qmp).await.contains(&port.to_string()));
+        // Remove live.
+        let c = ok(sv.remove_forward(&id, 0, before).await);
+        assert!(c.live, "{}", c.message);
+        assert!(!usernet(&qmp).await.contains(&port.to_string()));
 
-            // Persistence: re-added, it is in the next start's argv.
-            sv.add_forward(&id, 0, fw.clone())
-                .await
-                .map_err(|e| format!("{e:?}"))
-                .unwrap();
-            sv.force_stop(&id)
-                .await
-                .map_err(|e| format!("{e:?}"))
-                .unwrap();
-            wait_state(&sv, &id, VmState::Stopped).await;
-            sv.start(&id).await.map_err(|e| format!("{e:?}")).unwrap();
-            let qmp = sv.live_qmp(&id).unwrap();
-            assert!(usernet(&qmp).await.contains(&port.to_string()));
+        // Persistence: re-added, it is in the next start's argv.
+        ok(sv.add_forward(&id, 0, fw.clone()).await);
+        ok(sv.force_stop(&id).await);
+        wait_state(&sv, &id, VmState::Stopped).await;
+        ok(sv.start(&id).await);
+        let qmp = sv.live_qmp(&id).unwrap();
+        assert!(usernet(&qmp).await.contains(&port.to_string()));
 
-            // Another VM forwarding the same port gets a warning.
-            let mut other = sv.detail(&id).ok().unwrap().spec;
-            other.name = "other".into();
-            let w = sv.forward_conflicts(None, &other);
-            assert!(w.iter().any(|d| d.rule == "forward.in-use"), "{w:?}");
-            assert!(
-                sv.forward_conflicts(Some(&id), &other).is_empty(),
-                "own forwards are fine"
-            );
+        // Another VM forwarding the same port gets a warning.
+        let mut other = sv.detail(&id).ok().unwrap().spec;
+        other.name = "other".into();
+        let w = sv.forward_conflicts(None, &other);
+        assert!(w.iter().any(|d| d.rule == "forward.in-use"), "{w:?}");
+        assert!(
+            sv.forward_conflicts(Some(&id), &other).is_empty(),
+            "own forwards are fine"
+        );
+        ok(sv.force_stop(&id).await);
+        wait_state(&sv, &id, VmState::Stopped).await;
 
-            sv.force_stop(&id)
-                .await
-                .map_err(|e| format!("{e:?}"))
-                .unwrap();
-            wait_state(&sv, &id, VmState::Stopped).await;
-        }
+        // A NIC on a NAT network object is a slirp netdev too: live as well.
+        let nat = sv
+            .networks
+            .create("lan", NetworkConfig::Nat { subnet: None })
+            .map_err(|e| format!("{e:?}"))
+            .unwrap();
+        let mut spec = sv.detail(&id).ok().unwrap().spec;
+        spec.nics[0].backend = NicBackend::Network {
+            network: nat.id.clone(),
+            forwards: vec![],
+        };
+        ok(sv.update(&id, spec).await);
+        ok(sv.start(&id).await);
+        let qmp = sv.live_qmp(&id).unwrap();
+        let c = ok(sv.add_forward(&id, 0, fw.clone()).await);
+        assert!(c.live, "{}", c.message);
+        assert!(usernet(&qmp).await.contains(&port.to_string()));
+        let c = ok(sv.remove_forward(&id, 0, 0).await);
+        assert!(c.live, "{}", c.message);
+        assert!(!usernet(&qmp).await.contains(&port.to_string()));
+        ok(sv.force_stop(&id).await);
+        wait_state(&sv, &id, VmState::Stopped).await;
     }
 }

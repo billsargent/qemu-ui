@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use qemu_ui_core::caps::*;
 use qemu_ui_core::compile::*;
+use qemu_ui_core::network::{Network, NetworkConfig};
 use qemu_ui_core::spec::*;
 
 fn machine(name: &str, alias: Option<&str>, default: bool) -> MachineInfo {
@@ -178,6 +179,8 @@ fn base_spec() -> VmSpec {
             },
             model: "virtio-net-pci".into(),
             mac: Some("52:54:00:12:34:56".into()),
+            queues: None,
+            virtio: None,
         }],
         display: DisplaySpec {
             device: Some("virtio-vga".into()),
@@ -251,6 +254,8 @@ fn linux_q35_virtio() {
     let caps = caps(true);
     let images = images();
     let ctx = Context {
+        networks: &[],
+        switch_sockets: &Default::default(),
         shares: vec![],
         caps: &caps,
         os: "linux",
@@ -295,6 +300,8 @@ fn windows_uefi_secure_boot_cdrom_with_comma() {
     spec.display.vdagent = true;
     spec.passthrough = vec!["-global".into(), "ICH9-LPC.disable_s3=1".into()];
     let ctx = Context {
+        networks: &[],
+        switch_sockets: &Default::default(),
         shares: vec![],
         caps: &caps,
         os: "windows",
@@ -340,6 +347,8 @@ fn old_qemu_uses_mon() {
     let caps = caps(false);
     let images = images();
     let ctx = Context {
+        networks: &[],
+        switch_sockets: &Default::default(),
         shares: vec![],
         caps: &caps,
         os: "linux",
@@ -364,6 +373,8 @@ fn keyval_paths_double_commas() {
     let mut run = run_paths(VncListen::Unix("/run/a,b/vnc.sock".into()));
     run.serial = "/run/a,b/serial.sock".into();
     let ctx = Context {
+        networks: &[],
+        switch_sockets: &Default::default(),
         shares: vec![],
         caps: &caps,
         os: "linux",
@@ -385,6 +396,8 @@ fn errors(spec: &VmSpec) -> Vec<String> {
     let caps = caps(true);
     let images = images();
     let ctx = Context {
+        networks: &[],
+        switch_sockets: &Default::default(),
         shares: vec![],
         caps: &caps,
         os: "linux",
@@ -455,9 +468,10 @@ fn exposed_forward_is_a_warning_not_an_error() {
     let caps = caps(true);
     let images = images();
     let mut s = base_spec();
-    let NicBackend::User { forwards } = &mut s.nics[0].backend;
-    forwards[0].host_addr = "0.0.0.0".into();
+    s.nics[0].backend.forwards_mut()[0].host_addr = "0.0.0.0".into();
     let ctx = Context {
+        networks: &[],
+        switch_sockets: &Default::default(),
         shares: vec![],
         caps: &caps,
         os: "linux",
@@ -468,6 +482,177 @@ fn exposed_forward_is_a_warning_not_an_error() {
     };
     let c = compile(&s, &ctx).unwrap();
     assert!(c.warnings.iter().any(|w| w.rule == "forward.exposed"));
+}
+
+fn compile_with_networks(s: &VmSpec, networks: &[Network]) -> Result<Compiled, Vec<Diagnostic>> {
+    let sockets = BTreeMap::from([("iso".to_string(), "/run/qui/net-iso.sock".to_string())]);
+    compile_with_switches(s, networks, &sockets)
+}
+
+fn compile_with_switches(
+    s: &VmSpec,
+    networks: &[Network],
+    switch_sockets: &BTreeMap<String, String>,
+) -> Result<Compiled, Vec<Diagnostic>> {
+    let caps = caps(true);
+    let images = images();
+    let ctx = Context {
+        switch_sockets,
+        networks,
+        shares: vec![],
+        caps: &caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/x".into())),
+        images: &images,
+        firmware: None,
+        machine: None,
+    };
+    compile(s, &ctx)
+}
+
+#[test]
+fn nic_on_a_nat_network_gets_its_subnet_and_forwards() {
+    let lab = Network {
+        id: "n1".into(),
+        name: "lab".into(),
+        config: NetworkConfig::Nat {
+            subnet: Some("10.9.0.0/24".into()),
+        },
+    };
+    let mut s = base_spec();
+    let forwards = s.nics[0].backend.forwards().to_vec();
+    s.nics[0].backend = NicBackend::Network {
+        network: "n1".into(),
+        forwards,
+    };
+    let c = compile_with_networks(&s, std::slice::from_ref(&lab)).unwrap();
+    let netdev = c
+        .args
+        .iter()
+        .find(|a| a.contains("\"id\":\"qui-net0\""))
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(netdev).unwrap();
+    assert_eq!(v["type"], "user");
+    assert_eq!(v["net"], "10.9.0.0/24");
+    assert_eq!(v["hostfwd"][0]["str"], "tcp:127.0.0.1:2222-:22");
+
+    // Without a subnet, QEMU's default addressing.
+    let plain = Network {
+        config: NetworkConfig::Nat { subnet: None },
+        ..lab
+    };
+    let c = compile_with_networks(&s, &[plain]).unwrap();
+    assert!(!c.args.iter().any(|a| a.contains("\"net\"")));
+}
+
+#[test]
+fn nic_on_an_isolated_network_is_a_stream_client_of_its_switch() {
+    let iso = Network {
+        id: "iso".into(),
+        name: "lan".into(),
+        config: NetworkConfig::Isolated {},
+    };
+    let mut s = base_spec();
+    s.nics[0].backend = NicBackend::Network {
+        network: "iso".into(),
+        forwards: vec![],
+    };
+    let c = compile_with_networks(&s, std::slice::from_ref(&iso)).unwrap();
+    let netdev = c
+        .args
+        .iter()
+        .find(|a| a.contains("\"id\":\"qui-net0\""))
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(netdev).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({"type": "stream", "id": "qui-net0", "server": false,
+            "addr": {"type": "unix", "path": "/run/qui/net-iso.sock"}, "reconnect-ms": 1000})
+    );
+
+    // Forwards can't reach an isolated guest.
+    s.nics[0].backend.forwards_mut().push(PortForward {
+        proto: "tcp".into(),
+        host_addr: "127.0.0.1".into(),
+        host_port: 2222,
+        guest_port: 22,
+    });
+    let errs = compile_with_networks(&s, std::slice::from_ref(&iso)).unwrap_err();
+    assert!(
+        errs.iter().any(|d| d.rule == "forward.unsupported"),
+        "{errs:?}"
+    );
+
+    // No switch resolved: refused, never a netdev with an empty path.
+    s.nics[0].backend.forwards_mut().clear();
+    let errs = compile_with_switches(&s, &[iso], &BTreeMap::new()).unwrap_err();
+    assert!(
+        errs.iter().any(|d| d.rule == "nic.switch-missing"),
+        "{errs:?}"
+    );
+}
+
+#[test]
+fn nic_on_a_passt_network_connects_to_its_sidecar() {
+    let fast = Network {
+        id: "p1".into(),
+        name: "fast".into(),
+        config: NetworkConfig::Passt { mtu: None },
+    };
+    let mut s = base_spec();
+    let forwards = s.nics[0].backend.forwards().to_vec();
+    s.nics[0].backend = NicBackend::Network {
+        network: "p1".into(),
+        forwards,
+    };
+    let c = compile_with_networks(&s, std::slice::from_ref(&fast)).unwrap();
+    let netdev = c
+        .args
+        .iter()
+        .find(|a| a.contains("\"id\":\"qui-net0\""))
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(netdev).unwrap();
+    assert_eq!(v["type"], "stream");
+    assert_eq!(v["server"], false);
+    assert_eq!(v["addr"]["type"], "unix");
+    let run = run_paths(VncListen::Unix("/x".into()));
+    assert_eq!(v["addr"]["path"], passt_socket(&run.qmp, 0));
+    assert!(v.get("hostfwd").is_none(), "passt applies forwards itself");
+
+    // Not on Windows hosts.
+    let caps = caps(true);
+    let images = images();
+    let ctx = Context {
+        switch_sockets: &Default::default(),
+        networks: std::slice::from_ref(&fast),
+        shares: vec![],
+        caps: &caps,
+        os: "windows",
+        run,
+        images: &images,
+        firmware: None,
+        machine: None,
+    };
+    let errs = compile(&s, &ctx).unwrap_err();
+    assert!(
+        errs.iter().any(|d| d.rule == "net.passt-unsupported"),
+        "{errs:?}"
+    );
+}
+
+#[test]
+fn nic_on_a_missing_network_is_an_error() {
+    let mut s = base_spec();
+    s.nics[0].backend = NicBackend::Network {
+        network: "gone".into(),
+        forwards: vec![],
+    };
+    let errs = compile_with_networks(&s, &[]).unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|d| d.rule == "nic.network-missing" && d.field == "nics[0].backend.network"),
+        "{errs:?}"
+    );
 }
 
 #[test]
@@ -504,6 +689,8 @@ fn linux_shares_9p() {
         share("docs", "", "docs", true),
     ];
     let ctx = Context {
+        networks: &[],
+        switch_sockets: &Default::default(),
         shares: vec![
             ResolvedShare {
                 path: "/srv/src/projects/web, v2".into(),
@@ -541,6 +728,8 @@ fn linux_shares_virtiofs() {
     let mut spec = base_spec();
     spec.shares = vec![share("src", "", "src", false)];
     let ctx = Context {
+        networks: &[],
+        switch_sockets: &Default::default(),
         shares: vec![ResolvedShare {
             path: "/srv/src".into(),
             backend: ShareBackend::VirtioFs {
@@ -670,6 +859,8 @@ fn compile_on(
 ) -> Result<Compiled, Vec<Diagnostic>> {
     let images = images();
     let ctx = Context {
+        networks: &[],
+        switch_sockets: &Default::default(),
         caps,
         os: "linux",
         run: run_paths(VncListen::Unix("/x".into())),
@@ -734,6 +925,8 @@ fn slots_name_disks_and_must_be_unique() {
     let caps = caps(true);
     let images = images();
     let ctx = Context {
+        networks: &[],
+        switch_sockets: &Default::default(),
         caps: &caps,
         os: "linux",
         run: run_paths(VncListen::Unix("/x".into())),
@@ -787,6 +980,8 @@ fn linux_usb_passthrough() {
     pinned.host_port = Some("3.1".into());
     spec.usb = vec![usb("046D", "C52B"), pinned, usb("046d", "c52b")];
     let ctx = Context {
+        networks: &[],
+        switch_sockets: &Default::default(),
         caps: &caps,
         os: "linux",
         run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
@@ -829,4 +1024,58 @@ fn usb_validation() {
         d.iter()
             .any(|d| d.rule == "usb.host-missing" && d.severity == Severity::Error)
     );
+}
+
+// ------------------------------------------------------------------ M3-07
+
+#[test]
+fn linux_virtio_net_options() {
+    let caps = caps(true);
+    let mut s = base_spec();
+    s.nics[0].virtio = Some(VirtioNetOptions {
+        csum: Some(false),
+        tso: None,
+        mrg_rxbuf: Some(false),
+    });
+    let images = images();
+    let ctx = Context {
+        networks: &[],
+        switch_sockets: &Default::default(),
+        shares: vec![],
+        caps: &caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
+        images: &images,
+        firmware: None,
+        machine: None,
+    };
+    let c = compile(&s, &ctx).unwrap();
+    golden("linux-virtio-net-options", &c);
+}
+
+#[test]
+fn nic_model_must_fit_the_machine() {
+    let mut caps = caps_with_ports();
+    caps.devices.push(DeviceInfo {
+        name: "ne2k_isa".into(),
+        category: "Network".into(),
+        bus: Some("ISA".into()),
+        alias: None,
+        description: None,
+        no_user: false,
+    });
+    let mut s = base_spec();
+    s.nics[0].model = "ne2k_isa".into();
+    let virt = machine_buses("qtree-aarch64-virt.txt", "virt-11.1");
+    let errs = compile_on(&s, &caps, &virt).unwrap_err();
+    let e = errs
+        .iter()
+        .find(|d| d.rule == "nic.model-bus")
+        .expect("model-bus error");
+    assert_eq!(e.field, "nics[0].model");
+    assert!(e.message.contains("no ISA bus"), "{}", e.message);
+
+    // The same model is fine where the machine has an ISA bus.
+    let pc = machine_buses("qtree-x86_64-pc.txt", "pc-i440fx-11.1");
+    assert!(compile_on(&s, &caps, &pc).is_ok());
 }
