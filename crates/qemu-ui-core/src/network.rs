@@ -38,6 +38,23 @@ pub enum NetworkConfig {
         #[serde(default)]
         mtu: Option<u16>,
     },
+    /// Linux: a tap per NIC, attached by the privileged helper to an
+    /// existing host bridge the administrator allowlisted (M3-05). Guests
+    /// are on the bridge's LAN and reachable directly.
+    Bridged {
+        /// Host bridge interface, e.g. `br0`.
+        bridge: String,
+    },
+    /// Linux: a tap per NIC on a bridge the helper manages, with no uplink.
+    /// The host has an address on it (set in helper.toml); guests reach the
+    /// host and each other, not the outside world (M3-05).
+    HostOnly {},
+    /// Windows: a TAP-Windows adapter, bridged to the LAN (or not) in
+    /// Network Connections by an administrator (M3-06).
+    Tap {
+        /// The adapter's name (`Get-NetAdapter` Name), e.g. `Ethernet 3`.
+        adapter: String,
+    },
     /// A private switch inside the daemon (M3-04): VMs on the same isolated
     /// network reach each other and nothing else, with no host or internet
     /// access. Nothing is put on the physical network.
@@ -50,8 +67,29 @@ impl NetworkConfig {
         match self {
             NetworkConfig::Nat { .. } => "NAT",
             NetworkConfig::Passt { .. } => "NAT (passt)",
+            NetworkConfig::Bridged { .. } => "Bridged",
+            NetworkConfig::HostOnly {} => "Host-only",
+            NetworkConfig::Tap { .. } => "TAP",
             NetworkConfig::Isolated {} => "Isolated",
         }
+    }
+
+    /// Backed by a host tap device: guests are reachable directly and
+    /// virtio-net can use several queues (Linux taps only).
+    pub fn is_tap(&self) -> bool {
+        matches!(
+            self,
+            NetworkConfig::Bridged { .. } | NetworkConfig::HostOnly {} | NetworkConfig::Tap { .. }
+        )
+    }
+
+    /// Does the backend give a NIC more than one queue? Linux taps do
+    /// (multi_queue); TAP-Windows and slirp have a single queue.
+    pub fn supports_multiqueue(&self) -> bool {
+        matches!(
+            self,
+            NetworkConfig::Bridged { .. } | NetworkConfig::HostOnly {}
+        )
     }
 
     /// Do NICs on this network take port forwards?
@@ -59,6 +97,9 @@ impl NetworkConfig {
         match self {
             NetworkConfig::Nat { .. } => true,
             NetworkConfig::Passt { .. } => true,
+            NetworkConfig::Bridged { .. }
+            | NetworkConfig::HostOnly {}
+            | NetworkConfig::Tap { .. } => false,
             NetworkConfig::Isolated {} => false,
         }
     }
@@ -86,6 +127,14 @@ impl NetworkConfig {
         match self {
             NetworkConfig::Passt { .. } if os != "linux" => Some(
                 "passt only runs on Linux hosts (platform support: NAT networking (passt)); use a NAT network instead",
+            ),
+            NetworkConfig::Bridged { .. } | NetworkConfig::HostOnly {} if os != "linux" => Some(
+                "bridged and host-only networks need a Linux host (tap devices and bridges through the \
+                 qemu-ui helper); on Windows use a TAP network",
+            ),
+            NetworkConfig::Tap { .. } if os != "windows" => Some(
+                "TAP networks use a TAP-Windows adapter and need a Windows host; on Linux use a \
+                 bridged or host-only network",
             ),
             _ => None,
         }
@@ -135,6 +184,26 @@ pub fn parse_ipv4_cidr(s: &str) -> Option<(std::net::Ipv4Addr, u8)> {
     (prefix <= 32).then_some((addr, prefix))
 }
 
+/// A Linux interface name: 1-15 characters, no `/`, `:`, whitespace or
+/// control characters, and not `.` or `..`.
+pub fn valid_ifname(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 15
+        && name != "."
+        && name != ".."
+        && !name
+            .chars()
+            .any(|c| c == '/' || c == ':' || c.is_whitespace() || c.is_control() || !c.is_ascii())
+}
+
+/// A Windows adapter name: printable, up to 256 characters.
+pub fn valid_adapter_name(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name.len() <= 256
+        && name.trim() == name
+        && !name.chars().any(|c| c.is_control() || c == '"')
+}
+
 /// Network names: like VM names, short and printable.
 pub fn valid_network_name(name: &str) -> bool {
     !name.trim().is_empty()
@@ -173,11 +242,25 @@ pub fn validate_network(n: &Network) -> Result<(), String> {
                 return Err(format!("'{s}' is not a usable private subnet"));
             }
         }
-        NetworkConfig::Nat { subnet: None } | NetworkConfig::Isolated {} => {}
+        NetworkConfig::Nat { subnet: None }
+        | NetworkConfig::HostOnly {}
+        | NetworkConfig::Isolated {} => {}
         NetworkConfig::Passt { mtu: Some(m) } if !(576..=65520).contains(m) => {
             return Err(format!("MTU {m} is out of range (576-65520)"));
         }
         NetworkConfig::Passt { .. } => {}
+        NetworkConfig::Bridged { bridge } => {
+            if !valid_ifname(bridge) {
+                return Err(format!(
+                    "'{bridge}' is not a Linux interface name (1-15 characters, no spaces, '/' or ':')"
+                ));
+            }
+        }
+        NetworkConfig::Tap { adapter } => {
+            if !valid_adapter_name(adapter) {
+                return Err(format!("'{adapter}' is not a valid adapter name"));
+            }
+        }
     }
     Ok(())
 }
@@ -212,6 +295,59 @@ mod tests {
         assert!(validate_network(&nat(Some("127.0.0.0/8"))).is_err());
         assert!(validate_network(&nat(Some("nonsense"))).is_err());
         assert!(validate_network(&nat(Some("10.0.0.0/33"))).is_err());
+    }
+
+    #[test]
+    fn tap_kinds() {
+        let mk = |config| Network {
+            id: "n".into(),
+            name: "x".into(),
+            config,
+        };
+        assert!(
+            validate_network(&mk(NetworkConfig::Bridged {
+                bridge: "br0".into()
+            }))
+            .is_ok()
+        );
+        for bad in ["", "a/b", "br 0", "eth0:1", "way-too-long-bridge0"] {
+            assert!(
+                validate_network(&mk(NetworkConfig::Bridged { bridge: bad.into() })).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(validate_network(&mk(NetworkConfig::HostOnly {})).is_ok());
+        assert!(
+            validate_network(&mk(NetworkConfig::Tap {
+                adapter: "Ethernet 3".into()
+            }))
+            .is_ok()
+        );
+        assert!(
+            validate_network(&mk(NetworkConfig::Tap {
+                adapter: " x".into()
+            }))
+            .is_err()
+        );
+
+        let br = NetworkConfig::Bridged {
+            bridge: "br0".into(),
+        };
+        let tap = NetworkConfig::Tap {
+            adapter: "T".into(),
+        };
+        assert!(
+            br.host_unsupported_reason("linux").is_none()
+                && br.host_unsupported_reason("windows").is_some()
+        );
+        assert!(
+            tap.host_unsupported_reason("windows").is_none()
+                && tap.host_unsupported_reason("linux").is_some()
+        );
+        assert!(br.is_tap() && br.supports_multiqueue() && !br.supports_forwards());
+        assert!(tap.is_tap() && !tap.supports_multiqueue());
+        let v = serde_json::to_value(NetworkConfig::HostOnly {}).unwrap();
+        assert_eq!(v, serde_json::json!({"kind": "host-only"}));
     }
 
     #[test]

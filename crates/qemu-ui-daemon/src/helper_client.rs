@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use qemu_ui_core::helper::{DiskExport, Envelope, HostDisk, PROTOCOL_VERSION, Request, Response};
+use qemu_ui_core::helper::{
+    DiskExport, Envelope, HostDisk, PROTOCOL_VERSION, Request, Response, TapInfo, TapNetwork,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -124,6 +126,48 @@ impl HelperClient {
             .await?
         {
             Response::Unexported => Ok(()),
+            other => bail!("unexpected helper reply: {other:?}"),
+        }
+    }
+
+    /// Linux: a tap for NIC `nic` of `vm_id` on a bridge (M3-05).
+    pub async fn create_tap(
+        &self,
+        vm_id: &str,
+        nic: u32,
+        network: TapNetwork,
+        multi_queue: bool,
+    ) -> Result<TapInfo> {
+        match self
+            .call(Request::CreateTap {
+                vm_id: vm_id.into(),
+                nic,
+                network,
+                multi_queue,
+            })
+            .await?
+        {
+            Response::TapCreated { tap } => Ok(tap),
+            other => bail!("unexpected helper reply: {other:?}"),
+        }
+    }
+
+    pub async fn delete_tap(&self, ifname: &str) -> Result<()> {
+        match self
+            .call(Request::DeleteTap {
+                ifname: ifname.into(),
+            })
+            .await?
+        {
+            Response::TapDeleted => Ok(()),
+            other => bail!("unexpected helper reply: {other:?}"),
+        }
+    }
+
+    /// Bridges the helper allows, and whether host-only is enabled.
+    pub async fn network_policy(&self) -> Result<(Vec<String>, bool)> {
+        match self.call(Request::NetworkPolicy).await? {
+            Response::NetworkPolicy { bridges, host_only } => Ok((bridges, host_only)),
             other => bail!("unexpected helper reply: {other:?}"),
         }
     }

@@ -254,6 +254,7 @@ fn linux_q35_virtio() {
     let caps = caps(true);
     let images = images();
     let ctx = Context {
+        taps: Default::default(),
         networks: &[],
         switch_sockets: &Default::default(),
         shares: vec![],
@@ -300,6 +301,7 @@ fn windows_uefi_secure_boot_cdrom_with_comma() {
     spec.display.vdagent = true;
     spec.passthrough = vec!["-global".into(), "ICH9-LPC.disable_s3=1".into()];
     let ctx = Context {
+        taps: Default::default(),
         networks: &[],
         switch_sockets: &Default::default(),
         shares: vec![],
@@ -347,6 +349,7 @@ fn old_qemu_uses_mon() {
     let caps = caps(false);
     let images = images();
     let ctx = Context {
+        taps: Default::default(),
         networks: &[],
         switch_sockets: &Default::default(),
         shares: vec![],
@@ -373,6 +376,7 @@ fn keyval_paths_double_commas() {
     let mut run = run_paths(VncListen::Unix("/run/a,b/vnc.sock".into()));
     run.serial = "/run/a,b/serial.sock".into();
     let ctx = Context {
+        taps: Default::default(),
         networks: &[],
         switch_sockets: &Default::default(),
         shares: vec![],
@@ -396,6 +400,7 @@ fn errors(spec: &VmSpec) -> Vec<String> {
     let caps = caps(true);
     let images = images();
     let ctx = Context {
+        taps: Default::default(),
         networks: &[],
         switch_sockets: &Default::default(),
         shares: vec![],
@@ -470,6 +475,7 @@ fn exposed_forward_is_a_warning_not_an_error() {
     let mut s = base_spec();
     s.nics[0].backend.forwards_mut()[0].host_addr = "0.0.0.0".into();
     let ctx = Context {
+        taps: Default::default(),
         networks: &[],
         switch_sockets: &Default::default(),
         shares: vec![],
@@ -497,6 +503,7 @@ fn compile_with_switches(
     let caps = caps(true);
     let images = images();
     let ctx = Context {
+        taps: Default::default(),
         switch_sockets,
         networks,
         shares: vec![],
@@ -623,6 +630,7 @@ fn nic_on_a_passt_network_connects_to_its_sidecar() {
     let caps = caps(true);
     let images = images();
     let ctx = Context {
+        taps: Default::default(),
         switch_sockets: &Default::default(),
         networks: std::slice::from_ref(&fast),
         shares: vec![],
@@ -689,6 +697,7 @@ fn linux_shares_9p() {
         share("docs", "", "docs", true),
     ];
     let ctx = Context {
+        taps: Default::default(),
         networks: &[],
         switch_sockets: &Default::default(),
         shares: vec![
@@ -728,6 +737,7 @@ fn linux_shares_virtiofs() {
     let mut spec = base_spec();
     spec.shares = vec![share("src", "", "src", false)];
     let ctx = Context {
+        taps: Default::default(),
         networks: &[],
         switch_sockets: &Default::default(),
         shares: vec![ResolvedShare {
@@ -859,6 +869,7 @@ fn compile_on(
 ) -> Result<Compiled, Vec<Diagnostic>> {
     let images = images();
     let ctx = Context {
+        taps: Default::default(),
         networks: &[],
         switch_sockets: &Default::default(),
         caps,
@@ -925,6 +936,7 @@ fn slots_name_disks_and_must_be_unique() {
     let caps = caps(true);
     let images = images();
     let ctx = Context {
+        taps: Default::default(),
         networks: &[],
         switch_sockets: &Default::default(),
         caps: &caps,
@@ -980,6 +992,7 @@ fn linux_usb_passthrough() {
     pinned.host_port = Some("3.1".into());
     spec.usb = vec![usb("046D", "C52B"), pinned, usb("046d", "c52b")];
     let ctx = Context {
+        taps: Default::default(),
         networks: &[],
         switch_sockets: &Default::default(),
         caps: &caps,
@@ -1039,6 +1052,7 @@ fn linux_virtio_net_options() {
     });
     let images = images();
     let ctx = Context {
+        taps: Default::default(),
         networks: &[],
         switch_sockets: &Default::default(),
         shares: vec![],
@@ -1078,4 +1092,145 @@ fn nic_model_must_fit_the_machine() {
     // The same model is fine where the machine has an ISA bus.
     let pc = machine_buses("qtree-x86_64-pc.txt", "pc-i440fx-11.1");
     assert!(compile_on(&s, &caps, &pc).is_ok());
+}
+
+fn compile_with_taps(
+    s: &VmSpec,
+    networks: &[Network],
+    taps: BTreeMap<usize, TapSource>,
+    os: &str,
+) -> Result<Compiled, Vec<Diagnostic>> {
+    let caps = caps(true);
+    let images = images();
+    let ctx = Context {
+        taps,
+        switch_sockets: &Default::default(),
+        networks,
+        shares: vec![],
+        caps: &caps,
+        os,
+        run: run_paths(VncListen::Unix("/x".into())),
+        images: &images,
+        firmware: None,
+        machine: None,
+    };
+    compile(s, &ctx)
+}
+
+fn on_network(config: NetworkConfig) -> (VmSpec, Vec<Network>) {
+    let mut s = base_spec();
+    s.nics[0].backend = NicBackend::Network {
+        network: "n1".into(),
+        forwards: vec![],
+    };
+    let net = Network {
+        id: "n1".into(),
+        name: "lan".into(),
+        config,
+    };
+    (s, vec![net])
+}
+
+fn netdev_of(c: &Compiled) -> serde_json::Value {
+    let a = c
+        .args
+        .iter()
+        .find(|a| a.contains("\"id\":\"qui-net0\""))
+        .unwrap();
+    serde_json::from_str(a).unwrap()
+}
+
+#[test]
+fn bridged_nic_gets_a_tap_netdev_with_vhost_and_queues() {
+    let (mut s, nets) = on_network(NetworkConfig::Bridged {
+        bridge: "br0".into(),
+    });
+    s.nics[0].model = "virtio-net-pci".into();
+    s.nics[0].queues = Some(4);
+    let taps = BTreeMap::from([(
+        0,
+        TapSource {
+            ifname: "qui-0a1b2c3d-0".into(),
+            vhost: true,
+        },
+    )]);
+    let c = compile_with_taps(&s, &nets, taps, "linux").unwrap();
+    let nd = netdev_of(&c);
+    assert_eq!(nd["type"], "tap");
+    assert_eq!(nd["ifname"], "qui-0a1b2c3d-0");
+    assert_eq!(
+        (nd["script"].as_str(), nd["downscript"].as_str()),
+        (Some("no"), Some("no"))
+    );
+    assert_eq!(nd["vhost"], true);
+    assert_eq!(nd["queues"], 4);
+    assert!(
+        c.args.iter().any(|a| a.contains("\"mq\":true")),
+        "device multiqueue"
+    );
+}
+
+#[test]
+fn windows_tap_nic_names_the_adapter_only() {
+    let (s, nets) = on_network(NetworkConfig::Tap {
+        adapter: "Ethernet 3".into(),
+    });
+    let taps = BTreeMap::from([(
+        0,
+        TapSource {
+            ifname: "Ethernet 3".into(),
+            vhost: false,
+        },
+    )]);
+    let c = compile_with_taps(&s, &nets, taps, "windows").unwrap();
+    let nd = netdev_of(&c);
+    assert_eq!(
+        nd,
+        serde_json::json!({"type": "tap", "id": "qui-net0", "ifname": "Ethernet 3"})
+    );
+}
+
+#[test]
+fn tap_networks_are_checked_for_host_resolution_and_queues() {
+    let rules = |r: Result<Compiled, Vec<Diagnostic>>| -> Vec<String> {
+        r.err()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| d.rule)
+            .collect()
+    };
+    let (s, nets) = on_network(NetworkConfig::HostOnly {});
+    assert_eq!(
+        rules(compile_with_taps(&s, &nets, BTreeMap::new(), "windows")),
+        ["net.host-unsupported"]
+    );
+    assert_eq!(
+        rules(compile_with_taps(&s, &nets, BTreeMap::new(), "linux")),
+        ["nic.tap-unresolved"]
+    );
+    let (mut s, nets) = on_network(NetworkConfig::Tap {
+        adapter: "T".into(),
+    });
+    s.nics[0].model = "virtio-net-pci".into();
+    s.nics[0].queues = Some(2);
+    let taps = BTreeMap::from([(
+        0,
+        TapSource {
+            ifname: "T".into(),
+            vhost: false,
+        },
+    )]);
+    assert_eq!(
+        rules(compile_with_taps(&s, &nets, taps, "windows")),
+        ["nic.mq-backend"]
+    );
+    let (mut s, nets) = on_network(NetworkConfig::Nat { subnet: None });
+    s.nics[0].model = "virtio-net-pci".into();
+    s.nics[0].queues = Some(2);
+    assert_eq!(
+        rules(compile_with_taps(&s, &nets, BTreeMap::new(), "linux")),
+        ["nic.mq-backend"],
+        "NAT networks stay single-queue"
+    );
 }

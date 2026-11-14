@@ -11,10 +11,12 @@ use qemu_ui_core::helper::{
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::exports::Exports;
+use crate::taps::Taps;
 
 pub struct Helper {
     pub config: HelperConfig,
     pub exports: Exports,
+    pub taps: Taps,
     /// Required in `hello` when set (Windows: no peer credentials).
     pub secret: Option<String>,
     /// Linux: the only uid allowed to connect.
@@ -37,6 +39,7 @@ impl Helper {
     pub fn new(
         config: HelperConfig,
         exports: Exports,
+        taps: Taps,
         secret: Option<String>,
         allowed_uid: Option<u32>,
         audit_log: PathBuf,
@@ -44,6 +47,7 @@ impl Helper {
         Helper {
             config,
             exports,
+            taps,
             secret,
             allowed_uid,
             audit_log,
@@ -173,6 +177,34 @@ impl Helper {
             Request::ListExports => Ok(Response::Exports {
                 exports: self.exports.list(),
             }),
+            Request::CreateTap {
+                vm_id,
+                nic,
+                network,
+                multi_queue,
+            } => self
+                .taps
+                .create(
+                    &self.config.network,
+                    &vm_id,
+                    nic,
+                    &network,
+                    multi_queue,
+                    // The tap belongs to the daemon user, never to a uid
+                    // the request names.
+                    self.allowed_uid.or(peer.uid),
+                )
+                .map(|tap| Response::TapCreated { tap })
+                .map_err(|e| format!("{e:#}")),
+            Request::DeleteTap { ifname } => self
+                .taps
+                .delete(&ifname)
+                .map(|_| Response::TapDeleted)
+                .map_err(|e| format!("{e:#}")),
+            Request::NetworkPolicy => Ok(Response::NetworkPolicy {
+                bridges: self.config.network.bridges.clone(),
+                host_only: self.config.network.host_only.is_some(),
+            }),
         };
         let summary = outcome
             .as_ref()
@@ -220,9 +252,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let exports =
             Exports::open(&dir.join("x"), std::path::Path::new("qemu-storage-daemon")).unwrap();
+        let taps = Taps::open(
+            dir.join("taps.json"),
+            Box::new(crate::taps::fake::FakeRunner::default()),
+        );
         let h = Helper::new(
             HelperConfig::default(),
             exports,
+            taps,
             secret.map(String::from),
             uid,
             dir.join("audit.log"),
@@ -261,6 +298,31 @@ mod tests {
         let audit = std::fs::read_to_string(&h.audit_log).unwrap();
         assert!(audit.lines().count() >= 6);
         assert!(!audit.contains("s3cret"), "secrets are never logged");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn tap_requests_follow_the_policy() {
+        let (h, dir) = helper(None, Some(1000));
+        let r = session(
+            h.clone(),
+            Peer { uid: Some(1000) },
+            &[
+                r#"{"id":1,"op":"hello","version":1}"#,
+                r#"{"id":2,"op":"network_policy"}"#,
+                r#"{"id":3,"op":"create_tap","vm_id":"0a1b2c3d","nic":0,"network":{"kind":"bridge","bridge":"br0"}}"#,
+                r#"{"id":4,"op":"delete_tap","ifname":"eth0"}"#,
+            ],
+        )
+        .await;
+        assert_eq!(r[1]["result"], "network_policy");
+        assert_eq!(r[1]["bridges"], serde_json::json!([]));
+        assert_eq!(r[1]["host_only"], false);
+        // Nothing is allowlisted by default (and Windows has no taps at all).
+        assert_eq!(r[2]["result"], "error", "{}", r[2]);
+        assert_eq!(r[3]["result"], "error");
+        let audit = std::fs::read_to_string(&h.audit_log).unwrap();
+        assert!(audit.contains("create_tap") && audit.contains("delete_tap"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

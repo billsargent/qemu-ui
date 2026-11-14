@@ -82,8 +82,9 @@ no "run a command" or "open a path" request.
 | `export_disk {disk_id, writable}` | Start a storage daemon exporting the disk | Disk is in the allowlist; not the system/boot disk; Linux: no mounted partition and no holders (`/sys/block/*/holders`, LVM/MD/dm); Windows: every volume offline; `writable` only if the allowlist entry permits it |
 | `unexport {export_id}` | Stop it | Export exists and was created by this daemon |
 | `list_exports` | Current exports | — |
-| `create_tap {vm_id, bridge}` (M3) | `ip tuntap add … user <daemon uid>`, attach to bridge | Bridge in the allowlist; name derived from `vm_id` in the `qui-` namespace |
-| `delete_tap {name}` (M3) | Remove it | Name in the `qui-` namespace and created by the helper |
+| `create_tap {vm_id, nic, network, multi_queue}` (M3-05) | `ip tuntap add dev qui-<vm_id>-<nic> mode tap user <daemon uid> [multi_queue]`, `ip link set … master <bridge>`, `up` | Linux only; `network` is `{kind: "bridge", bridge}` (bridge in the allowlist and present) or `{kind: "host-only"}` (enabled in the config; the bridge is created on first use); the name is derived, never supplied; the owner is the configured daemon user, never a uid from the request; an existing interface with that name is refused unless the helper created it |
+| `delete_tap {ifname}` (M3-05) | `ip link delete dev <ifname>` | Only taps this helper created (recorded in its state directory, so it survives restarts) |
+| `network_policy` (M3-05) | The allowlisted bridges and whether host-only is enabled | — (read-only) |
 
 Disk ids are stable identifiers, never paths supplied by the daemon: Linux
 `/dev/disk/by-id/<id>`, Windows the disk's unique id (`Get-Disk` `UniqueId`)
@@ -104,8 +105,12 @@ allow_writable = false           # default: exports are read-only
 allow = ["usb-SanDisk_Ultra_4C53…", "wwn-0x5000c500…"]   # explicit ids
 deny_system_disk = true          # cannot be turned off
 
-[network]                        # M3
-bridges = ["br0"]
+[network]                        # M3-05 (Linux)
+bridges = ["br0"]                # existing bridges VMs may join
+
+[network.host_only]              # optional: a private bridge with the host on it
+bridge = "qui-hostonly"          # default
+address = "10.213.0.1/24"        # the host's address on it (default)
 ```
 
 Nothing is allowed by default: a fresh install can list disks but export
@@ -138,7 +143,27 @@ daemon also records helper calls in its audit log (M6-04).
 - The daemon works without the helper; features that need it are shown as
   "needs setup: install the helper" through the parity ledger.
 
+## Tap networks (M3-05, M3-06)
+
+- **Linux, bridged and host-only.** On each start the daemon asks for one tap
+  per NIC on such a network, records the names, and asks for their deletion
+  when the run ends or the start fails. QEMU (unprivileged) opens the tap by
+  name (`-netdev tap,ifname=…,script=no,downscript=no`), which works because
+  the helper made the daemon user its owner; `vhost=on` is added when
+  `/dev/vhost-net` is usable, and `queues=N` for multiqueue NICs (the tap is
+  then created with `multi_queue`). The helper never configures addresses on
+  existing bridges; the host-only bridge is the only interface it creates,
+  with the address from its own configuration.
+- **Windows, TAP.** TAP-Windows adapters are created by the driver's
+  installer, and opening one needs no privileges, so the helper is not
+  involved: a TAP network names the adapter and QEMU attaches with
+  `-netdev tap,ifname=<adapter>`. Putting guests on the LAN is a one-time
+  administrator step (bridge the TAP adapter with the physical adapter in
+  Network Connections), which the UI explains. TAP-Windows has a single
+  queue, so multiqueue is refused there.
+- Guest addresses on tap-backed networks come from the host's neighbour table
+  (`ip neigh` / `Get-NetNeighbor`), matched by the NIC's MAC.
+
 ## Out of scope here
 
 - Per-VM users and cgroups (M6-05) reuse this transport.
-- TAP and bridges are implemented in M3-05; only the protocol shape is fixed here.

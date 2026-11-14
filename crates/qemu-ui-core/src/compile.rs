@@ -156,6 +156,18 @@ pub struct Context<'a> {
     pub networks: &'a [Network],
     /// Switch socket per isolated network id (M3-04), resolved by the daemon.
     pub switch_sockets: &'a BTreeMap<String, String>,
+    /// Host taps for NICs on tap-backed networks, by NIC index (M3-05/06);
+    /// the daemon resolves them (helper-created taps on Linux, the
+    /// TAP-Windows adapter on Windows).
+    pub taps: BTreeMap<usize, TapSource>,
+}
+
+/// A host tap interface a NIC is attached to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TapSource {
+    pub ifname: String,
+    /// `/dev/vhost-net` is usable: in-kernel virtio-net data path.
+    pub vhost: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -899,7 +911,11 @@ fn validate_network_hosts(spec: &VmSpec, networks: &[Network], os: &str) -> Vec<
         {
             d.push(Diagnostic::error(
                 format!("nics[{i}].backend.network"),
-                "net.passt-unsupported",
+                if why.starts_with("passt") {
+                    "net.passt-unsupported"
+                } else {
+                    "net.host-unsupported"
+                },
                 why,
             ));
         }
@@ -927,6 +943,63 @@ pub fn validate_networks(spec: &VmSpec, networks: &[Network]) -> Vec<Diagnostic>
                 }
                 Some(_) => {}
             }
+        }
+    }
+    d
+}
+
+/// `-netdev tap` for a resolved tap. QEMU must not run scripts (the helper
+/// already attached the tap); on Windows only `ifname` is understood.
+fn tap_netdev(i: usize, tap: &TapSource, queues: u16, os: &str) -> Value {
+    let mut nd = json!({"type": "tap", "id": format!("qui-net{i}"), "ifname": tap.ifname});
+    if os != "windows" {
+        nd["script"] = "no".into();
+        nd["downscript"] = "no".into();
+        if tap.vhost {
+            nd["vhost"] = true.into();
+        }
+        if queues > 1 {
+            nd["queues"] = json!(queues);
+        }
+    }
+    nd
+}
+
+/// NICs on tap-backed networks (M3-05/06): the kind runs on this host, the
+/// tap was resolved, and multiqueue only where the backend has queues.
+pub fn validate_tap_networks(spec: &VmSpec, ctx: &Context) -> Vec<Diagnostic> {
+    let mut d = Vec::new();
+    for (i, nic) in spec.nics.iter().enumerate() {
+        let NicBackend::Network { network, .. } = &nic.backend else {
+            continue;
+        };
+        let Some(n) = ctx.networks.iter().find(|n| &n.id == network) else {
+            continue; // nic.network-missing
+        };
+        if nic.queues.is_some_and(|q| q > 1) && !n.config.supports_multiqueue() {
+            d.push(Diagnostic::error(
+                format!("nics[{i}].queues"),
+                "nic.mq-backend",
+                format!(
+                    "{} networks have a single queue; multiqueue needs a bridged or host-only network on Linux",
+                    n.config.kind_label()
+                ),
+            ));
+        }
+        if !n.config.is_tap() {
+            continue;
+        }
+        // `validate_network_hosts` reports kinds this host cannot run.
+        if n.config.host_unsupported_reason(ctx.os).is_none() && !ctx.taps.contains_key(&i) {
+            d.push(Diagnostic::error(
+                format!("nics[{i}].backend.network"),
+                "nic.tap-unresolved",
+                format!(
+                    "no host tap was set up for {} network '{}'",
+                    n.config.kind_label(),
+                    n.name
+                ),
+            ));
         }
     }
     d
@@ -1025,6 +1098,7 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
             }
         }
     }
+    diags.extend(validate_tap_networks(spec, ctx));
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(diags);
     }
@@ -1176,6 +1250,9 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
     for (i, nic) in spec.nics.iter().enumerate() {
         let mut netdev = json!({"type": "user", "id": format!("qui-net{i}")});
         let mut passt = false;
+        if let Some(tap) = ctx.taps.get(&i) {
+            netdev = tap_netdev(i, tap, nic.queues.unwrap_or(1), ctx.os);
+        }
         if let NicBackend::Network { network, .. } = &nic.backend {
             // Validated above; a missing network never reaches here.
             if let Some(n) = ctx.networks.iter().find(|n| &n.id == network) {
@@ -1185,6 +1262,10 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
                             netdev["net"] = s.as_str().into();
                         }
                     }
+                    // Built from `ctx.taps` above.
+                    NetworkConfig::Bridged { .. }
+                    | NetworkConfig::HostOnly {}
+                    | NetworkConfig::Tap { .. } => {}
                     NetworkConfig::Isolated {} => {
                         // A stream client of the daemon's switch; it keeps
                         // reconnecting, so a daemon restart heals the link.

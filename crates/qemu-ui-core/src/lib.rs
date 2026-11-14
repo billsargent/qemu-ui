@@ -13,6 +13,7 @@ pub mod firmware;
 pub mod guest_net;
 pub mod help;
 pub mod helper;
+pub mod hostnet;
 pub mod lint;
 pub mod network;
 pub mod nic;

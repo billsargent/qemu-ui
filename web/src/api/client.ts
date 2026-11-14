@@ -28,6 +28,7 @@ import type { SharesInfo } from "./generated/SharesInfo";
 import type { Network } from "./generated/Network";
 import type { NetworkConfig } from "./generated/NetworkConfig";
 import type { NetworkInfo } from "./generated/NetworkInfo";
+import type { HostNetInfo } from "./generated/HostNetInfo";
 import type { SnapshotList } from "./generated/SnapshotList";
 import type { VmDetail } from "./generated/VmDetail";
 import type { VmEvent } from "./generated/VmEvent";
@@ -121,6 +122,8 @@ export const api = {
   consoleTicket: (id: string, kind: "vnc" | "serial") => post<ConsoleTicket>(`/vms/${id}/consoles/${kind}/ticket`),
 
   networks: () => request<NetworkInfo[]>("/networks"),
+  /** Host support for tap-backed networks: helper bridges (Linux), TAP adapters (Windows). */
+  hostNet: () => request<HostNetInfo>("/host/net-adapters"),
   createNetwork: (name: string, config: NetworkConfig) => post<Network>("/networks", { name, config }),
   updateNetwork: (id: string, name: string, config: NetworkConfig) =>
     request<Network>(`/networks/${id}`, { method: "PUT", body: JSON.stringify({ name, config }) }),

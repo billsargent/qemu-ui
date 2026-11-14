@@ -141,9 +141,9 @@ pub fn nic_models(devices: &[DeviceInfo], machine: Option<&MachineBuses>) -> Vec
 pub fn backend_supports_mq(backend: &NicBackend) -> bool {
     match backend {
         NicBackend::User { .. } => false,
-        // Only NAT networks exist so far (slirp: one queue). Tap-backed
-        // kinds (M3-05/06) will decide this per network kind.
-        NicBackend::Network { .. } => false,
+        // Decided per network kind, which needs the network objects:
+        // `compile::validate_tap_networks` refuses kinds without queues.
+        NicBackend::Network { .. } => true,
     }
 }
 
