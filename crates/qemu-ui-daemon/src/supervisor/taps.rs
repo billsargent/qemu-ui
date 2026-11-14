@@ -122,7 +122,11 @@ impl Supervisor {
                     }
                 }
                 // Not tap-backed (filtered above).
-                NetworkConfig::Nat { .. } | NetworkConfig::Passt { .. } => continue,
+                NetworkConfig::Nat { .. }
+                | NetworkConfig::Passt { .. }
+                | NetworkConfig::Isolated {} => {
+                    continue;
+                }
             };
             out.insert(i, tap);
         }

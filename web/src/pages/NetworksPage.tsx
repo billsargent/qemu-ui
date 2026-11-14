@@ -47,6 +47,12 @@ export const NETWORK_KINDS: {
       "Windows: guests use a TAP-Windows adapter. Bridge it to your physical adapter in Network Connections (admin) to put guests on the LAN.",
     windowsOnly: "TAP networks need a Windows host; on Linux use a bridged or host-only network.",
   },
+  {
+    kind: "isolated",
+    label: "Isolated",
+    about:
+      "A private switch: VMs on this network reach each other and nothing else — no host, no internet, no port forwards. Give guests static addresses or run a DHCP server in one of them.",
+  },
 ];
 
 /** Which host OS a kind runs on (null: any). */
@@ -72,6 +78,8 @@ export function networkSummary(c: NetworkConfig): string {
       return "helper-managed bridge, no uplink";
     case "tap":
       return `adapter ${c.adapter}`;
+    case "isolated":
+      return "VMs only; no host or internet access";
   }
 }
 
@@ -87,6 +95,8 @@ function blank(kind: NetworkConfig["kind"]): NetworkConfig {
       return { kind: "host-only" };
     case "tap":
       return { kind: "tap", adapter: "" };
+    case "isolated":
+      return { kind: "isolated" };
   }
 }
 
@@ -178,6 +188,8 @@ function ConfigFields({
           />
         </Field>
       );
+    case "isolated":
+      return null;
   }
 }
 

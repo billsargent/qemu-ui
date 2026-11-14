@@ -16,4 +16,4 @@ bridge: string, } | { "kind": "host-only", } | { "kind": "tap",
 /**
  * The adapter's name (`Get-NetAdapter` Name), e.g. `Ethernet 3`.
  */
-adapter: string, };
+adapter: string, } | { "kind": "isolated", };

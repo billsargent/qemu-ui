@@ -55,6 +55,10 @@ pub enum NetworkConfig {
         /// The adapter's name (`Get-NetAdapter` Name), e.g. `Ethernet 3`.
         adapter: String,
     },
+    /// A private switch inside the daemon (M3-04): VMs on the same isolated
+    /// network reach each other and nothing else, with no host or internet
+    /// access. Nothing is put on the physical network.
+    Isolated {},
 }
 
 impl NetworkConfig {
@@ -66,6 +70,7 @@ impl NetworkConfig {
             NetworkConfig::Bridged { .. } => "Bridged",
             NetworkConfig::HostOnly {} => "Host-only",
             NetworkConfig::Tap { .. } => "TAP",
+            NetworkConfig::Isolated {} => "Isolated",
         }
     }
 
@@ -95,7 +100,26 @@ impl NetworkConfig {
             NetworkConfig::Bridged { .. }
             | NetworkConfig::HostOnly {}
             | NetworkConfig::Tap { .. } => false,
+            NetworkConfig::Isolated {} => false,
         }
+    }
+
+    /// Why NICs on this network can't take port forwards.
+    pub fn forwards_unsupported_reason(&self) -> String {
+        match self {
+            NetworkConfig::Isolated {} => {
+                "isolated networks have no host access, so port forwards cannot reach them".into()
+            }
+            other => format!(
+                "{} networks don't take port forwards; the guest is reachable directly",
+                other.kind_label()
+            ),
+        }
+    }
+
+    /// Does this kind need a daemon-run switch socket (M3-04)?
+    pub fn needs_switch(&self) -> bool {
+        matches!(self, NetworkConfig::Isolated {})
     }
 
     /// Why this kind cannot run on host `os`, if it can't.
@@ -218,7 +242,9 @@ pub fn validate_network(n: &Network) -> Result<(), String> {
                 return Err(format!("'{s}' is not a usable private subnet"));
             }
         }
-        NetworkConfig::Nat { subnet: None } | NetworkConfig::HostOnly {} => {}
+        NetworkConfig::Nat { subnet: None }
+        | NetworkConfig::HostOnly {}
+        | NetworkConfig::Isolated {} => {}
         NetworkConfig::Passt { mtu: Some(m) } if !(576..=65520).contains(m) => {
             return Err(format!("MTU {m} is out of range (576-65520)"));
         }
@@ -376,6 +402,16 @@ mod tests {
         assert!(validate_network(&n).is_err());
         n.name = String::new();
         assert!(validate_network(&n).is_err());
+    }
+
+    #[test]
+    fn isolated_takes_no_forwards() {
+        let c = NetworkConfig::Isolated {};
+        assert!(!c.supports_forwards() && c.needs_switch());
+        assert!(c.forwards_unsupported_reason().contains("no host access"));
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v, serde_json::json!({"kind": "isolated"}));
+        assert_eq!(serde_json::from_value::<NetworkConfig>(v).unwrap(), c);
     }
 
     #[test]

@@ -599,6 +599,7 @@ mod compile_smoke {
         let ctx = Context {
             taps: Default::default(),
             networks: &[],
+            switch_sockets: &Default::default(),
             shares: vec![],
             caps,
             os: std::env::consts::OS,
