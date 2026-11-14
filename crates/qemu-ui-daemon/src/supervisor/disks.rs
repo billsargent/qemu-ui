@@ -63,28 +63,39 @@ async fn peripherals(qmp: &Qmp) -> Result<Vec<String>> {
 }
 
 /// A free spare PCIe root port (`qui-rp<K>` with nothing behind it).
+///
+/// Occupancy comes from QOM (each device's `parent_bus`), not `query-pci`:
+/// the latter finds devices behind a bridge by the secondary bus number the
+/// guest firmware assigns, so until the firmware has enumerated the bridges
+/// every port looks empty.
 async fn free_root_port(qmp: &Qmp) -> Result<Option<String>> {
-    let v = qmp.execute("query-pci", None).await?;
-    let mut free = Vec::new();
-    for bus in v.as_array().into_iter().flatten() {
-        for dev in bus["devices"].as_array().into_iter().flatten() {
-            let Some(id) = dev["qdev_id"].as_str().filter(|i| i.starts_with("qui-rp")) else {
-                continue;
-            };
-            let empty = dev["pci_bridge"]["devices"]
-                .as_array()
-                .is_none_or(|d| d.is_empty());
-            if empty {
-                free.push(id.to_string());
-            }
-        }
+    let ids = peripherals(qmp).await?;
+    let mut ports: Vec<String> = ids
+        .iter()
+        .filter(|i| i.starts_with("qui-rp"))
+        .cloned()
+        .collect();
+    for id in ids.iter().filter(|i| !i.starts_with("qui-rp")) {
+        let parent = qmp
+            .execute(
+                "qom-get",
+                Some(
+                    json!({"path": format!("/machine/peripheral/{id}"), "property": "parent_bus"}),
+                ),
+            )
+            .await;
+        // Only devices have a parent bus; other objects fail and are skipped.
+        let Ok(parent) = parent else { continue };
+        let Some(bus) = parent.as_str() else { continue };
+        // A root port's secondary bus is `/machine/peripheral/<port>/<port>`.
+        ports.retain(|p| !bus.ends_with(&format!("/{p}/{p}")));
     }
-    free.sort_by_key(|id| {
+    ports.sort_by_key(|id| {
         id.trim_start_matches("qui-rp")
             .parse::<usize>()
             .unwrap_or(usize::MAX)
     });
-    Ok(free.into_iter().next())
+    Ok(ports.into_iter().next())
 }
 
 impl Supervisor {
