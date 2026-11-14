@@ -68,6 +68,7 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
         .merge(crate::api_fetch::routes())
         .merge(crate::image_ops::routes())
         .merge(crate::api_snapshots::routes())
+        .merge(crate::usb::routes())
         .merge(crate::api_upload::routes())
         .merge(crate::api_disks::routes())
         .merge(crate::consoles::routes())

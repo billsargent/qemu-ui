@@ -374,6 +374,50 @@
         "threads"
       ],
       "type": "object"
+    },
+    "UsbPassthrough": {
+      "description": "A host USB device to pass through, matched the way QEMU's `usb-host`\nmatches: by vendor and product, optionally narrowed to a bus and port so\ntwo identical devices can be told apart. The guest sees the device\nwhenever it is plugged in; QEMU waits for it otherwise.",
+      "properties": {
+        "host_bus": {
+          "default": null,
+          "description": "Linux bus number (`hostbus`); not available on Windows hosts.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "host_port": {
+          "default": null,
+          "description": "Linux port path such as `1.2` (`hostport`); stable per physical port.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "default": null,
+          "description": "Display name remembered from the host (e.g. \"Logitech USB Receiver\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "product_id": {
+          "description": "4 hex digits, e.g. `c52b`.",
+          "type": "string"
+        },
+        "vendor_id": {
+          "description": "4 hex digits, e.g. `046d`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vendor_id",
+        "product_id"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -447,6 +491,14 @@
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
+    },
+    "usb": {
+      "default": [],
+      "description": "Host USB devices passed through to the guest (M2-12).",
+      "items": {
+        "$ref": "#/$defs/UsbPassthrough"
+      },
+      "type": "array"
     }
   },
   "required": [

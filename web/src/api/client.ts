@@ -14,7 +14,9 @@ import type { Job } from "./generated/Job";
 import type { MeasureResult } from "./generated/MeasureResult";
 import type { PoolInfo } from "./generated/PoolInfo";
 import type { PoolSummary } from "./generated/PoolSummary";
+import type { HostUsb } from "./generated/HostUsb";
 import type { UploadProgress } from "./generated/UploadProgress";
+import type { UsbPassthrough } from "./generated/UsbPassthrough";
 import type { UploadSession } from "./generated/UploadSession";
 import type { ScanStatus } from "./generated/ScanStatus";
 import type { SnapshotList } from "./generated/SnapshotList";
@@ -164,6 +166,9 @@ export const api = {
     post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/commit`),
   cloneVm: (id: string, name: string, mode: "linked" | "full", pool: string) =>
     post<{ vm: VmDetail | null; job: Job | null }>(`/vms/${id}/clone`, { name, mode, pool }),
+  hostUsb: () => request<HostUsb>("/host/usb"),
+  attachUsb: (id: string, rule: UsbPassthrough) => post<VmDetail>(`/vms/${id}/usb`, rule),
+  detachUsb: (id: string, index: number) => request<VmDetail>(`/vms/${id}/usb/${index}`, { method: "DELETE" }),
   uploads: () => request<UploadSession[]>("/uploads"),
   createUpload: (pool: string, name: string, sizeBytes: number, clientKey: string) =>
     post<UploadSession>("/uploads", { pool, name, size_bytes: sizeBytes, client_key: clientKey }),
