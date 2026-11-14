@@ -21,3 +21,6 @@ Thumbs.db
 # Logs
 *.log
 *.tsbuildinfo
+
+# Agent worktrees (Claude Code)
+/.claude/worktrees/

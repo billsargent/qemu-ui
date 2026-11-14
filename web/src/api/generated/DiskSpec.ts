@@ -8,4 +8,11 @@ export type DiskSpec = { image: ImageRef, bus: DiskBus, media: Media, readonly: 
 /**
  * `threads`, `native`, `io_uring`; `None` picks a platform default.
  */
-aio: string | null, discard: boolean, };
+aio: string | null, discard: boolean, 
+/**
+ * Index used in this disk's QEMU ids (`qui-disk<N>`, `qui-dev<N>`).
+ * Absent: the disk's position in `disks`. Hotplug pins it so a disk
+ * keeps its ids when others are added or removed while the VM runs
+ * (and across restarts). Must be unique within a spec.
+ */
+slot?: number, };

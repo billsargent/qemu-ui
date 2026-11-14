@@ -39,6 +39,12 @@ pub struct VmSpec {
     pub display: DisplaySpec,
     #[serde(default)]
     pub input: InputSpec,
+    /// Host folders shared into the guest (Linux hosts; plan.md §9.6).
+    #[serde(default)]
+    pub shares: Vec<ShareSpec>,
+    /// Host USB devices passed through to the guest (M2-12).
+    #[serde(default)]
+    pub usb: Vec<UsbPassthrough>,
     /// Raw argv tokens appended after generated options (§5.3).
     #[serde(default)]
     pub passthrough: Vec<String>,
@@ -169,6 +175,49 @@ pub struct DiskSpec {
     pub aio: Option<String>,
     #[serde(default = "yes")]
     pub discard: bool,
+    /// Index used in this disk's QEMU ids (`qui-disk<N>`, `qui-dev<N>`).
+    /// Absent: the disk's position in `disks`. Hotplug pins it so a disk
+    /// keeps its ids when others are added or removed while the VM runs
+    /// (and across restarts). Must be unique within a spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub slot: Option<u32>,
+}
+
+impl DiskSpec {
+    /// The index in this disk's QEMU ids, given its position in `disks`.
+    pub fn node_index(&self, position: usize) -> usize {
+        self.slot.map_or(position, |s| s as usize)
+    }
+}
+
+/// QEMU format node name of the disk at `position` (`qui-disk<N>`).
+pub fn disk_node(spec: &VmSpec, position: usize) -> String {
+    format!("qui-disk{}", spec.disks[position].node_index(position))
+}
+
+/// Position in `disks` of the disk whose ids use index `n`.
+pub fn disk_position(spec: &VmSpec, n: usize) -> Option<usize> {
+    spec.disks
+        .iter()
+        .enumerate()
+        .position(|(i, d)| d.node_index(i) == n)
+}
+
+/// The next index no disk of `spec` uses, for a disk added while running.
+pub fn next_disk_index(specs: &[&VmSpec]) -> usize {
+    specs
+        .iter()
+        .flat_map(|s| s.disks.iter().enumerate().map(|(i, d)| d.node_index(i) + 1))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Pin every disk's slot to its current node index (no change to any id).
+pub fn pin_disk_slots(spec: &mut VmSpec) {
+    for (i, d) in spec.disks.iter_mut().enumerate() {
+        d.slot = Some(d.node_index(i) as u32);
+    }
 }
 
 fn yes() -> bool {
@@ -246,6 +295,64 @@ impl Default for InputSpec {
     }
 }
 
+/// A host USB device to pass through, matched the way QEMU's `usb-host`
+/// matches: by vendor and product, optionally narrowed to a bus and port so
+/// two identical devices can be told apart. The guest sees the device
+/// whenever it is plugged in; QEMU waits for it otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
+#[ts(export)]
+pub struct UsbPassthrough {
+    /// 4 hex digits, e.g. `046d`.
+    pub vendor_id: String,
+    /// 4 hex digits, e.g. `c52b`.
+    pub product_id: String,
+    /// Linux bus number (`hostbus`); not available on Windows hosts.
+    #[serde(default)]
+    pub host_bus: Option<u32>,
+    /// Linux port path such as `1.2` (`hostport`); stable per physical port.
+    #[serde(default)]
+    pub host_port: Option<String>,
+    /// Display name remembered from the host (e.g. "Logitech USB Receiver").
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// A host folder shared into the guest (M2-13).
+///
+/// Like images, shares never hold host paths: they name a registered
+/// *share root* and a folder relative to it, which the daemon canonicalises
+/// and confines to that root. The guest mounts the share by its tag:
+/// `mount -t 9p -o trans=virtio <tag> /mnt` or `mount -t virtiofs <tag> /mnt`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
+#[ts(export)]
+pub struct ShareSpec {
+    /// Name of a registered share root.
+    pub root: String,
+    /// Folder inside the root, `/`-separated; empty for the root itself.
+    #[serde(default)]
+    pub path: String,
+    /// Mount tag the guest uses (letters, digits, `-`, `_`; up to 31).
+    pub tag: String,
+    /// The guest cannot write. Read-only shares always use 9p.
+    #[serde(default)]
+    pub readonly: bool,
+}
+
+/// Is `tag` usable as a 9p/virtiofs mount tag?
+pub fn valid_share_tag(tag: &str) -> bool {
+    let mut c = tag.chars();
+    matches!(c.next(), Some(x) if x.is_ascii_alphanumeric())
+        && tag.len() <= 31
+        && c.all(|x| x.is_ascii_alphanumeric() || x == '-' || x == '_')
+}
+
+/// Is `path` a safe relative folder path (`a/b`, or empty for the root)?
+/// Every component must be a plain name: no `..`, `.`, separators, drive
+/// letters, device names or hidden components.
+pub fn valid_share_path(path: &str) -> bool {
+    path.is_empty() || (path.len() <= 1024 && path.split('/').all(valid_image_name))
+}
+
 /// Is `name` an acceptable VM name?
 pub fn valid_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -256,12 +363,27 @@ pub fn valid_name(name: &str) -> bool {
 
 /// Is `name` acceptable as a file name inside a pool?
 pub fn valid_image_name(name: &str) -> bool {
+    // Windows device names resolve to devices in any directory ("nul.qcow2"
+    // is NUL), so they are refused on every platform for portability.
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
     !name.is_empty()
         && name.len() <= 255
         && name != "."
         && name != ".."
         && !name.starts_with('.')
-        && !name.contains(['/', '\\', ':', '\0'])
+        && !name.ends_with(['.', ' '])
+        && !name.contains(['/', '\\', ':', '\0', '<', '>', '"', '|', '?', '*'])
+        && !name.chars().any(|c| c.is_control())
+        && !RESERVED.contains(&stem.as_str())
 }
 
 /// Is `mac` a unicast `xx:xx:xx:xx:xx:xx`?
@@ -321,6 +443,31 @@ mod tests {
         assert!(!valid_image_name("a/b"));
         assert!(!valid_image_name("C:x"));
         assert!(!valid_image_name(".hidden"));
+        assert!(!valid_image_name("nul.qcow2"), "Windows device name");
+        assert!(!valid_image_name("COM1"));
+        assert!(!valid_image_name("a|b.iso"));
+        assert!(!valid_image_name("trailing."));
+        assert!(
+            valid_image_name("console.iso"),
+            "only exact device names are reserved"
+        );
+    }
+
+    #[test]
+    fn share_tags_and_paths() {
+        assert!(valid_share_tag("data"));
+        assert!(valid_share_tag("host_src-2"));
+        assert!(!valid_share_tag(""));
+        assert!(!valid_share_tag("-x"));
+        assert!(!valid_share_tag("a b"));
+        assert!(!valid_share_tag(&"a".repeat(32)));
+        assert!(valid_share_path(""));
+        assert!(valid_share_path("projects/web"));
+        for bad in [
+            "..", "a/../b", "/abs", "a//b", "a/", "C:/x", "a\\b", ".git", "a/nul", "a/./b",
+        ] {
+            assert!(!valid_share_path(bad), "{bad}");
+        }
     }
 
     #[test]

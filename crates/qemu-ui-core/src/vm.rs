@@ -113,6 +113,23 @@ pub struct VmDetail {
     pub spec: VmSpec,
     /// argv of the current/last run, for the "changed since last start" diff.
     pub last_run_args: Option<Vec<String>>,
+    /// The configuration the running process has, including disks
+    /// hot-(un)plugged since it started. `None` while stopped.
+    #[serde(default)]
+    pub live_spec: Option<VmSpec>,
+}
+
+/// Result of a disk change on a VM (add, remove, change media).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
+pub struct DiskChange {
+    /// The change was applied to the running VM (not only saved).
+    pub live: bool,
+    /// Removal is waiting for the guest to release the device (PCI
+    /// hot-unplug needs guest cooperation); it completes on its own.
+    pub pending: bool,
+    pub message: String,
+    pub vm: VmDetail,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -152,6 +169,12 @@ pub struct ImageInfo {
     pub actual_size: u64,
     /// Attached to these VMs (by name).
     pub used_by: Vec<String>,
+    /// A template: never opened writable; clone it instead (M2-05).
+    #[serde(default)]
+    pub template: bool,
+    /// Pool/name of the backing image when this is an overlay inside a pool.
+    #[serde(default)]
+    pub backing: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -228,6 +251,8 @@ pub fn default_spec(name: &str, caps: &BinaryCaps) -> (VmSpec, Vec<Diagnostic>) 
         input: InputSpec {
             usb_tablet: has("usb-tablet") && has("qemu-xhci"),
         },
+        usb: vec![],
+        shares: vec![],
         passthrough: vec![],
     };
     let diags = crate::compile::validate(&spec, caps)

@@ -5,11 +5,17 @@
 //! the daemon does the I/O and feeds the results through these types.
 
 pub mod arch;
+pub mod buses;
 pub mod caps;
 pub mod compile;
+pub mod fetch;
 pub mod firmware;
 pub mod help;
 pub mod lint;
 pub mod parity;
+pub mod snapshot;
 pub mod spec;
+pub mod storage;
+pub mod upload;
+pub mod usb;
 pub mod vm;

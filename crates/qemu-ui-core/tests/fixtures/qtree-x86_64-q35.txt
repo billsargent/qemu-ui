@@ -1,0 +1,202 @@
+bus: main-system-bus
+  type System
+  dev: ps2-mouse, id ""
+    gpio-out "" 1
+  dev: ps2-kbd, id ""
+    gpio-out "" 1
+  dev: hpet, id ""
+    gpio-in "" 2
+    gpio-out "" 1
+    gpio-out "sysbus-irq" 32
+    timers = 3 (0x3)
+    msi = false
+    hpet-intcap = 16711940 (0xff0104)
+    mmio 00000000fed00000/0000000000000400
+  dev: ioapic, id ""
+    gpio-in "" 24
+    version = 32 (0x20)
+    mmio 00000000fec00000/0000000000001000
+  dev: q35-pcihost, id ""
+    MCFG = -1 (0xffffffffffffffff)
+    pci-hole64-size = 34359738368 (32 GiB)
+    below-4g-mem-size = 134217728 (128 MiB)
+    above-4g-mem-size = 0 (0 B)
+    smm-ranges = true
+    x-pci-hole64-fix = true
+    x-config-reg-migration-enabled = true
+    bypass-iommu = false
+    bus: pcie.0
+      type PCIE
+      dev: ICH9-SMB, id ""
+        addr = 1f.3
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = true
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class SMBus, addr 00:1f.3, pci id 8086:2930 (sub 1af4:1100)
+        bar 4: i/o at 0xffffffffffffffff [0x3e]
+        bus: i2c
+          type i2c-bus
+          dev: smbus-eeprom, id ""
+            address = 87 (0x57)
+          dev: smbus-eeprom, id ""
+            address = 86 (0x56)
+          dev: smbus-eeprom, id ""
+            address = 85 (0x55)
+          dev: smbus-eeprom, id ""
+            address = 84 (0x54)
+          dev: smbus-eeprom, id ""
+            address = 83 (0x53)
+          dev: smbus-eeprom, id ""
+            address = 82 (0x52)
+          dev: smbus-eeprom, id ""
+            address = 81 (0x51)
+          dev: smbus-eeprom, id ""
+            address = 80 (0x50)
+      dev: ich9-ahci, id ""
+        addr = 1f.2
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = true
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class SATA controller, addr 00:1f.2, pci id 8086:2922 (sub 1af4:1100)
+        bar 4: i/o at 0xffffffffffffffff [0x1e]
+        bar 5: mem at 0xffffffffffffffff [0xffe]
+        bus: ide.5
+          type IDE
+        bus: ide.4
+          type IDE
+        bus: ide.3
+          type IDE
+        bus: ide.2
+          type IDE
+        bus: ide.1
+          type IDE
+        bus: ide.0
+          type IDE
+      dev: ICH9-LPC, id ""
+        gpio-out "gsi" 24
+        noreboot = false
+        smm-compat = false
+        smm-enabled = true
+        x-smi-broadcast = true
+        x-smi-cpu-hotplug = true
+        x-smi-cpu-hotunplug = true
+        x-smi-swsmi-timer = true
+        x-smi-periodic-timer = true
+        addr = 1f.0
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = true
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class ISA bridge, addr 00:1f.0, pci id 8086:2918 (sub 1af4:1100)
+        bus: isa.0
+          type ISA
+          dev: port92, id ""
+            gpio-out "a20" 1
+          dev: vmmouse, id ""
+            i8042 = "/machine/unattached/device[8]"
+          dev: vmport, id ""
+            x-read-set-eax = true
+            x-signal-unsupported-cmd = true
+            x-report-vmx-type = true
+            x-cmds-v2 = true
+            vmware-vmx-version = 6 (0x6)
+            vmware-vmx-type = 2 (0x2)
+          dev: i8042, id ""
+            gpio-in "ps2-mouse-input-irq" 1
+            gpio-in "ps2-kbd-input-irq" 1
+            gpio-out "" 2
+            gpio-out "a20" 1
+            extended-state = true
+            kbd-throttle = false
+            kbd-irq = 1 (0x1)
+            mouse-irq = 12 (0xc)
+          dev: isa-pcspk, id ""
+            audiodev = ""
+            iobase = 97 (0x61)
+            pit = "/machine/unattached/device[6]"
+          dev: isa-pit, id ""
+            gpio-in "" 1
+            gpio-out "" 1
+            iobase = 64 (0x40)
+          dev: isa-i8259, id ""
+            gpio-in "" 8
+            gpio-out "" 1
+            iobase = 160 (0xa0)
+            elcr_addr = 1233 (0x4d1)
+            elcr_mask = 222 (0xde)
+            master = false
+          dev: isa-i8259, id ""
+            gpio-in "" 8
+            gpio-out "" 1
+            iobase = 32 (0x20)
+            elcr_addr = 1232 (0x4d0)
+            elcr_mask = 248 (0xf8)
+            master = true
+          dev: mc146818rtc, id ""
+            gpio-out "" 1
+            base_year = 0 (0x0)
+            iobase = 112 (0x70)
+            irq = 8 (0x8)
+            lost_tick_policy = "discard"
+          dev: i8257, id ""
+            base = 192 (0xc0)
+            page-base = 136 (0x88)
+            pageh-base = -1 (0xffffffffffffffff)
+            dshift = 1 (0x1)
+          dev: i8257, id ""
+            base = 0 (0x0)
+            page-base = 128 (0x80)
+            pageh-base = -1 (0xffffffffffffffff)
+            dshift = 0 (0x0)
+      dev: mch, id ""
+        extended-tseg-mbytes = 64 (0x40)
+        smbase-smram = true
+        addr = 00.0
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = false
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class Host bridge, addr 00:00.0, pci id 8086:29c0 (sub 1af4:1100)
+  dev: fw_cfg_io, id ""
+    dma_enabled = true
+    x-file-slots = 32 (0x20)
+    acpi-mr-restore = true
+  dev: kvmvapic, id ""

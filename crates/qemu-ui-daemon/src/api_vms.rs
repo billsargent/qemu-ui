@@ -13,13 +13,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::Stream;
 use qemu_ui_core::compile::display_command;
-use qemu_ui_core::spec::{ImageRef, VmSpec};
-use qemu_ui_core::vm::{CompileResponse, PoolInfo, VmDetail, VmEvent, VmSummary, default_spec};
+use qemu_ui_core::spec::VmSpec;
+use qemu_ui_core::vm::{CompileResponse, VmDetail, VmEvent, VmSummary, default_spec};
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::api::{ApiError, ApiResult, App};
-use crate::images::DEFAULT_POOL;
 use crate::supervisor::OpError;
 
 pub fn routes() -> Router<Arc<App>> {
@@ -30,10 +29,9 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/vms/lint", post(lint))
         .route("/vms/{id}", get(detail).put(update).delete(delete))
         .route("/vms/{id}/actions/{action}", post(action))
+        .route("/vms/{id}/clone", post(clone))
         .route("/vms/{id}/serial-log", get(serial_log))
         .route("/vms/{id}/events", get(vm_events))
-        .route("/pools/{pool}", get(pool))
-        .route("/pools/{pool}/images", post(create_image))
         .route("/events", get(events))
 }
 
@@ -60,7 +58,7 @@ impl IntoResponse for OpErr {
     }
 }
 
-fn op_err(e: OpError) -> OpErr {
+pub fn op_err(e: OpError) -> OpErr {
     OpErr(e)
 }
 
@@ -125,6 +123,36 @@ async fn action(
         other => sv.qmp_action(&id, other).await,
     };
     r.map(Json).map_err(op_err)
+}
+
+#[derive(Deserialize)]
+struct CloneBody {
+    name: String,
+    mode: crate::supervisor::CloneMode,
+    #[serde(default = "default_pool")]
+    pool: String,
+}
+
+fn default_pool() -> String {
+    crate::images::DEFAULT_POOL.into()
+}
+
+/// Clone a stopped VM: linked (ready at once, `{vm}`) or full (a job, `{job}`).
+async fn clone(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<String>,
+    Json(b): Json<CloneBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), OpErr> {
+    use crate::supervisor::CloneOutcome;
+    match app
+        .supervisor
+        .clone_vm(&id, b.name, b.mode, b.pool)
+        .await
+        .map_err(op_err)?
+    {
+        CloneOutcome::Vm(vm) => Ok((StatusCode::CREATED, Json(json!({"vm": vm, "job": null})))),
+        CloneOutcome::Job(job) => Ok((StatusCode::ACCEPTED, Json(json!({"vm": null, "job": job})))),
+    }
 }
 
 #[derive(Deserialize)]
@@ -241,88 +269,6 @@ async fn serial_log(
     // Last 256 KiB is plenty for scrollback.
     let start = bytes.len().saturating_sub(256 * 1024);
     Ok(String::from_utf8_lossy(&bytes[start..]).into_owned())
-}
-
-async fn pool(State(app): State<Arc<App>>, UrlPath(pool): UrlPath<String>) -> ApiResult<PoolInfo> {
-    let qemu_img = {
-        let caps = app.scanner.caps.read().await;
-        caps.as_ref()
-            .and_then(|c| c.qemu_img.as_ref())
-            .map(|b| PathBuf::from(&b.path))
-    };
-    let mut info = app
-        .supervisor
-        .pools
-        .list(qemu_img.as_deref(), &pool)
-        .await
-        .map_err(|e| ApiError(StatusCode::NOT_FOUND, format!("{e:#}")))?;
-    // Which VMs use each image.
-    if let Ok(rows) = app.supervisor.store.list_vms() {
-        for row in rows {
-            let Ok(spec) = serde_json::from_str::<VmSpec>(&row.spec_json) else {
-                continue;
-            };
-            for d in &spec.disks {
-                if let Some(img) = info
-                    .images
-                    .iter_mut()
-                    .find(|i| i.pool == d.image.pool && i.name == d.image.name)
-                    && !img.used_by.contains(&row.name)
-                {
-                    img.used_by.push(row.name.clone());
-                }
-            }
-        }
-    }
-    Ok(Json(info))
-}
-
-#[derive(Deserialize)]
-struct CreateImage {
-    name: String,
-    size_bytes: u64,
-    #[serde(default = "qcow2")]
-    format: String,
-}
-
-fn qcow2() -> String {
-    "qcow2".into()
-}
-
-async fn create_image(
-    State(app): State<Arc<App>>,
-    UrlPath(pool): UrlPath<String>,
-    Json(b): Json<CreateImage>,
-) -> Result<StatusCode, ApiError> {
-    if pool != DEFAULT_POOL {
-        return Err(ApiError(
-            StatusCode::NOT_FOUND,
-            format!("unknown pool '{pool}'"),
-        ));
-    }
-    let qemu_img = {
-        let caps = app.scanner.caps.read().await;
-        caps.as_ref()
-            .and_then(|c| c.qemu_img.as_ref())
-            .map(|b| PathBuf::from(&b.path))
-    }
-    .ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "qemu-img is not installed".into(),
-        )
-    })?;
-    app.supervisor
-        .pools
-        .create(
-            &qemu_img,
-            &ImageRef { pool, name: b.name },
-            b.size_bytes,
-            &b.format,
-        )
-        .await
-        .map(|_| StatusCode::CREATED)
-        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")))
 }
 
 #[derive(Deserialize)]

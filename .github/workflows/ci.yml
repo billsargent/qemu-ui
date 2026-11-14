@@ -27,7 +27,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf virtiofsd
 
       - name: Cache project-local QEMU (Windows)
         if: runner.os == 'Windows'

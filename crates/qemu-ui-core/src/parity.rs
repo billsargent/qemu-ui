@@ -78,6 +78,17 @@ pub fn refine(mut rows: Vec<ParityRow>, os: &str, binaries: &[BinaryCaps]) -> Ve
                         .into(),
                 }
             }),
+            // usb-host exists only when QEMU was built with libusb.
+            "usb-passthrough"
+                if !binaries
+                    .iter()
+                    .any(|b| b.devices.iter().any(|d| d.name == "usb-host")) =>
+            {
+                Some(ParityCell {
+                    status: ParityStatus::Impossible,
+                    note: "The installed QEMU was built without usb-host (libusb).".into(),
+                })
+            }
             "hw-accel" => {
                 let native: Vec<_> = binaries.iter().filter(|b| b.native).collect();
                 let hw = native

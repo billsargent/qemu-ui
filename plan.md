@@ -398,6 +398,19 @@ Internal via `snapshot-save` jobs (requires all writable nodes qcow2 — UEFI VA
 qcow2 for this reason) and external via `blockdev-snapshot-sync`. Snapshot tree UI with
 memory + disk-set grouping; auto-snapshot before risky operations.
 
+**As built (M2-06):** internal snapshots only, one tag across every writable qcow2 disk and the
+NVRAM file. Running VM with memory: QMP `snapshot-save`/`snapshot-load`/`snapshot-delete` jobs;
+running disk-only: a `transaction` of `blockdev-snapshot-internal-sync` (crash-consistent, and
+reverting it needs the VM stopped); stopped VM: `qemu-img snapshot`. Snapshots form a tree
+(parent = the VM's head when taken); reverts can take an automatic safety snapshot first;
+deleting re-parents children. Raw writable disks are refused up front, naming the disk.
+
+**External snapshots are deferred.** An external snapshot changes which file a VM writes to:
+the spec would have to point at a new overlay image (pool + name) after every snapshot, and
+reverting means discarding or rebasing overlays — the same backing-chain machinery as templates
+and linked clones (§9.2, M2-05). They will be built on that once it lands, rather than as a
+second, parallel chain model.
+
 ### 9.4 Attach from elsewhere
 1. **Browser upload:** resumable (tus-style create/HEAD/PATCH), streamed to disk, checksummed,
    survives tab close.
@@ -420,6 +433,24 @@ Windows hosts `aio=threads`. Warn on `cache=unsafe`. Hotplug via `blockdev-add` 
   default.
 - Better defaults for "attach a physical thing": USB passthrough (`usb-host`, hotplug,
   remembered per VM) and folder sharing (virtiofs via `virtiofsd` or 9p on Linux hosts).
+
+### 9.7 Shared folders (M2-13)
+- **Path-free like images.** A spec share names a registered *share root* plus a folder
+  relative to it and a mount tag; the daemon canonicalises and confines the folder to the
+  root. Share roots may not overlap storage pools (in either direction), so a guest can never
+  write VM disks through a share.
+- **Backends.** 9p (`-fsdev local,…,security_model=mapped-xattr` + `virtio-9p-pci`) is the
+  default and enforces read-only shares. virtiofs is used for writable shares when a
+  `virtiofsd` is installed and the binary has `vhost-user-fs-pci` + `memory-backend-memfd`;
+  the guest RAM then moves to a shared memfd backend (`-numa node,memdev=…`). "Check config"
+  always lints with 9p, since no sidecar runs during a lint.
+- **virtiofsd sidecar.** One per virtiofs share, started before QEMU (detached, logged,
+  `--sandbox=none` because the daemon is unprivileged), recorded per run with pid + start
+  time. It exits on its own when QEMU disconnects, so it survives a daemon restart exactly as
+  long as its VM; when a run ends the daemon also terminates any sidecar still alive.
+- **Windows hosts.** The upstream Windows build has no fsdev/9p support at all ("fsdev
+  support is disabled"); registering roots is refused and a spec with shares fails validation
+  with `share.unsupported`, citing the parity ledger.
 
 ---
 

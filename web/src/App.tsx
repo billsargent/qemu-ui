@@ -1,4 +1,8 @@
+import { useQuery } from "@tanstack/react-query";
+import { api } from "./api/client";
 import { useLiveInvalidation, useEventStreamConnected } from "./api/events";
+import JobsPage from "./pages/JobsPage";
+import StoragePage from "./pages/StoragePage";
 import DashboardPage from "./pages/DashboardPage";
 import NewVmPage from "./pages/NewVmPage";
 import SystemPage from "./pages/SystemPage";
@@ -9,9 +13,13 @@ export default function App() {
   const route = useRoute();
   useLiveInvalidation();
   const live = useEventStreamConnected();
+  const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs });
+  const activeJobs = (jobs.data ?? []).filter((j) => j.status === "queued" || j.status === "running").length;
 
   const nav = [
     { href: "#/dashboard", label: "Virtual machines", active: route.page === "dashboard" || route.page === "vm" || route.page === "new-vm" },
+    { href: "#/storage", label: "Storage", active: route.page === "storage" },
+    { href: "#/jobs", label: activeJobs ? `Jobs (${activeJobs})` : "Jobs", active: route.page === "jobs" },
     { href: "#/system", label: "System", active: route.page === "system" },
   ];
 
@@ -43,6 +51,8 @@ export default function App() {
       <main className="min-w-0 flex-1 p-6">
         {route.page === "dashboard" && <DashboardPage />}
         {route.page === "system" && <SystemPage />}
+        {route.page === "storage" && <StoragePage pool={route.pool} image={route.image} />}
+        {route.page === "jobs" && <JobsPage />}
         {route.page === "new-vm" && <NewVmPage />}
         {route.page === "vm" && <VmPage key={route.id} id={route.id} tab={route.tab} />}
       </main>
