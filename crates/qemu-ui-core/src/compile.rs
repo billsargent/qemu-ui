@@ -154,6 +154,8 @@ pub struct Context<'a> {
     pub machine: Option<&'a MachineBuses>,
     /// Network objects NICs may reference (M3-01).
     pub networks: &'a [Network],
+    /// Switch socket per isolated network id (M3-04), resolved by the daemon.
+    pub switch_sockets: &'a BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -920,10 +922,7 @@ pub fn validate_networks(spec: &VmSpec, networks: &[Network]) -> Vec<Diagnostic>
                     d.push(Diagnostic::error(
                         f("backend.forwards"),
                         "forward.unsupported",
-                        format!(
-                            "{} networks don't take port forwards; the guest is reachable directly",
-                            n.config.kind_label()
-                        ),
+                        n.config.forwards_unsupported_reason(),
                     ))
                 }
                 Some(_) => {}
@@ -1011,6 +1010,21 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
     }
     diags.extend(validate_networks(spec, ctx.networks));
     diags.extend(validate_network_hosts(spec, ctx.networks, ctx.os));
+    for (i, nic) in spec.nics.iter().enumerate() {
+        if let NicBackend::Network { network, .. } = &nic.backend {
+            let needs = ctx
+                .networks
+                .iter()
+                .any(|n| &n.id == network && n.config.needs_switch());
+            if needs && !ctx.switch_sockets.contains_key(network) {
+                diags.push(Diagnostic::error(
+                    format!("nics[{i}].backend.network"),
+                    "nic.switch-missing",
+                    "the isolated network's switch is not running",
+                ));
+            }
+        }
+    }
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(diags);
     }
@@ -1170,6 +1184,17 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
                         if let Some(s) = subnet {
                             netdev["net"] = s.as_str().into();
                         }
+                    }
+                    NetworkConfig::Isolated {} => {
+                        // A stream client of the daemon's switch; it keeps
+                        // reconnecting, so a daemon restart heals the link.
+                        netdev = json!({
+                            "type": "stream",
+                            "id": format!("qui-net{i}"),
+                            "server": false,
+                            "addr": {"type": "unix", "path": ctx.switch_sockets.get(network).cloned().unwrap_or_default()},
+                            "reconnect-ms": 1000,
+                        });
                     }
                     // QEMU connects to the NIC's passt sidecar, which the
                     // daemon starts (with the forwards) before QEMU.

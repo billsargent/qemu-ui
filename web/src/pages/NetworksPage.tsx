@@ -19,6 +19,12 @@ export const NETWORK_KINDS: { kind: NetworkConfig["kind"]; label: string; about:
       "Faster NAT through a passt helper per NIC; the guest sees the host's own address. Port forwards are set when the VM starts. Needs the passt package.",
     linuxOnly: "passt only runs on Linux hosts; use NAT instead.",
   },
+  {
+    kind: "isolated",
+    label: "Isolated",
+    about:
+      "A private switch: VMs on this network reach each other and nothing else — no host, no internet, no port forwards. Give guests static addresses or run a DHCP server in one of them.",
+  },
 ];
 
 export function kindLabel(c: NetworkConfig): string {
@@ -32,6 +38,8 @@ export function networkSummary(c: NetworkConfig): string {
       return c.subnet ? `subnet ${c.subnet}` : "default subnet (10.0.2.0/24)";
     case "passt":
       return c.mtu ? `MTU ${c.mtu}` : "default MTU";
+    case "isolated":
+      return "VMs only; no host or internet access";
   }
 }
 
@@ -41,6 +49,8 @@ function blank(kind: NetworkConfig["kind"]): NetworkConfig {
       return { kind: "nat", subnet: null };
     case "passt":
       return { kind: "passt", mtu: null };
+    case "isolated":
+      return { kind: "isolated" };
   }
 }
 
@@ -70,6 +80,8 @@ function ConfigFields({ config, onChange }: { config: NetworkConfig; onChange: (
           />
         </Field>
       );
+    case "isolated":
+      return null;
   }
 }
 

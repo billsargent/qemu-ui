@@ -8,4 +8,4 @@ subnet: string | null, } | { "kind": "passt",
 /**
  * Interface MTU passt advertises; `None` keeps passt's default.
  */
-mtu: number | null, };
+mtu: number | null, } | { "kind": "isolated", };

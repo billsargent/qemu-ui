@@ -17,6 +17,7 @@ mod helper_client;
 mod image_ops;
 mod images;
 mod jobs;
+mod netswitch;
 mod networks;
 mod passt;
 mod probe;

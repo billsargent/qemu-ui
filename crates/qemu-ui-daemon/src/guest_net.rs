@@ -106,6 +106,9 @@ pub async fn guest_net(sv: &Supervisor, id: &str) -> OpResult<GuestNetInfo> {
                 (_, Some(n)) => match &n.config {
                     NetworkConfig::Nat { subnet } => Some(subnet.clone()),
                     NetworkConfig::Passt { .. } => None,
+                    // Isolated: no host-visible address; only the guest
+                    // agent (when present) can tell what the guest uses.
+                    NetworkConfig::Isolated {} => None,
                 },
                 (_, None) => None,
             };
