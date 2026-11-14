@@ -173,6 +173,9 @@ export const api = {
     return body as UploadProgress;
   },
 
+  fetchUrl: (pool: string, url: string, name?: string, sha256?: string) =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/fetch`, { url, name, sha256 }),
+
   jobs: () => request<Job[]>("/jobs"),
   cancelJob: (id: string) => post<void>(`/jobs/${id}/cancel`),
   jobLog: async (id: string) => {

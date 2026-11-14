@@ -5,6 +5,7 @@ import type { PoolSummary } from "../api/generated/PoolSummary";
 import { Badge, Button, Card, Field, inputCls } from "../components/ui";
 import { navigate } from "../router";
 import { Uploader } from "../components/Uploader";
+import { UrlFetch } from "../components/UrlFetch";
 import { ProgressBar } from "./JobsPage";
 
 export function formatBytes(n: number): string {
@@ -37,6 +38,7 @@ export default function StoragePage({ pool, image }: { pool?: string; image?: st
         ) : (
           <div className="space-y-4">
             <Uploader pool={current} />
+            <UrlFetch pool={current} />
             <CreateDisk pool={current} />
           </div>
         )}
