@@ -209,6 +209,18 @@ impl UsernetHub {
     }
 }
 
+/// A passt NIC's address: passt hands the guest a copy of the host's own
+/// address, so it is not something the host can connect to directly.
+pub fn passt_addr(ip: String) -> GuestAddr {
+    GuestAddr {
+        ip,
+        source: AddrSource::Nat,
+        confirmed: false,
+        reachable_from_host: false,
+        label: "passt NAT (same address as the host) — reach it through port forwards".into(),
+    }
+}
+
 /// A NAT address entry.
 pub fn nat_addr(ip: String, confirmed: bool) -> GuestAddr {
     GuestAddr {

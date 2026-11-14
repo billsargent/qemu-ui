@@ -131,6 +131,9 @@ impl Networks {
 
     fn check(&self, n: &Network) -> Result<(), NetError> {
         validate_network(n).map_err(NetError::Invalid)?;
+        if let Some(why) = n.config.host_unsupported_reason(std::env::consts::OS) {
+            return Err(NetError::Invalid(why.into()));
+        }
         if self
             .list()?
             .iter()
@@ -262,6 +265,13 @@ mod tests {
         let store = Store::memory().unwrap();
         let nets = Networks::new(store.clone());
         let lab = nets.create("lab", nat()).unwrap();
+        // passt networks exist only where passt runs.
+        let passt = nets.create("fast", NetworkConfig::Passt { mtu: None });
+        if cfg!(target_os = "linux") {
+            nets.remove(&passt.unwrap().id).unwrap();
+        } else {
+            assert!(matches!(passt, Err(NetError::Invalid(m)) if m.contains("Linux")));
+        }
         assert!(
             matches!(nets.create("lab", nat()), Err(NetError::Conflict(_))),
             "unique names"
