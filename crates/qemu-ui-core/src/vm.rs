@@ -234,6 +234,8 @@ pub fn default_spec(name: &str, caps: &BinaryCaps) -> (VmSpec, Vec<Diagnostic>) 
                 backend: NicBackend::User { forwards: vec![] },
                 model,
                 mac: None,
+                queues: None,
+                virtio: None,
             })
             .into_iter()
             .collect(),

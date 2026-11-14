@@ -48,7 +48,7 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    fn error(field: impl Into<String>, rule: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn error(field: impl Into<String>, rule: &str, message: impl Into<String>) -> Self {
         Diagnostic {
             severity: Severity::Error,
             field: field.into(),
@@ -56,7 +56,11 @@ impl Diagnostic {
             message: message.into(),
         }
     }
-    fn warning(field: impl Into<String>, rule: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn warning(
+        field: impl Into<String>,
+        rule: &str,
+        message: impl Into<String>,
+    ) -> Self {
         Diagnostic {
             severity: Severity::Warning,
             field: field.into(),
@@ -598,6 +602,7 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
             }
         }
     }
+    d.extend(crate::nic::validate_nics(&spec.nics));
 
     // Display / input
     if let Some(dev) = &spec.display.device
@@ -758,6 +763,11 @@ pub fn validate_buses(spec: &VmSpec, caps: &BinaryCaps, machine: &MachineBuses) 
             ));
         }
     }
+    d.extend(crate::nic::validate_nic_buses(
+        &spec.nics,
+        &caps.devices,
+        machine,
+    ));
     d
 }
 
@@ -1144,6 +1154,7 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
         if let Some(mac) = &nic.mac {
             dev["mac"] = mac.as_str().into();
         }
+        crate::nic::device_props(nic, &mut dev);
         push(&mut a, "-device", json_arg(dev));
     }
 

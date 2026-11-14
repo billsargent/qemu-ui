@@ -298,6 +298,8 @@ mod tests {
             },
             model: "virtio-net-pci".into(),
             mac: Some("52:54:00:00:00:01".into()),
+            queues: None,
+            virtio: None,
         };
         let spec = serde_json::json!({ "nics": [nic] });
         store.insert_vm("v1", "web", &spec.to_string(), 1).unwrap();

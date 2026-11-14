@@ -14,6 +14,7 @@ import type { HostDisk } from "./generated/HostDisk";
 import type { ImageDetail } from "./generated/ImageDetail";
 import type { Job } from "./generated/Job";
 import type { MeasureResult } from "./generated/MeasureResult";
+import type { NicModel } from "./generated/NicModel";
 import type { PoolInfo } from "./generated/PoolInfo";
 import type { PortForward } from "./generated/PortForward";
 import type { PoolSummary } from "./generated/PoolSummary";
@@ -103,6 +104,9 @@ export const api = {
     request<DiskBusSupport[] | null>(
       `/host/buses?arch=${encodeURIComponent(arch)}&machine=${encodeURIComponent(machine)}`,
     ),
+  /** NIC models for a machine, recommended first (M3-07). */
+  nicModels: (arch: string, machine: string) =>
+    request<NicModel[]>(`/host/nic-models?arch=${encodeURIComponent(arch)}&machine=${encodeURIComponent(machine)}`),
   /** Add a disk; hotplugged when the VM runs. */
   addDisk: (id: string, disk: DiskSpec) => post<DiskChange>(`/vms/${id}/disks`, { disk }),
   /** Remove disk `n` (its `qui-disk<n>` index); hot-unplugged when running. */

@@ -33,6 +33,7 @@ use crate::scan::Scanner;
 use crate::store::{NewRun, RunRow, Store};
 
 mod disks;
+mod nics;
 mod snapshots;
 
 const QMP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -415,11 +416,7 @@ impl Supervisor {
         {
             spec.machine.type_name = pinned;
         }
-        for nic in &mut spec.nics {
-            if nic.mac.is_none() {
-                nic.mac = Some(mac_from_bytes(rand::random()));
-            }
-        }
+        self.assign_macs(&mut spec.nics);
         Ok((spec, caps))
     }
 
@@ -949,7 +946,8 @@ impl Supervisor {
             .await
         {
             Ok((c, _)) => {
-                let w = c.warnings.clone();
+                let mut w = c.warnings.clone();
+                w.extend(self.shared_mac_warnings(id, &spec));
                 Ok((c, w))
             }
             Err(d) => Err(OpError::Invalid(d)),
@@ -1530,8 +1528,8 @@ impl Supervisor {
                 // Validate the new spec now, so the job only fails on I/O.
                 let caps = self.caps_for(&spec.arch).await?;
                 let mut check = spec.clone();
-                for nic in &mut check.nics {
-                    nic.mac = Some(mac_from_bytes([0, 0, 1]));
+                for (i, nic) in check.nics.iter_mut().enumerate() {
+                    nic.mac = Some(mac_from_bytes([0, 0, i as u8]));
                 }
                 Self::check(&check, &caps)?;
                 let mut need = 0u64;

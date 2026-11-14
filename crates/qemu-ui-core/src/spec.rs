@@ -276,6 +276,34 @@ pub struct NicSpec {
     /// Locally administered MAC; assigned at creation when absent.
     #[serde(default)]
     pub mac: Option<String>,
+    /// Queue pairs (multiqueue). Needs a virtio-net model and a tap-style
+    /// backend; absent means one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub queues: Option<u16>,
+    /// virtio-net offload toggles; absent leaves QEMU's defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub virtio: Option<VirtioNetOptions>,
+}
+
+/// virtio-net feature toggles (M3-07). Each `None` keeps QEMU's default (on).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
+#[ts(export)]
+pub struct VirtioNetOptions {
+    /// Checksum offload, host and guest (`csum`, `guest_csum`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub csum: Option<bool>,
+    /// TCP segmentation offload, IPv4 and IPv6 (`host_tso*`, `guest_tso*`).
+    /// Needs checksum offload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tso: Option<bool>,
+    /// Mergeable receive buffers (`mrg_rxbuf`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mrg_rxbuf: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
