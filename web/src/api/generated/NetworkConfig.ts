@@ -8,4 +8,12 @@ subnet: string | null, } | { "kind": "passt",
 /**
  * Interface MTU passt advertises; `None` keeps passt's default.
  */
-mtu: number | null, } | { "kind": "isolated", };
+mtu: number | null, } | { "kind": "bridged", 
+/**
+ * Host bridge interface, e.g. `br0`.
+ */
+bridge: string, } | { "kind": "host-only", } | { "kind": "tap", 
+/**
+ * The adapter's name (`Get-NetAdapter` Name), e.g. `Ethernet 3`.
+ */
+adapter: string, } | { "kind": "isolated", };

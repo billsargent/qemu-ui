@@ -26,6 +26,37 @@ pub enum Request {
         export_id: String,
     },
     ListExports,
+    /// Linux (M3-05): create the tap for NIC `nic` of VM `vm_id`, owned by
+    /// the daemon user, on an allowlisted bridge or the host-only bridge.
+    CreateTap {
+        vm_id: String,
+        nic: u32,
+        network: TapNetwork,
+        /// Open with several queues (virtio-net multiqueue).
+        #[serde(default)]
+        multi_queue: bool,
+    },
+    /// Remove a tap this helper created.
+    DeleteTap {
+        ifname: String,
+    },
+    /// What the configuration allows for tap networks.
+    NetworkPolicy,
+}
+
+/// Where a tap goes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum TapNetwork {
+    Bridge { bridge: String },
+    HostOnly,
+}
+
+/// A tap the helper created.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TapInfo {
+    pub ifname: String,
+    pub bridge: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -38,12 +69,30 @@ pub struct Envelope<T> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
-    Hello { version: u32 },
-    Disks { disks: Vec<HostDisk> },
-    Exported { export: DiskExport },
+    Hello {
+        version: u32,
+    },
+    Disks {
+        disks: Vec<HostDisk>,
+    },
+    Exported {
+        export: DiskExport,
+    },
     Unexported,
-    Exports { exports: Vec<DiskExport> },
-    Error { message: String },
+    Exports {
+        exports: Vec<DiskExport>,
+    },
+    TapCreated {
+        tap: TapInfo,
+    },
+    TapDeleted,
+    NetworkPolicy {
+        bridges: Vec<String>,
+        host_only: bool,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// A host disk as the helper sees it.
@@ -90,6 +139,71 @@ pub struct HelperConfig {
     pub daemon_user: Option<String>,
     #[serde(default)]
     pub disks: DiskPolicy,
+    #[serde(default)]
+    pub network: NetworkPolicy,
+}
+
+/// `[network]` in helper.toml (M3-05).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkPolicy {
+    /// Existing host bridges VMs may join, e.g. `["br0"]`.
+    #[serde(default)]
+    pub bridges: Vec<String>,
+    /// The helper-managed host-only bridge; absent = disabled.
+    #[serde(default)]
+    pub host_only: Option<HostOnlyPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostOnlyPolicy {
+    #[serde(default = "default_host_only_bridge")]
+    pub bridge: String,
+    /// The host's address on it (CIDR).
+    #[serde(default = "default_host_only_address")]
+    pub address: String,
+}
+
+fn default_host_only_bridge() -> String {
+    "qui-hostonly".into()
+}
+
+fn default_host_only_address() -> String {
+    "10.213.0.1/24".into()
+}
+
+/// The bridge a tap request resolves to, or why it is refused.
+pub fn check_tap(policy: &NetworkPolicy, network: &TapNetwork) -> Result<String, String> {
+    match network {
+        TapNetwork::Bridge { bridge } => {
+            if !crate::hostnet::valid_bridge(bridge) {
+                return Err(format!("'{bridge}' is not an interface name"));
+            }
+            if !policy.bridges.iter().any(|b| b == bridge) {
+                return Err(format!(
+                    "bridge '{bridge}' is not in the helper's allowlist; an administrator must add it to                      [network] bridges in helper.toml"
+                ));
+            }
+            Ok(bridge.clone())
+        }
+        TapNetwork::HostOnly => {
+            let h = policy.host_only.as_ref().ok_or(
+                "host-only networking is disabled; an administrator must add [network.host_only] to helper.toml",
+            )?;
+            if !crate::hostnet::valid_bridge(&h.bridge) {
+                return Err(format!(
+                    "helper.toml: host-only bridge '{}' is not an interface name",
+                    h.bridge
+                ));
+            }
+            if !crate::hostnet::valid_host_address(&h.address) {
+                return Err(format!(
+                    "helper.toml: host-only address '{}' must be a host address in CIDR form, e.g. 10.213.0.1/24",
+                    h.address
+                ));
+            }
+            Ok(h.bridge.clone())
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -405,6 +519,60 @@ mod tests {
                 .contains("unmount")
         );
         assert!(check_export(&lin[2], &spare, false, false).is_ok());
+    }
+
+    #[test]
+    fn tap_policy() {
+        let none = NetworkPolicy::default();
+        let br = TapNetwork::Bridge {
+            bridge: "br0".into(),
+        };
+        assert!(check_tap(&none, &br).unwrap_err().contains("allowlist"));
+        assert!(
+            check_tap(&none, &TapNetwork::HostOnly)
+                .unwrap_err()
+                .contains("disabled")
+        );
+        let cfg: HelperConfig = toml::from_str(
+            "[network]
+bridges = [\"br0\"]
+[network.host_only]
+",
+        )
+        .unwrap();
+        assert_eq!(check_tap(&cfg.network, &br).unwrap(), "br0");
+        assert_eq!(
+            check_tap(&cfg.network, &TapNetwork::HostOnly).unwrap(),
+            "qui-hostonly"
+        );
+        assert!(
+            check_tap(
+                &cfg.network,
+                &TapNetwork::Bridge {
+                    bridge: "br1".into()
+                }
+            )
+            .is_err()
+        );
+        let bad = NetworkPolicy {
+            bridges: vec![],
+            host_only: Some(HostOnlyPolicy {
+                bridge: "qui-hostonly".into(),
+                address: "10.0.0.0/24".into(),
+            }),
+        };
+        assert!(check_tap(&bad, &TapNetwork::HostOnly).is_err());
+        let req = serde_json::to_string(&Request::CreateTap {
+            vm_id: "0a1b2c3d".into(),
+            nic: 0,
+            network: TapNetwork::HostOnly,
+            multi_queue: false,
+        })
+        .unwrap();
+        assert!(
+            req.contains(r#""op":"create_tap""#) && req.contains(r#""kind":"host-only""#),
+            "{req}"
+        );
     }
 
     #[test]

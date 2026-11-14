@@ -15,6 +15,7 @@ mod discovery;
 mod guard;
 mod guest_net;
 mod helper_client;
+mod hostnet;
 mod image_ops;
 mod images;
 mod jobs;

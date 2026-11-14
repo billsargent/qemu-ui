@@ -38,6 +38,7 @@ mod disks;
 mod forwards;
 mod nics;
 mod snapshots;
+mod taps;
 
 const QMP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const EXIT_WAIT: Duration = Duration::from_secs(10);
@@ -790,6 +791,7 @@ impl Supervisor {
             .networks
             .list()
             .map_err(|e| fail("nics", "nic.networks-unreadable", format!("{e:#}")))?;
+        let taps = self.resolve_taps(id, spec, &networks, mode).await?;
         // Isolated networks: a switch socket per network. Only a start
         // brings the switch up; previews just show where it will listen.
         let mut switch_sockets = std::collections::BTreeMap::new();
@@ -817,6 +819,7 @@ impl Supervisor {
             switch_sockets.insert(network.clone(), path_str(&path));
         }
         let ctx = compile::Context {
+            taps,
             switch_sockets: &switch_sockets,
             networks: &networks,
             caps,
@@ -1157,7 +1160,12 @@ impl Supervisor {
         let (compiled, vnc) = self
             .build(id, &spec, &caps, &BuildMode::Run)
             .await
-            .map_err(OpError::Invalid)?;
+            .map_err(|d| {
+                // Nothing will run: give back what the build set up.
+                self.release_host_disks(id);
+                self.release_taps(id);
+                OpError::Invalid(d)
+            })?;
 
         let run_dir = self.run_dir(id);
         let _ = std::fs::remove_dir_all(&run_dir); // stale sockets from a crashed run
@@ -1417,6 +1425,7 @@ impl Supervisor {
     fn finish(&self, id: &str, run_id: i64, exit_status: &str, error: Option<&str>) {
         let live = self.live.lock().unwrap().remove(id);
         self.release_host_disks(id);
+        self.release_taps(id);
         self.switches.release(id);
         let expected = live
             .as_ref()
