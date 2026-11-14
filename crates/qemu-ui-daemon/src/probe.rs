@@ -717,6 +717,7 @@ mod compile_smoke {
                 vdagent: true,
             },
             input: InputSpec { usb_tablet: true },
+            usb: vec![],
             passthrough: vec![],
         };
         start_and_check(&caps, &spec, &images, None, &dir).await;

@@ -68,6 +68,7 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
         .merge(crate::image_ops::routes())
         .merge(crate::api_snapshots::routes())
         .merge(crate::api_upload::routes())
+        .merge(crate::usb::routes())
         .merge(crate::consoles::routes())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "no such endpoint".into()) })
         .layer(axum::middleware::from_fn_with_state(

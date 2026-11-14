@@ -906,6 +906,20 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Record that a running VM's configuration changed live (hotplug), so
+    /// the "restart to apply changes" check compares against what runs now.
+    pub fn update_run_spec(&self, run_id: i64, spec_json: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE vm_run SET spec_json = ?2 WHERE id = ?1",
+                params![run_id, spec_json],
+            )
+            .map(|_| ())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

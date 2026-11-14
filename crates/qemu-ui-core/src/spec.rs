@@ -39,6 +39,9 @@ pub struct VmSpec {
     pub display: DisplaySpec,
     #[serde(default)]
     pub input: InputSpec,
+    /// Host USB devices passed through to the guest (M2-12).
+    #[serde(default)]
+    pub usb: Vec<UsbPassthrough>,
     /// Raw argv tokens appended after generated options (§5.3).
     #[serde(default)]
     pub passthrough: Vec<String>,
@@ -244,6 +247,28 @@ impl Default for InputSpec {
     fn default() -> Self {
         InputSpec { usb_tablet: true }
     }
+}
+
+/// A host USB device to pass through, matched the way QEMU's `usb-host`
+/// matches: by vendor and product, optionally narrowed to a bus and port so
+/// two identical devices can be told apart. The guest sees the device
+/// whenever it is plugged in; QEMU waits for it otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
+#[ts(export)]
+pub struct UsbPassthrough {
+    /// 4 hex digits, e.g. `046d`.
+    pub vendor_id: String,
+    /// 4 hex digits, e.g. `c52b`.
+    pub product_id: String,
+    /// Linux bus number (`hostbus`); not available on Windows hosts.
+    #[serde(default)]
+    pub host_bus: Option<u32>,
+    /// Linux port path such as `1.2` (`hostport`); stable per physical port.
+    #[serde(default)]
+    pub host_port: Option<String>,
+    /// Display name remembered from the host (e.g. "Logitech USB Receiver").
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// Is `name` an acceptable VM name?

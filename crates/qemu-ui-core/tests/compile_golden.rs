@@ -39,6 +39,7 @@ fn caps(monitor_objects: bool) -> BinaryCaps {
         "usb-storage",
         "qemu-xhci",
         "usb-tablet",
+        "usb-host",
         "virtio-net-pci",
         "e1000e",
         "virtio-vga",
@@ -181,6 +182,7 @@ fn base_spec() -> VmSpec {
             vdagent: false,
         },
         input: InputSpec { usb_tablet: true },
+        usb: vec![],
         passthrough: vec![],
     }
 }
@@ -471,4 +473,67 @@ fn display_command_quotes() {
         &["-device".into(), r#"{"a":"b c"}"#.into(), "-S".into()],
     );
     assert_eq!(s, r#"qemu -device '{"a":"b c"}' -S"#);
+}
+
+fn usb(v: &str, p: &str) -> UsbPassthrough {
+    UsbPassthrough {
+        vendor_id: v.into(),
+        product_id: p.into(),
+        host_bus: None,
+        host_port: None,
+        label: None,
+    }
+}
+
+#[test]
+fn linux_usb_passthrough() {
+    let caps = caps(true);
+    let images = images();
+    let mut spec = base_spec();
+    spec.input.usb_tablet = false; // the controller must still be created
+    let mut pinned = usb("0781", "5581");
+    pinned.host_bus = Some(1);
+    pinned.host_port = Some("3.1".into());
+    spec.usb = vec![usb("046D", "C52B"), pinned, usb("046d", "c52b")];
+    let ctx = Context {
+        caps: &caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
+        images: &images,
+        firmware: None,
+    };
+    let c = compile(&spec, &ctx).unwrap();
+    assert!(
+        c.warnings
+            .iter()
+            .any(|w| w.rule == "usb.duplicate" && w.field == "usb[2].vendor_id")
+    );
+    assert!(
+        c.args.iter().any(|a| a.contains(r#""id":"qui-usb""#)),
+        "xHCI controller created for usb-host"
+    );
+    golden("linux-usb-passthrough", &c);
+}
+
+#[test]
+fn usb_validation() {
+    let mut s = base_spec();
+    s.usb = vec![usb("46d", "c52b")];
+    assert_eq!(errors(&s), ["usb.id-invalid"]);
+    let mut s = base_spec();
+    let mut u = usb("046d", "c52b");
+    u.host_port = Some("1-2".into());
+    s.usb = vec![u];
+    assert_eq!(errors(&s), ["usb.port-invalid"]);
+
+    // A QEMU built without libusb has no usb-host.
+    let mut caps = caps(true);
+    caps.devices.retain(|d| d.name != "usb-host");
+    let mut s = base_spec();
+    s.usb = vec![usb("046d", "c52b")];
+    let d = validate(&s, &caps);
+    assert!(
+        d.iter()
+            .any(|d| d.rule == "usb.host-missing" && d.severity == Severity::Error)
+    );
 }

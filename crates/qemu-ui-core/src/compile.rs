@@ -546,8 +546,86 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
         ));
     }
 
+    d.extend(validate_usb(spec, caps));
     d.extend(validate_passthrough(&spec.passthrough));
     d
+}
+
+/// USB passthrough rules (M2-12).
+fn validate_usb(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
+    use crate::usb::{normalize_id, valid_port};
+    let mut d = Vec::new();
+    if spec.usb.is_empty() {
+        return d;
+    }
+    if !(has_device(caps, "usb-host") && has_device(caps, "qemu-xhci")) {
+        d.push(Diagnostic::error(
+            "usb",
+            "usb.host-missing",
+            "this QEMU was built without usb-host (libusb), so host USB devices cannot be passed through",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for (i, u) in spec.usb.iter().enumerate() {
+        let f = |s: &str| format!("usb[{i}].{s}");
+        if normalize_id(&u.vendor_id).is_none() {
+            d.push(Diagnostic::error(
+                f("vendor_id"),
+                "usb.id-invalid",
+                "vendor id must be 4 hex digits",
+            ));
+        }
+        if normalize_id(&u.product_id).is_none() {
+            d.push(Diagnostic::error(
+                f("product_id"),
+                "usb.id-invalid",
+                "product id must be 4 hex digits",
+            ));
+        }
+        if let Some(p) = &u.host_port
+            && !valid_port(p)
+        {
+            d.push(Diagnostic::error(
+                f("host_port"),
+                "usb.port-invalid",
+                "port must look like 1 or 1.2.3",
+            ));
+        }
+        let key = (
+            u.vendor_id.to_ascii_lowercase(),
+            u.product_id.to_ascii_lowercase(),
+            u.host_bus,
+            u.host_port.clone(),
+        );
+        if !seen.insert(key) {
+            d.push(Diagnostic::warning(
+                f("vendor_id"),
+                "usb.duplicate",
+                "the same device is listed twice; only one VM-side device can hold it",
+            ));
+        }
+    }
+    d
+}
+
+/// The `-device` JSON for USB passthrough rule `i` (also used for hotplug).
+pub fn usb_host_device(spec: &VmSpec, i: usize) -> Value {
+    let u = &spec.usb[i];
+    let hex = |s: &str| u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(0);
+    let mut dev = json!({
+        "driver": "usb-host",
+        "id": crate::usb::device_id(&spec.usb, i),
+        "bus": "qui-usb.0",
+        "vendorid": hex(&u.vendor_id),
+        "productid": hex(&u.product_id),
+    });
+    if let Some(b) = u.host_bus {
+        dev["hostbus"] = b.into();
+    }
+    if let Some(p) = &u.host_port {
+        dev["hostport"] = p.as_str().into();
+    }
+    dev
 }
 
 fn validate_passthrough(tokens: &[String]) -> Vec<Diagnostic> {
@@ -786,7 +864,7 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
 
     // Controllers needed by disks and input
     let buses: BTreeSet<DiskBus> = spec.disks.iter().map(|d| d.bus).collect();
-    let need_usb = spec.input.usb_tablet || buses.contains(&DiskBus::Usb);
+    let need_usb = spec.input.usb_tablet || buses.contains(&DiskBus::Usb) || !spec.usb.is_empty();
     if need_usb {
         push(
             &mut a,
@@ -840,6 +918,9 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
             "-device",
             json_arg(json!({"driver": "usb-tablet", "id": "qui-tablet", "bus": "qui-usb.0"})),
         );
+    }
+    for i in 0..spec.usb.len() {
+        push(&mut a, "-device", json_arg(usb_host_device(spec, i)));
     }
     if spec.display.vdagent {
         push(

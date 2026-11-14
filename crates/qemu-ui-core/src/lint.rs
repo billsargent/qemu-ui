@@ -36,6 +36,9 @@ pub fn lint_spec(spec: &VmSpec) -> VmSpec {
         forwards.clear();
     }
     s.display.vnc = false;
+    // Passing a real USB device through would take it away from the host
+    // (or from the running VM); the check never touches host devices.
+    s.usb.clear();
     s
 }
 
@@ -69,16 +72,25 @@ fn field_for_id(id: &str) -> Option<String> {
 /// Map one line of QEMU stderr to a spec field.
 fn field_for_line(line: &str, spec: &VmSpec) -> String {
     // Reserved ids first: the most precise signal.
+    let mut ids = Vec::new();
     let mut rest = line;
     while let Some(i) = rest.find("qui-") {
         let id: String = rest[i..]
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
             .collect();
-        if let Some(f) = field_for_id(&id) {
-            return f;
-        }
+        ids.push(id);
         rest = &rest[i + 4..];
+    }
+    // A USB passthrough device names the shared controller ("qui-usb.0") as
+    // its bus before its own id; the device id is the better match.
+    for id in ids.iter().filter(|id| id.starts_with("qui-usb-")) {
+        if let Some(i) = (0..spec.usb.len()).find(|&i| crate::usb::device_id(&spec.usb, i) == *id) {
+            return format!("usb[{i}]");
+        }
+    }
+    if let Some(f) = ids.iter().find_map(|id| field_for_id(id)) {
+        return f;
     }
     // Then the option QEMU names at the start of the message.
     let opt = line.trim_start();
@@ -183,8 +195,30 @@ mod tests {
             }],
             display: DisplaySpec::default(),
             input: InputSpec::default(),
+            usb: vec![],
             passthrough: vec!["-global".into(), "ICH9-LPC.bogus=1".into()],
         }
+    }
+
+    #[test]
+    fn usb_ids_map_to_rules() {
+        let mut s = spec();
+        s.usb = vec![crate::spec::UsbPassthrough {
+            vendor_id: "046d".into(),
+            product_id: "c52b".into(),
+            host_bus: None,
+            host_port: None,
+            label: None,
+        }];
+        let d = diagnostics_from_stderr(
+            r#"qemu-system-x86_64: -device {"bus":"qui-usb.0","driver":"usb-host","id":"qui-usb-046d-c52b"}: oops"#,
+            &s,
+        );
+        assert_eq!(d[0].field, "usb[0]");
+        assert!(
+            lint_spec(&s).usb.is_empty(),
+            "lint never grabs host devices"
+        );
     }
 
     #[test]

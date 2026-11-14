@@ -4,6 +4,7 @@ import { ApiError, api } from "../api/client";
 import type { VmDetail } from "../api/generated/VmDetail";
 import { SerialConsole } from "../components/SerialConsole";
 import { SnapshotsTab } from "../components/SnapshotsTab";
+import { UsbShelf } from "../components/UsbShelf";
 import { VncConsole } from "../components/VncConsole";
 import { VmEditor } from "../components/VmEditor";
 import { Badge, Button, Card, Field, inputCls } from "../components/ui";
@@ -136,6 +137,9 @@ function Overview({ d }: { d: VmDetail }) {
           ))}
         </ul>
       </Card>
+      <div className="lg:col-span-2">
+        <UsbShelf vm={d} />
+      </div>
     </div>
   );
 }

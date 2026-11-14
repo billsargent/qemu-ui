@@ -16,6 +16,7 @@ mod procs;
 mod scan;
 mod store;
 mod supervisor;
+mod usb;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
