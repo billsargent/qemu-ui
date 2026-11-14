@@ -1,3 +1,6 @@
 [env]
 # ts-rs writes generated TypeScript API types here when `cargo test` runs.
 TS_RS_EXPORT_DIR = { value = "web/src/api/generated", relative = true }
+# Many tests start real QEMU processes (each TCG instance reserves a 1 GiB
+# JIT buffer); unbounded parallelism exhausts memory on smaller machines.
+RUST_TEST_THREADS = { value = "4", force = false }

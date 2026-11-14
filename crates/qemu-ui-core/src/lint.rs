@@ -183,6 +183,7 @@ mod tests {
                 count: 1,
                 topology: None,
             },
+            shares: vec![],
             memory: MemorySpec { size_mib: 128 },
             firmware: FirmwareSpec::Default,
             disks: vec![],

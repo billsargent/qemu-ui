@@ -252,6 +252,7 @@ pub fn default_spec(name: &str, caps: &BinaryCaps) -> (VmSpec, Vec<Diagnostic>) 
             usb_tablet: has("usb-tablet") && has("qemu-xhci"),
         },
         usb: vec![],
+        shares: vec![],
         passthrough: vec![],
     };
     let diags = crate::compile::validate(&spec, caps)

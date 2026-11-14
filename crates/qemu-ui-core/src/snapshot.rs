@@ -141,6 +141,7 @@ mod tests {
             disks,
             nics: vec![],
             display: DisplaySpec::default(),
+            shares: vec![],
             input: InputSpec::default(),
             usb: vec![],
             passthrough: vec![],

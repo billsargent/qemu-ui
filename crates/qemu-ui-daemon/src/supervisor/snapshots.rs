@@ -554,6 +554,7 @@ mod tests {
                 topology: None,
             },
             memory: MemorySpec { size_mib: 128 },
+            shares: vec![],
             firmware: FirmwareSpec::Default,
             disks: vec![disk("a.qcow2"), disk("b.qcow2")],
             nics: vec![],
