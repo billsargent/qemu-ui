@@ -68,6 +68,8 @@ pub struct Supervisor {
     pub networks: crate::networks::Networks,
     /// `virtiofsd`, when installed: writable shares then use virtiofs.
     pub virtiofsd: Option<PathBuf>,
+    /// `passt`, when installed (Linux): passt NAT networks need it (M3-03).
+    pub passt: Option<PathBuf>,
     data_dir: PathBuf,
     run_root: PathBuf,
     events: broadcast::Sender<VmEvent>,
@@ -163,6 +165,13 @@ impl Supervisor {
             pools: Arc::new(Pools::new(data_dir, store.clone())?),
             shares: crate::shares::ShareRoots::new(store.clone()),
             networks: crate::networks::Networks::new(store.clone()),
+            passt: {
+                let p = crate::passt::find_passt();
+                if let Some(p) = &p {
+                    tracing::info!("passt found at {}; passt networks available", p.display());
+                }
+                p
+            },
             virtiofsd: {
                 let v = crate::shares::find_virtiofsd();
                 if let Some(p) = &v {
@@ -857,11 +866,38 @@ impl Supervisor {
         }
     }
 
+    /// Start the run's sidecars: one `passt` per NIC on a passt network
+    /// (M3-03) and one `virtiofsd` per virtiofs share, waiting for each
+    /// socket. Returned with their kind, for the `run_sidecar` table.
+    async fn start_sidecars(
+        &self,
+        spec: &VmSpec,
+        caps: &BinaryCaps,
+        run_dir: &Path,
+        logs: &Path,
+    ) -> Result<Vec<(&'static str, ProcId)>> {
+        let networks = self.networks.list()?;
+        let qmp = path_str(&run_dir.join("qmp.sock"));
+        let plans = crate::passt::plan(&spec.nics, &networks, &qmp);
+        let passt = crate::passt::start(self.passt.as_deref(), &plans, logs, now()).await?;
+        let mut all: Vec<(&'static str, ProcId)> = passt.iter().map(|p| ("passt", *p)).collect();
+        match self.start_virtiofsd(spec, caps, run_dir, logs).await {
+            Ok(v) => all.extend(v.into_iter().map(|p| ("virtiofsd", p))),
+            Err(e) => {
+                for p in &passt {
+                    procs::terminate(*p, true);
+                }
+                return Err(e);
+            }
+        }
+        Ok(all)
+    }
+
     /// Start one `virtiofsd` per virtiofs share and wait for its socket.
     /// The sidecars are detached like QEMU: they survive a daemon restart and
     /// exit by themselves when QEMU disconnects; `finish` also terminates any
     /// that are left once the run is over.
-    async fn start_sidecars(
+    async fn start_virtiofsd(
         &self,
         spec: &VmSpec,
         caps: &BinaryCaps,
@@ -1105,7 +1141,7 @@ impl Supervisor {
         {
             Ok(x) => x,
             Err(e) => {
-                for p in &sidecars {
+                for (_, p) in &sidecars {
                     procs::terminate(*p, true);
                 }
                 self.set_state(id, VmState::Crashed, None, Some(&format!("{e:#}")));
@@ -1138,10 +1174,8 @@ impl Supervisor {
                 shutdown_seen: false,
             },
         );
-        for p in &sidecars {
-            let _ = self
-                .store
-                .insert_sidecar(run_id, "virtiofsd", p.pid, p.start_time);
+        for (kind, p) in &sidecars {
+            let _ = self.store.insert_sidecar(run_id, kind, p.pid, p.start_time);
         }
         // The run is recorded: image operations now see this VM as a user.
         drop(start_locks);

@@ -6,11 +6,18 @@ import type { NetworkInfo } from "../api/generated/NetworkInfo";
 import { Badge, Button, Card, Field, inputCls } from "../components/ui";
 
 /** What each kind of network does, for the picker and the list. */
-export const NETWORK_KINDS: { kind: NetworkConfig["kind"]; label: string; about: string }[] = [
+export const NETWORK_KINDS: { kind: NetworkConfig["kind"]; label: string; about: string; linuxOnly?: string }[] = [
   {
     kind: "nat",
     label: "NAT",
     about: "Outbound internet through the host. Each VM gets its own private NAT; reach guests through port forwards.",
+  },
+  {
+    kind: "passt",
+    label: "NAT (passt)",
+    about:
+      "Faster NAT through a passt helper per NIC; the guest sees the host's own address. Port forwards are set when the VM starts. Needs the passt package.",
+    linuxOnly: "passt only runs on Linux hosts; use NAT instead.",
   },
 ];
 
@@ -23,6 +30,8 @@ export function networkSummary(c: NetworkConfig): string {
   switch (c.kind) {
     case "nat":
       return c.subnet ? `subnet ${c.subnet}` : "default subnet (10.0.2.0/24)";
+    case "passt":
+      return c.mtu ? `MTU ${c.mtu}` : "default MTU";
   }
 }
 
@@ -30,6 +39,8 @@ function blank(kind: NetworkConfig["kind"]): NetworkConfig {
   switch (kind) {
     case "nat":
       return { kind: "nat", subnet: null };
+    case "passt":
+      return { kind: "passt", mtu: null };
   }
 }
 
@@ -44,6 +55,18 @@ function ConfigFields({ config, onChange }: { config: NetworkConfig; onChange: (
             placeholder="10.0.2.0/24"
             value={config.subnet ?? ""}
             onChange={(e) => onChange({ ...config, subnet: e.target.value.trim() || null })}
+          />
+        </Field>
+      );
+    case "passt":
+      return (
+        <Field label="MTU" hint="empty for passt's default">
+          <input
+            className={`${inputCls} w-28`}
+            type="number"
+            placeholder="65520"
+            value={config.mtu ?? ""}
+            onChange={(e) => onChange({ ...config, mtu: e.target.value ? Number(e.target.value) : null })}
           />
         </Field>
       );
@@ -126,6 +149,9 @@ function NetworkRow({ n }: { n: NetworkInfo }) {
 export default function NetworksPage() {
   const qc = useQueryClient();
   const nets = useQuery({ queryKey: ["networks"], queryFn: api.networks });
+  const caps = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
+  const hostOs = caps.data?.caps?.host.os;
+  const unavailable = (k: (typeof NETWORK_KINDS)[number]) => (k.linuxOnly && hostOs && hostOs !== "linux" ? k.linuxOnly : null);
   const [name, setName] = useState("");
   const [config, setConfig] = useState<NetworkConfig>(blank("nat"));
   const create = useMutation({
@@ -172,8 +198,9 @@ export default function NetworksPage() {
                 onChange={(e) => setConfig(blank(e.target.value as NetworkConfig["kind"]))}
               >
                 {NETWORK_KINDS.map((k) => (
-                  <option key={k.kind} value={k.kind}>
+                  <option key={k.kind} value={k.kind} disabled={!!unavailable(k)} title={unavailable(k) ?? undefined}>
                     {k.label}
+                    {unavailable(k) ? " (Linux only)" : ""}
                   </option>
                 ))}
               </select>
