@@ -85,8 +85,11 @@ pub async fn guest_net(sv: &Supervisor, id: &str) -> OpResult<GuestNetInfo> {
                 NicBackend::Network { network, .. } => networks
                     .iter()
                     .find(|n| &n.id == network)
-                    .map(|n| match &n.config {
-                        NetworkConfig::Nat { subnet } => subnet.clone(),
+                    .and_then(|n| match &n.config {
+                        NetworkConfig::Nat { subnet } => Some(subnet.clone()),
+                        // Isolated: no host-visible address; only the guest
+                        // agent (when present) can tell what the guest uses.
+                        NetworkConfig::Isolated {} => None,
                     }),
             };
             if let Some(subnet) = nat_subnet {

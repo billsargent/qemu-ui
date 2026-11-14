@@ -20,7 +20,9 @@ use qemu_ui_core::compile::{
     self, Compiled, Diagnostic, ResolvedFirmware, ResolvedImage, RunPaths, Severity, VncListen,
 };
 use qemu_ui_core::lint::{self, LintResult};
-use qemu_ui_core::spec::{FirmwareSpec, ImageRef, Media, VmSpec, disk_node, valid_name};
+use qemu_ui_core::spec::{
+    FirmwareSpec, ImageRef, Media, NicBackend, VmSpec, disk_node, valid_name,
+};
 use qemu_ui_core::vm::{VmDetail, VmEvent, VmState, VmSummary, mac_from_bytes, state_from_qmp};
 use qemu_ui_qmp::{Qmp, transport};
 use serde::{Deserialize, Serialize};
@@ -66,6 +68,8 @@ pub struct Supervisor {
     pub shares: crate::shares::ShareRoots,
     /// Network objects NICs attach to (M3-01).
     pub networks: crate::networks::Networks,
+    /// Switches of isolated networks, started with their first VM (M3-04).
+    pub switches: crate::netswitch::Switches,
     /// `virtiofsd`, when installed: writable shares then use virtiofs.
     pub virtiofsd: Option<PathBuf>,
     data_dir: PathBuf,
@@ -163,6 +167,7 @@ impl Supervisor {
             pools: Arc::new(Pools::new(data_dir, store.clone())?),
             shares: crate::shares::ShareRoots::new(store.clone()),
             networks: crate::networks::Networks::new(store.clone()),
+            switches: crate::netswitch::Switches::new(run_root.clone()),
             virtiofsd: {
                 let v = crate::shares::find_virtiofsd();
                 if let Some(p) = &v {
@@ -775,7 +780,34 @@ impl Supervisor {
             .networks
             .list()
             .map_err(|e| fail("nics", "nic.networks-unreadable", format!("{e:#}")))?;
+        // Isolated networks: a switch socket per network. Only a start
+        // brings the switch up; previews just show where it will listen.
+        let mut switch_sockets = std::collections::BTreeMap::new();
+        for nic in &spec.nics {
+            let NicBackend::Network { network, .. } = &nic.backend else {
+                continue;
+            };
+            if !networks
+                .iter()
+                .any(|n| &n.id == network && n.config.needs_switch())
+            {
+                continue;
+            }
+            let path = if run {
+                self.switches.acquire(network, id).map_err(|e| {
+                    fail(
+                        "nics",
+                        "nic.switch-failed",
+                        format!("starting the isolated network's switch: {e}"),
+                    )
+                })?
+            } else {
+                self.switches.socket_path(network)
+            };
+            switch_sockets.insert(network.clone(), path_str(&path));
+        }
         let ctx = compile::Context {
+            switch_sockets: &switch_sockets,
             networks: &networks,
             caps,
             machine: machine.as_ref(),
@@ -1072,6 +1104,13 @@ impl Supervisor {
         let spec: VmSpec =
             serde_json::from_str(&row.spec_json).map_err(|e| OpError::Failed(e.into()))?;
         let caps = self.caps_for(&spec.arch).await?;
+        // Releases any isolated-network switches `build` acquires unless the
+        // run gets recorded (then `finish` releases them).
+        let mut lease = SwitchLease {
+            sv: self,
+            vm: id,
+            keep: false,
+        };
         let (compiled, vnc) = self
             .build(id, &spec, &caps, &BuildMode::Run)
             .await
@@ -1138,6 +1177,7 @@ impl Supervisor {
                 shutdown_seen: false,
             },
         );
+        lease.keep = true;
         for p in &sidecars {
             let _ = self
                 .store
@@ -1336,6 +1376,7 @@ impl Supervisor {
     fn finish(&self, id: &str, run_id: i64, exit_status: &str, error: Option<&str>) {
         let live = self.live.lock().unwrap().remove(id);
         self.release_host_disks(id);
+        self.switches.release(id);
         let expected = live
             .as_ref()
             .is_some_and(|l| l.stop_requested || l.shutdown_seen);
@@ -1713,6 +1754,8 @@ impl Supervisor {
             self.finish(&id, run.id, "exited while the daemon was not running", None);
             return;
         }
+        // Bring back the switches of its isolated networks; QEMU reconnects.
+        self.reacquire_switches(&id, &run.spec_json);
         let sock = PathBuf::from(&run.run_dir).join("qmp.sock");
         let qmp = match connect_with_retry(&sock, proc_id, Duration::from_secs(10)).await {
             Ok(q) => q,
@@ -1790,6 +1833,45 @@ fn random_password() -> String {
     (0..8)
         .map(|_| ALPHABET[rand::random::<u32>() as usize % ALPHABET.len()] as char)
         .collect()
+}
+
+// ------------------------------------------------------ isolated networks
+
+/// Releases a VM's switches when dropped, unless the run was recorded.
+struct SwitchLease<'a> {
+    sv: &'a Supervisor,
+    vm: &'a str,
+    keep: bool,
+}
+
+impl Drop for SwitchLease<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            self.sv.switches.release(self.vm);
+        }
+    }
+}
+
+impl Supervisor {
+    /// A reattached VM's isolated networks need their switches again.
+    fn reacquire_switches(&self, vm_id: &str, spec_json: &str) {
+        let Ok(spec) = serde_json::from_str::<VmSpec>(spec_json) else {
+            return;
+        };
+        let networks = self.networks.list().unwrap_or_default();
+        for nic in &spec.nics {
+            let NicBackend::Network { network, .. } = &nic.backend else {
+                continue;
+            };
+            if networks
+                .iter()
+                .any(|n| &n.id == network && n.config.needs_switch())
+                && let Err(e) = self.switches.acquire(network, vm_id)
+            {
+                tracing::warn!(vm = %vm_id, "isolated network switch: {e}");
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------- host disks

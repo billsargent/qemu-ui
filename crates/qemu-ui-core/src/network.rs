@@ -30,6 +30,10 @@ pub enum NetworkConfig {
         #[serde(default)]
         subnet: Option<String>,
     },
+    /// A private switch inside the daemon (M3-04): VMs on the same isolated
+    /// network reach each other and nothing else, with no host or internet
+    /// access. Nothing is put on the physical network.
+    Isolated {},
 }
 
 impl NetworkConfig {
@@ -37,6 +41,7 @@ impl NetworkConfig {
     pub fn kind_label(&self) -> &'static str {
         match self {
             NetworkConfig::Nat { .. } => "NAT",
+            NetworkConfig::Isolated {} => "Isolated",
         }
     }
 
@@ -44,7 +49,26 @@ impl NetworkConfig {
     pub fn supports_forwards(&self) -> bool {
         match self {
             NetworkConfig::Nat { .. } => true,
+            NetworkConfig::Isolated {} => false,
         }
+    }
+
+    /// Why NICs on this network can't take port forwards.
+    pub fn forwards_unsupported_reason(&self) -> String {
+        match self {
+            NetworkConfig::Isolated {} => {
+                "isolated networks have no host access, so port forwards cannot reach them".into()
+            }
+            other => format!(
+                "{} networks don't take port forwards; the guest is reachable directly",
+                other.kind_label()
+            ),
+        }
+    }
+
+    /// Does this kind need a daemon-run switch socket (M3-04)?
+    pub fn needs_switch(&self) -> bool {
+        matches!(self, NetworkConfig::Isolated {})
     }
 }
 
@@ -104,7 +128,7 @@ pub fn validate_network(n: &Network) -> Result<(), String> {
                 return Err(format!("'{s}' is not a usable private subnet"));
             }
         }
-        NetworkConfig::Nat { subnet: None } => {}
+        NetworkConfig::Nat { subnet: None } | NetworkConfig::Isolated {} => {}
     }
     Ok(())
 }
@@ -148,6 +172,16 @@ mod tests {
         assert!(validate_network(&n).is_err());
         n.name = String::new();
         assert!(validate_network(&n).is_err());
+    }
+
+    #[test]
+    fn isolated_takes_no_forwards() {
+        let c = NetworkConfig::Isolated {};
+        assert!(!c.supports_forwards() && c.needs_switch());
+        assert!(c.forwards_unsupported_reason().contains("no host access"));
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v, serde_json::json!({"kind": "isolated"}));
+        assert_eq!(serde_json::from_value::<NetworkConfig>(v).unwrap(), c);
     }
 
     #[test]

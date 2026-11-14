@@ -4,4 +4,4 @@ export type NetworkConfig = { "kind": "nat",
 /**
  * IPv4 subnet in CIDR form; `None` uses QEMU's 10.0.2.0/24.
  */
-subnet: string | null, };
+subnet: string | null, } | { "kind": "isolated", };

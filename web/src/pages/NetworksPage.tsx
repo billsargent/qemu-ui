@@ -12,6 +12,12 @@ export const NETWORK_KINDS: { kind: NetworkConfig["kind"]; label: string; about:
     label: "NAT",
     about: "Outbound internet through the host. Each VM gets its own private NAT; reach guests through port forwards.",
   },
+  {
+    kind: "isolated",
+    label: "Isolated",
+    about:
+      "A private switch: VMs on this network reach each other and nothing else — no host, no internet, no port forwards. Give guests static addresses or run a DHCP server in one of them.",
+  },
 ];
 
 export function kindLabel(c: NetworkConfig): string {
@@ -23,6 +29,8 @@ export function networkSummary(c: NetworkConfig): string {
   switch (c.kind) {
     case "nat":
       return c.subnet ? `subnet ${c.subnet}` : "default subnet (10.0.2.0/24)";
+    case "isolated":
+      return "VMs only; no host or internet access";
   }
 }
 
@@ -30,6 +38,8 @@ function blank(kind: NetworkConfig["kind"]): NetworkConfig {
   switch (kind) {
     case "nat":
       return { kind: "nat", subnet: null };
+    case "isolated":
+      return { kind: "isolated" };
   }
 }
 
@@ -47,6 +57,8 @@ function ConfigFields({ config, onChange }: { config: NetworkConfig; onChange: (
           />
         </Field>
       );
+    case "isolated":
+      return null;
   }
 }
 
