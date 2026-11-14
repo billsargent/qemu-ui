@@ -618,7 +618,10 @@ mod compile_smoke {
             .unwrap();
         let sock = dir.join("q.sock");
         let mut qmp = None;
-        for _ in 0..100 {
+        // A rejected argv makes QEMU exit (checked below), so a long wait
+        // only matters when the host is busy, as on loaded CI runners.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             if let Ok(q) = Qmp::connect_unix(&sock).await {
                 qmp = Some(q);
                 break;
