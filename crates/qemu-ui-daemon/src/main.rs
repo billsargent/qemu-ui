@@ -19,6 +19,7 @@ mod images;
 mod jobs;
 mod netswitch;
 mod networks;
+mod passt;
 mod probe;
 mod procs;
 mod scan;

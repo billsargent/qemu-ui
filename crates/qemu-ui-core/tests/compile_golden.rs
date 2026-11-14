@@ -593,6 +593,54 @@ fn nic_on_an_isolated_network_is_a_stream_client_of_its_switch() {
 }
 
 #[test]
+fn nic_on_a_passt_network_connects_to_its_sidecar() {
+    let fast = Network {
+        id: "p1".into(),
+        name: "fast".into(),
+        config: NetworkConfig::Passt { mtu: None },
+    };
+    let mut s = base_spec();
+    let forwards = s.nics[0].backend.forwards().to_vec();
+    s.nics[0].backend = NicBackend::Network {
+        network: "p1".into(),
+        forwards,
+    };
+    let c = compile_with_networks(&s, std::slice::from_ref(&fast)).unwrap();
+    let netdev = c
+        .args
+        .iter()
+        .find(|a| a.contains("\"id\":\"qui-net0\""))
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(netdev).unwrap();
+    assert_eq!(v["type"], "stream");
+    assert_eq!(v["server"], false);
+    assert_eq!(v["addr"]["type"], "unix");
+    let run = run_paths(VncListen::Unix("/x".into()));
+    assert_eq!(v["addr"]["path"], passt_socket(&run.qmp, 0));
+    assert!(v.get("hostfwd").is_none(), "passt applies forwards itself");
+
+    // Not on Windows hosts.
+    let caps = caps(true);
+    let images = images();
+    let ctx = Context {
+        switch_sockets: &Default::default(),
+        networks: std::slice::from_ref(&fast),
+        shares: vec![],
+        caps: &caps,
+        os: "windows",
+        run,
+        images: &images,
+        firmware: None,
+        machine: None,
+    };
+    let errs = compile(&s, &ctx).unwrap_err();
+    assert!(
+        errs.iter().any(|d| d.rule == "net.passt-unsupported"),
+        "{errs:?}"
+    );
+}
+
+#[test]
 fn nic_on_a_missing_network_is_an_error() {
     let mut s = base_spec();
     s.nics[0].backend = NicBackend::Network {

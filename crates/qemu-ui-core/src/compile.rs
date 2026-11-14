@@ -877,6 +877,36 @@ fn controller_for(bus: DiskBus) -> Option<&'static str> {
 /// the result.
 /// NICs attached to network objects: the network exists and takes what the
 /// NIC asks of it (M3-01).
+/// Where NIC `nic`'s passt sidecar listens: in the run directory, next to
+/// the QMP socket `qmp` (short root, so the AF_UNIX path limit holds).
+pub fn passt_socket(qmp: &str, nic: usize) -> String {
+    let name = format!("passt{nic}.sock");
+    match std::path::Path::new(qmp).parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(name).display().to_string(),
+        _ => name,
+    }
+}
+
+/// Network kinds this host cannot run (passt off Linux, M3-03).
+fn validate_network_hosts(spec: &VmSpec, networks: &[Network], os: &str) -> Vec<Diagnostic> {
+    let mut d = Vec::new();
+    for (i, nic) in spec.nics.iter().enumerate() {
+        if let NicBackend::Network { network, .. } = &nic.backend
+            && let Some(why) = networks
+                .iter()
+                .find(|n| &n.id == network)
+                .and_then(|n| n.config.host_unsupported_reason(os))
+        {
+            d.push(Diagnostic::error(
+                format!("nics[{i}].backend.network"),
+                "net.passt-unsupported",
+                why,
+            ));
+        }
+    }
+    d
+}
+
 pub fn validate_networks(spec: &VmSpec, networks: &[Network]) -> Vec<Diagnostic> {
     let mut d = Vec::new();
     for (i, nic) in spec.nics.iter().enumerate() {
@@ -979,6 +1009,7 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
         diags.extend(validate_buses(spec, caps, m));
     }
     diags.extend(validate_networks(spec, ctx.networks));
+    diags.extend(validate_network_hosts(spec, ctx.networks, ctx.os));
     for (i, nic) in spec.nics.iter().enumerate() {
         if let NicBackend::Network { network, .. } = &nic.backend {
             let needs = ctx
@@ -1144,6 +1175,7 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
     // NICs
     for (i, nic) in spec.nics.iter().enumerate() {
         let mut netdev = json!({"type": "user", "id": format!("qui-net{i}")});
+        let mut passt = false;
         if let NicBackend::Network { network, .. } = &nic.backend {
             // Validated above; a missing network never reaches here.
             if let Some(n) = ctx.networks.iter().find(|n| &n.id == network) {
@@ -1164,11 +1196,22 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
                             "reconnect-ms": 1000,
                         });
                     }
+                    // QEMU connects to the NIC's passt sidecar, which the
+                    // daemon starts (with the forwards) before QEMU.
+                    NetworkConfig::Passt { .. } => {
+                        passt = true;
+                        netdev = json!({
+                            "type": "stream",
+                            "id": format!("qui-net{i}"),
+                            "server": false,
+                            "addr": {"type": "unix", "path": passt_socket(&ctx.run.qmp, i)},
+                        });
+                    }
                 }
             }
         }
         let forwards = nic.backend.forwards();
-        if !forwards.is_empty() {
+        if !forwards.is_empty() && !passt {
             netdev["hostfwd"] = forwards
                 .iter()
                 .map(|f| json!({"str": format!("{}:{}:{}-:{}", f.proto, f.host_addr, f.host_port, f.guest_port)}))

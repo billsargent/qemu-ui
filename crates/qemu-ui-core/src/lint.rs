@@ -243,6 +243,18 @@ mod tests {
         };
         let l = lint_spec(&on_net);
         assert_eq!(l.nics[0].backend, NicBackend::User { forwards: vec![] });
+        // A passt NIC with forwards: checked as NAT, no sidecar, no binds.
+        on_net.nics[0].backend = NicBackend::Network {
+            network: "fast".into(),
+            forwards: vec![PortForward {
+                proto: "tcp".into(),
+                host_addr: "127.0.0.1".into(),
+                host_port: 2222,
+                guest_port: 22,
+            }],
+        };
+        let l = lint_spec(&on_net);
+        assert_eq!(l.nics[0].backend, NicBackend::User { forwards: vec![] });
         assert!(!s.display.vnc);
     }
 
