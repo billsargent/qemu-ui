@@ -72,7 +72,7 @@ export function ConnectCards({ vm }: { vm: VmDetail }) {
   });
   const [copied, setCopied] = useState<string | null>(null);
   const add = useMutation({
-    mutationFn: ({ nic, fwd }: { nic: number; fwd: PortForward }) => api.addForward(vm, nic, fwd),
+    mutationFn: ({ nic, fwd }: { nic: number; fwd: PortForward }) => api.addForward(id, nic, fwd),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["vm", id] });
       qc.invalidateQueries({ queryKey: ["guest-net", id] });

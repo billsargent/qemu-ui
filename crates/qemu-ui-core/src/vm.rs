@@ -132,6 +132,16 @@ pub struct DiskChange {
     pub vm: VmDetail,
 }
 
+/// The result of adding or removing a port forward (M3-02).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
+pub struct ForwardChange {
+    /// The change was applied to the running VM (not only saved).
+    pub live: bool,
+    pub message: String,
+    pub vm: VmDetail,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export)]
 pub struct CompileResponse {
