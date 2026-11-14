@@ -10,6 +10,7 @@ pub mod caps;
 pub mod compile;
 pub mod fetch;
 pub mod firmware;
+pub mod guest_net;
 pub mod help;
 pub mod helper;
 pub mod lint;

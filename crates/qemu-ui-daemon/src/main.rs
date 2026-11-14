@@ -3,6 +3,7 @@
 mod api;
 mod api_disks;
 mod api_fetch;
+mod api_guest_net;
 mod api_nics;
 mod api_snapshots;
 mod api_storage;
@@ -11,6 +12,7 @@ mod api_vms;
 mod consoles;
 mod discovery;
 mod guard;
+mod guest_net;
 mod helper_client;
 mod image_ops;
 mod images;
