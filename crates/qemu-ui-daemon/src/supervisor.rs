@@ -1150,9 +1150,10 @@ impl Supervisor {
         let spec: VmSpec =
             serde_json::from_str(&row.spec_json).map_err(|e| OpError::Failed(e.into()))?;
         let caps = self.caps_for(&spec.arch).await?;
-        // Releases any isolated-network switches `build` acquires unless the
-        // run gets recorded (then `finish` releases them).
-        let mut lease = SwitchLease {
+        // Gives back what `build` sets up on the host (helper disk exports,
+        // taps, isolated-network switches) on every path where no run gets
+        // recorded; once it is, `finish` releases them.
+        let mut lease = StartLease {
             sv: self,
             vm: id,
             keep: false,
@@ -1160,12 +1161,7 @@ impl Supervisor {
         let (compiled, vnc) = self
             .build(id, &spec, &caps, &BuildMode::Run)
             .await
-            .map_err(|d| {
-                // Nothing will run: give back what the build set up.
-                self.release_host_disks(id);
-                self.release_taps(id);
-                OpError::Invalid(d)
-            })?;
+            .map_err(OpError::Invalid)?;
 
         let run_dir = self.run_dir(id);
         let _ = std::fs::remove_dir_all(&run_dir); // stale sockets from a crashed run
@@ -1887,16 +1883,19 @@ fn random_password() -> String {
 
 // ------------------------------------------------------ isolated networks
 
-/// Releases a VM's switches when dropped, unless the run was recorded.
-struct SwitchLease<'a> {
+/// Releases a starting VM's host resources when dropped, unless its run was
+/// recorded (`finish` owns them from then on).
+struct StartLease<'a> {
     sv: &'a Supervisor,
     vm: &'a str,
     keep: bool,
 }
 
-impl Drop for SwitchLease<'_> {
+impl Drop for StartLease<'_> {
     fn drop(&mut self) {
         if !self.keep {
+            self.sv.release_host_disks(self.vm);
+            self.sv.release_taps(self.vm);
             self.sv.switches.release(self.vm);
         }
     }
@@ -2604,6 +2603,21 @@ mod host_disks {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             assert_eq!(fake.unexports.load(Ordering::SeqCst), 1, "the export is released when the run ends");
+
+            // A start that fails after the export (here: an image operation
+            // holds the boot disk) still gives the export back.
+            let boot = sv.detail(&id).ok().unwrap().spec.disks[0].image.clone();
+            let held = crate::image_ops::lock_for_start(&[boot]).unwrap();
+            assert!(matches!(sv.start(&id).await, Err(OpError::Conflict(_))));
+            drop(held);
+            for _ in 0..50 {
+                if fake.unexports.load(Ordering::SeqCst) > 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(fake.unexports.load(Ordering::SeqCst), 2, "a failed start releases the export");
+            assert_ne!(sv.detail(&id).ok().unwrap().summary.state, VmState::Starting);
 
             // Live hotplug of host disks is refused with a reason.
             sv.start(&id).await.map_err(|e| format!("{e:?}")).unwrap();
