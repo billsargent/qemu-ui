@@ -64,6 +64,8 @@ pub struct Supervisor {
     pub jobs: Arc<crate::jobs::Jobs>,
     /// Registered share roots for shared folders (M2-13).
     pub shares: crate::shares::ShareRoots,
+    /// Network objects NICs attach to (M3-01).
+    pub networks: crate::networks::Networks,
     /// `virtiofsd`, when installed: writable shares then use virtiofs.
     pub virtiofsd: Option<PathBuf>,
     data_dir: PathBuf,
@@ -160,6 +162,7 @@ impl Supervisor {
         Ok(Arc::new(Supervisor {
             pools: Arc::new(Pools::new(data_dir, store.clone())?),
             shares: crate::shares::ShareRoots::new(store.clone()),
+            networks: crate::networks::Networks::new(store.clone()),
             virtiofsd: {
                 let v = crate::shares::find_virtiofsd();
                 if let Some(p) = &v {
@@ -768,7 +771,12 @@ impl Supervisor {
             None => VncListen::Unix(String::new()),
         };
         let machine = self.machine_buses(caps, &spec.machine.type_name).await;
+        let networks = self
+            .networks
+            .list()
+            .map_err(|e| fail("nics", "nic.networks-unreadable", format!("{e:#}")))?;
         let ctx = compile::Context {
+            networks: &networks,
             caps,
             machine: machine.as_ref(),
             os: std::env::consts::OS,
@@ -2245,8 +2253,7 @@ mod dry_lint {
             let id = small_vm(&sv, &caps, "linted").await;
             // Give it a port forward the lint must not try to bind again.
             let mut spec = sv.detail(&id).ok().unwrap().spec;
-            let NicBackend::User { forwards } = &mut spec.nics[0].backend;
-            forwards.push(PortForward {
+            spec.nics[0].backend.forwards_mut().push(PortForward {
                 proto: "tcp".into(),
                 host_addr: "127.0.0.1".into(),
                 host_port: 45222,

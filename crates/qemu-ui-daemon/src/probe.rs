@@ -597,6 +597,7 @@ mod compile_smoke {
             vnc,
         };
         let ctx = Context {
+            networks: &[],
             shares: vec![],
             caps,
             os: std::env::consts::OS,

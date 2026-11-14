@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::compile::{Diagnostic, Severity};
-use crate::spec::{NicBackend, VmSpec};
+use crate::spec::VmSpec;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export)]
@@ -32,8 +32,7 @@ pub struct LintResult {
 pub fn lint_spec(spec: &VmSpec) -> VmSpec {
     let mut s = spec.clone();
     for nic in &mut s.nics {
-        let NicBackend::User { forwards } = &mut nic.backend;
-        forwards.clear();
+        nic.backend.forwards_mut().clear();
     }
     s.display.vnc = false;
     // Passing a real USB device through would take it away from the host
@@ -232,8 +231,7 @@ mod tests {
     #[test]
     fn lint_spec_removes_host_side_effects() {
         let s = lint_spec(&spec());
-        let NicBackend::User { forwards } = &s.nics[0].backend;
-        assert!(forwards.is_empty());
+        assert!(s.nics[0].backend.forwards().is_empty());
         assert!(!s.display.vnc);
     }
 

@@ -18,6 +18,7 @@ use ts_rs::TS;
 
 use crate::buses::{MachineBuses, SPARE_ROOT_PORTS};
 use crate::caps::BinaryCaps;
+use crate::network::{Network, NetworkConfig};
 use crate::spec::{
     CacheMode, DiskBus, DiskSpec, FirmwareSpec, ImageRef, Media, NicBackend, VmSpec,
     valid_image_name, valid_mac, valid_name, valid_share_path, valid_share_tag,
@@ -151,6 +152,8 @@ pub struct Context<'a> {
     /// buses are validated against it and, on PCIe machines, PCI disks are
     /// placed behind root ports so they can be hot-(un)plugged.
     pub machine: Option<&'a MachineBuses>,
+    /// Network objects NICs may reference (M3-01).
+    pub networks: &'a [Network],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -565,8 +568,7 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
             )),
             _ => {}
         }
-        let NicBackend::User { forwards } = &nic.backend;
-        for (j, fw) in forwards.iter().enumerate() {
+        for (j, fw) in nic.backend.forwards().iter().enumerate() {
             let ff = format!("nics[{i}].backend.forwards[{j}]");
             if !matches!(fw.proto.as_str(), "tcp" | "udp") {
                 d.push(Diagnostic::error(
@@ -871,6 +873,36 @@ fn controller_for(bus: DiskBus) -> Option<&'static str> {
 
 /// Compile a spec. Errors are returned as diagnostics; warnings travel with
 /// the result.
+/// NICs attached to network objects: the network exists and takes what the
+/// NIC asks of it (M3-01).
+pub fn validate_networks(spec: &VmSpec, networks: &[Network]) -> Vec<Diagnostic> {
+    let mut d = Vec::new();
+    for (i, nic) in spec.nics.iter().enumerate() {
+        let f = |s: &str| format!("nics[{i}].{s}");
+        if let NicBackend::Network { network, forwards } = &nic.backend {
+            match networks.iter().find(|n| &n.id == network) {
+                None => d.push(Diagnostic::error(
+                    f("backend.network"),
+                    "nic.network-missing",
+                    format!("network '{network}' does not exist (deleted?); pick another"),
+                )),
+                Some(n) if !forwards.is_empty() && !n.config.supports_forwards() => {
+                    d.push(Diagnostic::error(
+                        f("backend.forwards"),
+                        "forward.unsupported",
+                        format!(
+                            "{} networks don't take port forwards; the guest is reachable directly",
+                            n.config.kind_label()
+                        ),
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    d
+}
+
 pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>> {
     let caps = ctx.caps;
     let mut diags = validate(spec, caps);
@@ -947,6 +979,7 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
     if let Some(m) = ctx.machine {
         diags.extend(validate_buses(spec, caps, m));
     }
+    diags.extend(validate_networks(spec, ctx.networks));
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(diags);
     }
@@ -1096,8 +1129,20 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
 
     // NICs
     for (i, nic) in spec.nics.iter().enumerate() {
-        let NicBackend::User { forwards } = &nic.backend;
         let mut netdev = json!({"type": "user", "id": format!("qui-net{i}")});
+        if let NicBackend::Network { network, .. } = &nic.backend {
+            // Validated above; a missing network never reaches here.
+            if let Some(n) = ctx.networks.iter().find(|n| &n.id == network) {
+                match &n.config {
+                    NetworkConfig::Nat { subnet } => {
+                        if let Some(s) = subnet {
+                            netdev["net"] = s.as_str().into();
+                        }
+                    }
+                }
+            }
+        }
+        let forwards = nic.backend.forwards();
         if !forwards.is_empty() {
             netdev["hostfwd"] = forwards
                 .iter()
