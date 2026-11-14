@@ -92,19 +92,39 @@ pub async fn guest_net(sv: &Supervisor, id: &str) -> OpResult<GuestNetInfo> {
                 .flat_map(|(_, ips)| ips.iter().cloned().map(agent_addr))
                 .collect();
             let mut active_forwards = vec![];
-            // NAT (a per-VM `user` NIC or a NAT network) is slirp either way.
-            let nat_subnet: Option<Option<String>> = match &nic.backend {
-                NicBackend::User { .. } => Some(None),
-                NicBackend::Network { network, .. } => networks
+            // NAT (a per-VM `user` NIC or a NAT network) is slirp either way;
+            // passt NICs (M3-03) see the host's own address.
+            let net = match &nic.backend {
+                NicBackend::User { .. } => None,
+                NicBackend::Network { network, .. } => networks.iter().find(|n| &n.id == network),
+            };
+            if let Some(NetworkConfig::Passt { .. }) = net.map(|n| &n.config) {
+                if let Some(ip) = host_ipv4() {
+                    addrs.push(qemu_ui_core::guest_net::passt_addr(ip));
+                }
+                active_forwards = nic
+                    .backend
+                    .forwards()
                     .iter()
-                    .find(|n| &n.id == network)
-                    .and_then(|n| match &n.config {
-                        NetworkConfig::Nat { subnet } => Some(subnet.clone()),
-                        // Tap-backed: the guest is on a host bridge/adapter.
-                        NetworkConfig::Bridged { .. }
-                        | NetworkConfig::HostOnly {}
-                        | NetworkConfig::Tap { .. } => None,
-                    }),
+                    .map(|f| qemu_ui_core::guest_net::ActiveForward {
+                        proto: f.proto.clone(),
+                        host_addr: f.host_addr.clone(),
+                        host_port: f.host_port,
+                        guest_port: f.guest_port,
+                    })
+                    .collect();
+            }
+            let nat_subnet: Option<Option<String>> = match (&nic.backend, net) {
+                (NicBackend::User { .. }, _) => Some(None),
+                (_, Some(n)) => match &n.config {
+                    NetworkConfig::Nat { subnet } => Some(subnet.clone()),
+                    NetworkConfig::Passt { .. } => None,
+                    // Tap-backed: the guest is on a host bridge/adapter.
+                    NetworkConfig::Bridged { .. }
+                    | NetworkConfig::HostOnly {}
+                    | NetworkConfig::Tap { .. } => None,
+                },
+                (_, None) => None,
             };
             if nat_subnet.is_none()
                 && let Some(mac) = &nic.mac
@@ -141,6 +161,15 @@ pub async fn guest_net(sv: &Supervisor, id: &str) -> OpResult<GuestNetInfo> {
         agent_error,
         nics,
     })
+}
+
+/// The host's primary IPv4 address (the one its default route uses). The
+/// UDP "connect" only selects a route; nothing is sent.
+fn host_ipv4() -> Option<String> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:9").ok()?;
+    let ip = s.local_addr().ok()?.ip();
+    (!ip.is_unspecified()).then(|| ip.to_string())
 }
 
 async fn usernet(qmp: &Qmp) -> Result<Vec<UsernetHub>> {

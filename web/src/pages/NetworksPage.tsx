@@ -7,43 +7,52 @@ import type { HostNetInfo } from "../api/generated/HostNetInfo";
 import { Badge, Button, Card, Field, inputCls } from "../components/ui";
 
 /** What each kind of network does, for the picker and the list. */
-export const NETWORK_KINDS: { kind: NetworkConfig["kind"]; label: string; about: string }[] = [
+export const NETWORK_KINDS: {
+  kind: NetworkConfig["kind"];
+  label: string;
+  about: string;
+  linuxOnly?: string;
+  windowsOnly?: string;
+}[] = [
   {
     kind: "nat",
     label: "NAT",
     about: "Outbound internet through the host. Each VM gets its own private NAT; reach guests through port forwards.",
   },
   {
+    kind: "passt",
+    label: "NAT (passt)",
+    about:
+      "Faster NAT through a passt helper per NIC; the guest sees the host's own address. Port forwards are set when the VM starts. Needs the passt package.",
+    linuxOnly: "passt only runs on Linux hosts; use NAT instead.",
+  },
+  {
     kind: "bridged",
     label: "Bridged",
     about:
       "Linux: guests join an existing host bridge and the LAN behind it, reachable directly. Needs the qemu-ui helper with the bridge allowlisted in helper.toml.",
+    linuxOnly: "Bridged networks need a Linux host; on Windows use a TAP network.",
   },
   {
     kind: "host-only",
     label: "Host-only",
     about:
       "Linux: guests share a private bridge with the host and each other, with no outside access. Needs the qemu-ui helper with [network.host_only] in helper.toml.",
+    linuxOnly: "Host-only networks need a Linux host; on Windows use an unbridged TAP network.",
   },
   {
     kind: "tap",
     label: "TAP",
     about:
       "Windows: guests use a TAP-Windows adapter. Bridge it to your physical adapter in Network Connections (admin) to put guests on the LAN.",
+    windowsOnly: "TAP networks need a Windows host; on Linux use a bridged or host-only network.",
   },
 ];
 
 /** Which host OS a kind runs on (null: any). */
 export function kindOs(kind: NetworkConfig["kind"]): string | null {
-  switch (kind) {
-    case "bridged":
-    case "host-only":
-      return "linux";
-    case "tap":
-      return "windows";
-    default:
-      return null;
-  }
+  const k = NETWORK_KINDS.find((x) => x.kind === kind);
+  return k?.linuxOnly ? "linux" : k?.windowsOnly ? "windows" : null;
 }
 
 export function kindLabel(c: NetworkConfig): string {
@@ -55,6 +64,8 @@ export function networkSummary(c: NetworkConfig): string {
   switch (c.kind) {
     case "nat":
       return c.subnet ? `subnet ${c.subnet}` : "default subnet (10.0.2.0/24)";
+    case "passt":
+      return c.mtu ? `MTU ${c.mtu}` : "default MTU";
     case "bridged":
       return `bridge ${c.bridge}`;
     case "host-only":
@@ -68,6 +79,8 @@ function blank(kind: NetworkConfig["kind"]): NetworkConfig {
   switch (kind) {
     case "nat":
       return { kind: "nat", subnet: null };
+    case "passt":
+      return { kind: "passt", mtu: null };
     case "bridged":
       return { kind: "bridged", bridge: "" };
     case "host-only":
@@ -153,6 +166,18 @@ function ConfigFields({
           />
         </Field>
       );
+    case "passt":
+      return (
+        <Field label="MTU" hint="empty for passt's default">
+          <input
+            className={`${inputCls} w-28`}
+            type="number"
+            placeholder="65520"
+            value={config.mtu ?? ""}
+            onChange={(e) => onChange({ ...config, mtu: e.target.value ? Number(e.target.value) : null })}
+          />
+        </Field>
+      );
   }
 }
 
@@ -233,6 +258,14 @@ function NetworkRow({ n }: { n: NetworkInfo }) {
 export default function NetworksPage() {
   const qc = useQueryClient();
   const nets = useQuery({ queryKey: ["networks"], queryFn: api.networks });
+  const caps = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
+  const hostOs = caps.data?.caps?.host.os;
+  const unavailable = (k: (typeof NETWORK_KINDS)[number]) =>
+    k.linuxOnly && hostOs && hostOs !== "linux"
+      ? k.linuxOnly
+      : k.windowsOnly && hostOs && hostOs !== "windows"
+        ? k.windowsOnly
+        : null;
   const [name, setName] = useState("");
   const [config, setConfig] = useState<NetworkConfig>(blank("nat"));
   const create = useMutation({
@@ -281,8 +314,9 @@ export default function NetworksPage() {
                 onChange={(e) => setConfig(blank(e.target.value as NetworkConfig["kind"]))}
               >
                 {NETWORK_KINDS.map((k) => (
-                  <option key={k.kind} value={k.kind}>
+                  <option key={k.kind} value={k.kind} disabled={!!unavailable(k)} title={unavailable(k) ?? undefined}>
                     {k.label}
+                    {unavailable(k) ? (k.windowsOnly ? " (Windows only)" : " (Linux only)") : ""}
                   </option>
                 ))}
               </select>

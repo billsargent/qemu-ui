@@ -46,7 +46,7 @@ impl Supervisor {
             let Some(net) = networks.iter().find(|n| &n.id == network) else {
                 continue;
             };
-            if !net.config.is_tap() || net.config.unsupported_on(os).is_some() {
+            if !net.config.is_tap() || net.config.host_unsupported_reason(os).is_some() {
                 continue;
             }
             let tap = match &net.config {
@@ -122,7 +122,7 @@ impl Supervisor {
                     }
                 }
                 // Not tap-backed (filtered above).
-                NetworkConfig::Nat { .. } => continue,
+                NetworkConfig::Nat { .. } | NetworkConfig::Passt { .. } => continue,
             };
             out.insert(i, tap);
         }

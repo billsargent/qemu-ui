@@ -4,7 +4,11 @@ export type NetworkConfig = { "kind": "nat",
 /**
  * IPv4 subnet in CIDR form; `None` uses QEMU's 10.0.2.0/24.
  */
-subnet: string | null, } | { "kind": "bridged", 
+subnet: string | null, } | { "kind": "passt", 
+/**
+ * Interface MTU passt advertises; `None` keeps passt's default.
+ */
+mtu: number | null, } | { "kind": "bridged", 
 /**
  * Host bridge interface, e.g. `br0`.
  */
