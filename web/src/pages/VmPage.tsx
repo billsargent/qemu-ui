@@ -1,3 +1,4 @@
+import { ConnectCards } from "../components/ConnectCards";
 import { DisksCard } from "../components/DisksCard";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -141,6 +142,7 @@ function Overview({ d }: { d: VmDetail }) {
           ))}
         </ul>
       </Card>
+      <ConnectCards vm={d} />
       <div className="lg:col-span-2">
         <UsbShelf vm={d} />
       </div>
