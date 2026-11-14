@@ -13,6 +13,7 @@ pub mod firmware;
 pub mod help;
 pub mod helper;
 pub mod lint;
+pub mod nic;
 pub mod parity;
 pub mod snapshot;
 pub mod spec;

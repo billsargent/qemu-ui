@@ -13,6 +13,7 @@ import type { Media } from "../api/generated/Media";
 import type { NicSpec } from "../api/generated/NicSpec";
 import type { ShareSpec } from "../api/generated/ShareSpec";
 import type { VmSpec } from "../api/generated/VmSpec";
+import { MacField, NicModelField, VirtioNetFields } from "./NicFields";
 import { Badge, Button, Card, Field, inputCls } from "./ui";
 
 // ---------------------------------------------------------------- helpers
@@ -501,22 +502,19 @@ export function VmEditor({
           {spec.nics.map((n, i) => (
             <div key={i} className="mb-3 rounded border border-zinc-200 p-2 dark:border-zinc-800">
               <div className="grid grid-cols-3 gap-2">
-                <Field label="Model">
-                  <select className={inputCls} value={n.model} onChange={(e) => updateNic(i, { model: e.target.value })}>
-                    {nicModels.map((d) => (
-                      <option key={d.name} value={d.name}>
-                        {d.name}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
+                <NicModelField
+                  arch={spec.arch}
+                  machine={spec.machine.type}
+                  value={n.model}
+                  fallback={nicModels}
+                  onChange={(model) => updateNic(i, { model })}
+                />
                 <Field label="Backend" hint="NAT (slirp). More network types arrive in M3.">
                   <input className={inputCls} value="NAT" disabled />
                 </Field>
-                <Field label="MAC" hint={n.mac ? undefined : "assigned on save"}>
-                  <input className={`${inputCls} font-mono`} value={n.mac ?? ""} onChange={(e) => updateNic(i, { mac: e.target.value || null })} />
-                </Field>
+                <MacField value={n.mac} onChange={(mac) => updateNic(i, { mac })} />
               </div>
+              <VirtioNetFields nic={n} onChange={(patch) => updateNic(i, patch)} />
               <div className="mt-2 text-xs">
                 <div className="mb-1 font-medium text-zinc-600 dark:text-zinc-400">Port forwards</div>
                 {n.backend.forwards.map((f, j) => (

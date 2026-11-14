@@ -311,6 +311,27 @@
         "model": {
           "description": "Device model, e.g. `virtio-net-pci`, `e1000e`.",
           "type": "string"
+        },
+        "queues": {
+          "description": "Queue pairs (multiqueue). Needs a virtio-net model and a tap-style\nbackend; absent means one.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "virtio": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VirtioNetOptions"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "virtio-net offload toggles; absent leaves QEMU's defaults."
         }
       },
       "required": [
@@ -445,6 +466,33 @@
         "vendor_id",
         "product_id"
       ],
+      "type": "object"
+    },
+    "VirtioNetOptions": {
+      "description": "virtio-net feature toggles (M3-07). Each `None` keeps QEMU's default (on).",
+      "properties": {
+        "csum": {
+          "description": "Checksum offload, host and guest (`csum`, `guest_csum`).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mrg_rxbuf": {
+          "description": "Mergeable receive buffers (`mrg_rxbuf`).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "tso": {
+          "description": "TCP segmentation offload, IPv4 and IPv6 (`host_tso*`, `guest_tso*`).\nNeeds checksum offload.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     }
   },

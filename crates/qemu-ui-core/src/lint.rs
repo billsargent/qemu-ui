@@ -198,6 +198,8 @@ mod tests {
                 },
                 model: "e1000".into(),
                 mac: Some("52:54:00:00:00:01".into()),
+                queues: None,
+                virtio: None,
             }],
             display: DisplaySpec::default(),
             input: InputSpec::default(),

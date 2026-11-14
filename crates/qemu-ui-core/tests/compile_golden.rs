@@ -178,6 +178,8 @@ fn base_spec() -> VmSpec {
             },
             model: "virtio-net-pci".into(),
             mac: Some("52:54:00:12:34:56".into()),
+            queues: None,
+            virtio: None,
         }],
         display: DisplaySpec {
             device: Some("virtio-vga".into()),
@@ -829,4 +831,56 @@ fn usb_validation() {
         d.iter()
             .any(|d| d.rule == "usb.host-missing" && d.severity == Severity::Error)
     );
+}
+
+// ------------------------------------------------------------------ M3-07
+
+#[test]
+fn linux_virtio_net_options() {
+    let caps = caps(true);
+    let mut s = base_spec();
+    s.nics[0].virtio = Some(VirtioNetOptions {
+        csum: Some(false),
+        tso: None,
+        mrg_rxbuf: Some(false),
+    });
+    let images = images();
+    let ctx = Context {
+        shares: vec![],
+        caps: &caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
+        images: &images,
+        firmware: None,
+        machine: None,
+    };
+    let c = compile(&s, &ctx).unwrap();
+    golden("linux-virtio-net-options", &c);
+}
+
+#[test]
+fn nic_model_must_fit_the_machine() {
+    let mut caps = caps_with_ports();
+    caps.devices.push(DeviceInfo {
+        name: "ne2k_isa".into(),
+        category: "Network".into(),
+        bus: Some("ISA".into()),
+        alias: None,
+        description: None,
+        no_user: false,
+    });
+    let mut s = base_spec();
+    s.nics[0].model = "ne2k_isa".into();
+    let virt = machine_buses("qtree-aarch64-virt.txt", "virt-11.1");
+    let errs = compile_on(&s, &caps, &virt).unwrap_err();
+    let e = errs
+        .iter()
+        .find(|d| d.rule == "nic.model-bus")
+        .expect("model-bus error");
+    assert_eq!(e.field, "nics[0].model");
+    assert!(e.message.contains("no ISA bus"), "{}", e.message);
+
+    // The same model is fine where the machine has an ISA bus.
+    let pc = machine_buses("qtree-x86_64-pc.txt", "pc-i440fx-11.1");
+    assert!(compile_on(&s, &caps, &pc).is_ok());
 }
