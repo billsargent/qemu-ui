@@ -9,6 +9,7 @@ import type { DiskSpec } from "./generated/DiskSpec";
 import type { LintResult } from "./generated/LintResult";
 import type { Diagnostic } from "./generated/Diagnostic";
 import type { CheckResult } from "./generated/CheckResult";
+import type { HostDisk } from "./generated/HostDisk";
 import type { ImageDetail } from "./generated/ImageDetail";
 import type { Job } from "./generated/Job";
 import type { MeasureResult } from "./generated/MeasureResult";
@@ -125,6 +126,9 @@ export const api = {
   removePool: (name: string) => request<void>(`/pools/${encodeURIComponent(name)}`, { method: "DELETE" }),
   pool: (name = "default") => request<PoolInfo>(`/pools/${encodeURIComponent(name)}`),
   /** Every image in every pool. */
+  /** Physical disks the privileged helper can export (M2-11). */
+  hostDisks: () =>
+    request<{ available: boolean; reason: string | null; disks: HostDisk[] }>("/host/disks"),
   allImages: async () => {
     const pools = await request<PoolSummary[]>("/pools");
     const infos = await Promise.all(pools.map((p) => request<PoolInfo>(`/pools/${encodeURIComponent(p.name)}`)));

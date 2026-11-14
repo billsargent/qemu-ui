@@ -10,6 +10,7 @@ mod api_vms;
 mod consoles;
 mod discovery;
 mod guard;
+mod helper_client;
 mod image_ops;
 mod images;
 mod jobs;
@@ -51,6 +52,14 @@ struct Args {
     /// limited to 108 bytes. Defaults to `<data-dir>/r`.
     #[arg(long, env = "QEMU_UI_RUN_DIR")]
     run_dir: Option<PathBuf>,
+
+    /// The privileged helper's socket (default: the platform's standard path).
+    #[arg(long, env = "QEMU_UI_HELPER_SOCKET")]
+    helper_socket: Option<PathBuf>,
+
+    /// File holding the helper's shared secret (Windows helpers require it).
+    #[arg(long, env = "QEMU_UI_HELPER_SECRET")]
+    helper_secret: Option<PathBuf>,
 
     /// Allow URL downloads from private network ranges (RFC 1918, CGNAT,
     /// IPv6 ULA), e.g. a NAS on the LAN. Loopback and link-local addresses
@@ -94,6 +103,16 @@ async fn main() -> Result<()> {
 
     let run_dir = args.run_dir.unwrap_or_else(|| data_dir.join("r"));
     let supervisor = supervisor::Supervisor::new(store, scanner.clone(), &data_dir, run_dir)?;
+    if args.helper_socket.is_some() || args.helper_secret.is_some() {
+        let mut h = helper_client::HelperClient::default_paths();
+        if let Some(s) = args.helper_socket {
+            h.socket = s;
+        }
+        if let Some(s) = args.helper_secret {
+            h.secret_file = Some(s);
+        }
+        supervisor.set_helper(h);
+    }
     // VMs kept running while the daemon was down: find them again.
     supervisor.reattach_all().await;
 

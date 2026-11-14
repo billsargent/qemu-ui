@@ -55,9 +55,10 @@ pub async fn connect_unix(path: &Path) -> io::Result<Box<dyn Stream>> {
     Ok(Box::new(bridge(sock)?))
 }
 
-/// Bridge a blocking socket to an async duplex stream.
+/// Bridge a blocking socket to an async duplex stream (also used by servers
+/// that accept AF_UNIX connections on Windows).
 #[cfg(windows)]
-fn bridge(sock: uds_windows::UnixStream) -> io::Result<tokio::io::DuplexStream> {
+pub fn bridge(sock: uds_windows::UnixStream) -> io::Result<tokio::io::DuplexStream> {
     use std::io::{Read, Write};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

@@ -201,6 +201,7 @@ fn images() -> BTreeMap<ImageRef, ResolvedImage> {
         ResolvedImage {
             path: "/var/lib/qemu-ui/pools/default/debian.qcow2".into(),
             format: "qcow2".into(),
+            nbd: None,
         },
     );
     m.insert(
@@ -211,6 +212,7 @@ fn images() -> BTreeMap<ImageRef, ResolvedImage> {
         ResolvedImage {
             path: "/var/lib/qemu-ui/pools/default/install, disc 1.iso".into(),
             format: "raw".into(),
+            nbd: None,
         },
     );
     m

@@ -59,6 +59,7 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
         .route("/health", get(health))
         .route("/host/capabilities", get(capabilities))
         .route("/host/rescan", post(rescan))
+        .route("/host/disks", get(host_disks))
         .route(
             "/host/binaries/{id}/devices/{device}/properties",
             get(device_properties),
@@ -95,6 +96,16 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
         }),
     };
     router.layer(axum::middleware::from_fn(crate::guard::host_guard))
+}
+
+/// Physical disks the privileged helper can see (M2-11). Without a helper,
+/// `available` is false and `reason` says what to install.
+async fn host_disks(State(app): State<Arc<App>>) -> Json<serde_json::Value> {
+    let helper = app.supervisor.helper();
+    match helper.list_disks().await {
+        Ok(disks) => Json(json!({"available": true, "reason": null, "disks": disks})),
+        Err(e) => Json(json!({"available": false, "reason": format!("{e:#}"), "disks": []})),
+    }
 }
 
 async fn health() -> Json<serde_json::Value> {

@@ -91,6 +91,16 @@ pub struct ResolvedImage {
     pub path: String,
     /// `qcow2`, `raw`, … from `qemu-img info`.
     pub format: String,
+    /// Served over NBD on an AF_UNIX socket instead of opened as a file:
+    /// physical host disks exported by the privileged helper (M2-11).
+    pub nbd: Option<NbdSource>,
+}
+
+/// An NBD export on a local AF_UNIX socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NbdSource {
+    pub socket: String,
+    pub export: String,
 }
 
 /// How a shared folder reaches the guest; chosen by the daemon.
@@ -454,7 +464,15 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
     let mut boot = BTreeMap::new();
     for (i, disk) in spec.disks.iter().enumerate() {
         let f = |s: &str| format!("disks[{i}].{s}");
-        if !valid_image_name(&disk.image.name) {
+        if crate::spec::is_host_disk(&disk.image) {
+            if !crate::spec::valid_host_disk_id(&disk.image.name) {
+                d.push(Diagnostic::error(
+                    f("image"),
+                    "disk.host-disk-id",
+                    "invalid host disk id",
+                ));
+            }
+        } else if !valid_image_name(&disk.image.name) {
             d.push(Diagnostic::error(
                 f("image"),
                 "disk.image-name",
@@ -1256,15 +1274,25 @@ pub fn disk_objects(
         "ignore"
     };
 
-    let mut file = json!({
-        "node-name": file_node,
-        "driver": "file",
-        "filename": img.path,
-        "aio": aio,
-        "cache": {"direct": direct, "no-flush": no_flush},
-        "read-only": readonly,
-    });
-    if !readonly {
+    let mut file = match &img.nbd {
+        // A host disk exported by the helper: QEMU stays unprivileged.
+        Some(n) => json!({
+            "node-name": file_node,
+            "driver": "nbd",
+            "server": {"type": "unix", "path": n.socket},
+            "export": n.export,
+            "read-only": readonly,
+        }),
+        None => json!({
+            "node-name": file_node,
+            "driver": "file",
+            "filename": img.path,
+            "aio": aio,
+            "cache": {"direct": direct, "no-flush": no_flush},
+            "read-only": readonly,
+        }),
+    };
+    if !readonly && img.nbd.is_none() {
         file["discard"] = discard.into();
     }
     let mut format = json!({

@@ -11,6 +11,7 @@ pub mod compile;
 pub mod fetch;
 pub mod firmware;
 pub mod help;
+pub mod helper;
 pub mod lint;
 pub mod parity;
 pub mod snapshot;

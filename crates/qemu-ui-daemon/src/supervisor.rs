@@ -73,6 +73,8 @@ pub struct Supervisor {
     ops: tokio::sync::Mutex<()>,
     /// Dry-lint results by (binary, lint spec) hash.
     lint_cache: Mutex<HashMap<String, LintResult>>,
+    /// The privileged helper, for physical host disks (M2-11).
+    helper: std::sync::RwLock<crate::helper_client::HelperClient>,
     /// Machine buses by (binary sha256, machine), probed lazily (M2-09).
     bus_cache: Mutex<HashMap<(String, String), Option<MachineBuses>>>,
 }
@@ -176,6 +178,7 @@ impl Supervisor {
             live: Mutex::default(),
             ops: tokio::sync::Mutex::new(()),
             lint_cache: Mutex::default(),
+            helper: std::sync::RwLock::new(crate::helper_client::HelperClient::default_paths()),
             bus_cache: Mutex::default(),
         }))
     }
@@ -560,6 +563,17 @@ impl Supervisor {
         let qemu_img = self.qemu_img().await;
         let mut images: BTreeMap<ImageRef, ResolvedImage> = BTreeMap::new();
         for (i, d) in spec.disks.iter().enumerate() {
+            if qemu_ui_core::spec::is_host_disk(&d.image) {
+                let resolved = self.resolve_host_disk(id, i, d, mode).await.map_err(|e| {
+                    fail(
+                        &format!("disks[{i}].image"),
+                        "disk.host-disk",
+                        format!("{e:#}"),
+                    )
+                })?;
+                images.insert(d.image.clone(), resolved);
+                continue;
+            }
             let Ok(path) = self.pools.resolve(&d.image) else {
                 continue;
             }; // compile reports it
@@ -613,6 +627,7 @@ impl Supervisor {
                         ResolvedImage {
                             path: path_str(&blank),
                             format: fmt.into(),
+                            nbd: None,
                         },
                     );
                     continue;
@@ -624,6 +639,7 @@ impl Supervisor {
                 ResolvedImage {
                     path: path_str(&path),
                     format,
+                    nbd: None,
                 },
             );
         }
@@ -1313,6 +1329,7 @@ impl Supervisor {
     /// The run is over: record it and settle the final state.
     fn finish(&self, id: &str, run_id: i64, exit_status: &str, error: Option<&str>) {
         let live = self.live.lock().unwrap().remove(id);
+        self.release_host_disks(id);
         let expected = live
             .as_ref()
             .is_some_and(|l| l.stop_requested || l.shutdown_seen);
@@ -1769,9 +1786,101 @@ fn random_password() -> String {
         .collect()
 }
 
-/// Lifecycle against a real QEMU: create → start → pause → resume →
-/// "daemon restart" (drop the runtime, as a killed daemon would) → reattach
-/// → force-stop → start → external kill → crashed. Skipped without QEMU.
+// ------------------------------------------------------------- host disks
+
+const HOST_EXPORTS_KEY: &str = "host-disk-exports:";
+
+impl Supervisor {
+    /// Use a different helper (tests, or a non-default install).
+    pub fn set_helper(&self, h: crate::helper_client::HelperClient) {
+        *self.helper.write().unwrap() = h;
+    }
+
+    pub fn helper(&self) -> crate::helper_client::HelperClient {
+        self.helper.read().unwrap().clone()
+    }
+
+    /// How a physical host disk reaches QEMU in each build mode. Only an
+    /// actual start asks the helper to export it; the export is recorded so
+    /// that it is released when the run ends, even across daemon restarts.
+    async fn resolve_host_disk(
+        &self,
+        vm_id: &str,
+        i: usize,
+        d: &qemu_ui_core::spec::DiskSpec,
+        mode: &BuildMode,
+    ) -> Result<ResolvedImage> {
+        use qemu_ui_core::compile::NbdSource;
+        let disk_id = &d.image.name;
+        match mode {
+            BuildMode::Preview => Ok(ResolvedImage {
+                path: String::new(),
+                format: "raw".into(),
+                nbd: Some(NbdSource {
+                    socket: "<helper export socket>".into(),
+                    export: disk_id.clone(),
+                }),
+            }),
+            BuildMode::Lint(dir) => {
+                // Never touch the device: a small blank stand-in checks the
+                // device model, like scratch images do for pool disks.
+                let blank = dir.join(format!("disk{i}"));
+                std::fs::File::create(&blank)?.set_len(64 << 20)?;
+                Ok(ResolvedImage {
+                    path: path_str(&blank),
+                    format: "raw".into(),
+                    nbd: None,
+                })
+            }
+            BuildMode::Run => {
+                let writable = !d.readonly && d.media == qemu_ui_core::spec::Media::Disk;
+                let export = self.helper().export(disk_id, writable).await?;
+                let key = format!("{HOST_EXPORTS_KEY}{vm_id}");
+                let mut ids: Vec<String> = self
+                    .store
+                    .get_kv(&key)?
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+                ids.push(export.export_id.clone());
+                self.store.put_kv(&key, &serde_json::to_string(&ids)?)?;
+                Ok(ResolvedImage {
+                    path: String::new(),
+                    format: "raw".into(),
+                    nbd: Some(NbdSource {
+                        socket: export.socket,
+                        export: export.export_name,
+                    }),
+                })
+            }
+        }
+    }
+
+    /// Release a VM's host-disk exports (its run ended or failed to start).
+    fn release_host_disks(&self, vm_id: &str) {
+        let key = format!("{HOST_EXPORTS_KEY}{vm_id}");
+        let ids: Vec<String> = self
+            .store
+            .get_kv(&key)
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        if ids.is_empty() {
+            return;
+        }
+        let _ = self.store.put_kv(&key, "[]");
+        let helper = self.helper();
+        let vm = vm_id.to_string();
+        tokio::spawn(async move {
+            for id in ids {
+                if let Err(e) = helper.unexport(&id).await {
+                    tracing::warn!(vm = %vm, "releasing host disk export {id}: {e:#}");
+                }
+            }
+        });
+    }
+}
+
 /// Helpers shared by tests that need a real QEMU.
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -1918,6 +2027,9 @@ pub(crate) mod test_support {
     }
 }
 
+/// Lifecycle against a real QEMU: create → start → pause → resume →
+/// "daemon restart" (drop the runtime, as a killed daemon would) → reattach
+/// → force-stop → start → external kill → crashed. Skipped without QEMU.
 #[cfg(test)]
 mod lifecycle {
     use super::test_support::*;
@@ -2194,6 +2306,184 @@ mod dry_lint {
                 .filter(|e| e.file_name().to_string_lossy().starts_with("lint-"))
                 .collect();
             assert!(leftovers.is_empty());
+        });
+        drop(rt);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+}
+
+/// Physical host disks end to end (M2-11) against a real QEMU, with a
+/// stand-in helper: it speaks the real protocol and serves a file through a
+/// real qemu-storage-daemon, as the privileged helper does for a device once
+/// its checks pass (those checks are tested in the helper crate).
+#[cfg(test)]
+mod host_disks {
+    use super::test_support::*;
+    use super::*;
+    use qemu_ui_core::helper::{DiskExport, Envelope, Request, Response};
+    use qemu_ui_core::spec::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakeHelper {
+        unexports: Arc<AtomicUsize>,
+    }
+
+    /// Serve the helper protocol on `sock`, exporting `file` on request.
+    fn fake_helper(sock: PathBuf, file: PathBuf, qsd: PathBuf, dir: PathBuf) -> FakeHelper {
+        #[cfg(unix)]
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        #[cfg(windows)]
+        let listener = uds_windows::UnixListener::bind(&sock).unwrap();
+        let unexports = Arc::new(AtomicUsize::new(0));
+        let count = unexports.clone();
+        std::thread::spawn(move || {
+            let mut children: HashMap<String, std::process::Child> = HashMap::new();
+            for conn in listener.incoming() {
+                let Ok(conn) = conn else { continue };
+                let mut w = conn.try_clone().unwrap();
+                for line in BufReader::new(conn).lines() {
+                    let Ok(line) = line else { break };
+                    let env: Envelope<Request> = serde_json::from_str(&line).unwrap();
+                    let body = match env.body {
+                        Request::Hello { version, .. } => Response::Hello { version },
+                        Request::ExportDisk { disk_id, writable } => {
+                            let id = format!("e{}", children.len());
+                            let s = dir.join(format!("{id}.sock"));
+                            let s_str = s.display().to_string().replace('\\', "/");
+                            let bd = serde_json::json!({"node-name": "disk", "driver": "file",
+                                "filename": file.display().to_string(), "read-only": !writable});
+                            let child = std::process::Command::new(&qsd)
+                                .arg("--blockdev")
+                                .arg(bd.to_string())
+                                .arg("--nbd-server")
+                                .arg(format!("addr.type=unix,addr.path={s_str}"))
+                                .arg("--export")
+                                .arg(format!(
+                                    "type=nbd,id={id},node-name=disk,name={id},writable=off"
+                                ))
+                                .stdin(std::process::Stdio::null())
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()
+                                .unwrap();
+                            for _ in 0..100 {
+                                if s.exists() {
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(50));
+                            }
+                            children.insert(id.clone(), child);
+                            Response::Exported {
+                                export: DiskExport {
+                                    export_id: id.clone(),
+                                    disk_id,
+                                    writable,
+                                    socket: s_str,
+                                    export_name: id,
+                                },
+                            }
+                        }
+                        Request::Unexport { export_id } => {
+                            if let Some(mut c) = children.remove(&export_id) {
+                                let _ = c.kill();
+                                let _ = c.wait();
+                            }
+                            count.fetch_add(1, Ordering::SeqCst);
+                            Response::Unexported
+                        }
+                        _ => Response::Error {
+                            message: "not supported by the test helper".into(),
+                        },
+                    };
+                    let mut out = serde_json::to_vec(&Envelope { id: env.id, body }).unwrap();
+                    out.push(b'\n');
+                    if w.write_all(&out).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        FakeHelper { unexports }
+    }
+
+    #[test]
+    fn host_disk_is_exported_attached_over_nbd_and_released() {
+        let (Some(qemu), Some(img), Some(qsd)) = (
+            find("qemu-system-x86_64"),
+            find("qemu-img"),
+            find("qemu-storage-daemon"),
+        ) else {
+            eprintln!("skipping: QEMU tools not found");
+            return;
+        };
+        let data = short_data_dir("hd");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let caps = host_caps(&qemu, &img).await;
+            let sv = make(&data, &caps).await;
+            let id = small_vm(&sv, &caps, "hostdisk").await;
+            let mut spec = sv.detail(&id).ok().unwrap().spec;
+            spec.disks.push(DiskSpec {
+                image: ImageRef { pool: HOST_DISK_POOL.into(), name: "usb-Example_Stick_0001".into() },
+                bus: DiskBus::Virtio,
+                media: Media::Disk,
+                readonly: true,
+                boot_index: None,
+                cache: CacheMode::None,
+                aio: None,
+                discard: false,
+                slot: None,
+            });
+            sv.update(&id, spec).await.map_err(|e| format!("{e:?}")).unwrap();
+
+            // No helper installed: a clear error, and the VM is not left starting.
+            sv.set_helper(crate::helper_client::HelperClient { socket: data.join("none.sock"), secret_file: None });
+            let err = sv.start(&id).await.err().map(|e| format!("{e:?}")).unwrap_or_default();
+            assert!(err.contains("helper is not running"), "{err}");
+            assert_ne!(sv.detail(&id).ok().unwrap().summary.state, VmState::Starting);
+
+            // With a helper: exported, attached over NBD, released on stop.
+            let stick = data.join("stick.raw");
+            std::fs::File::create(&stick).unwrap().set_len(16 << 20).unwrap();
+            let hdir = data.join("h");
+            std::fs::create_dir_all(&hdir).unwrap();
+            let fake = fake_helper(hdir.join("helper.sock"), stick, qsd, hdir.clone());
+            sv.set_helper(crate::helper_client::HelperClient { socket: hdir.join("helper.sock"), secret_file: None });
+
+            let s = sv.start(&id).await.map_err(|e| format!("{e:?}")).unwrap();
+            assert_eq!(s.state, VmState::Running);
+            let qmp = sv.live.lock().unwrap().get(&id).and_then(|l| l.qmp.clone()).unwrap();
+            let nodes = qmp.execute("query-named-block-nodes", None).await.unwrap();
+            let node = nodes.as_array().unwrap().iter().find(|n| n["node-name"] == "qui-disk1-file").cloned();
+            assert_eq!(node.as_ref().map(|n| n["drv"].clone()), Some(serde_json::json!("nbd")), "{nodes}");
+
+            sv.force_stop(&id).await.map_err(|e| format!("{e:?}")).unwrap();
+            wait_state(&sv, &id, VmState::Stopped).await;
+            for _ in 0..50 {
+                if fake.unexports.load(Ordering::SeqCst) > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(fake.unexports.load(Ordering::SeqCst), 1, "the export is released when the run ends");
+
+            // Live hotplug of host disks is refused with a reason.
+            sv.start(&id).await.map_err(|e| format!("{e:?}")).unwrap();
+            let extra = DiskSpec {
+                image: ImageRef { pool: HOST_DISK_POOL.into(), name: "other".into() },
+                bus: DiskBus::Virtio,
+                media: Media::Disk,
+                readonly: true,
+                boot_index: None,
+                cache: CacheMode::None,
+                aio: None,
+                discard: false,
+                slot: None,
+            };
+            assert!(matches!(sv.add_disk(&id, extra).await, Err(OpError::Conflict(m)) if m.contains("stopped")));
+            sv.force_stop(&id).await.map_err(|e| format!("{e:?}")).unwrap();
+            wait_state(&sv, &id, VmState::Stopped).await;
         });
         drop(rt);
         let _ = std::fs::remove_dir_all(&data);
