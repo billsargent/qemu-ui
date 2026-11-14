@@ -113,6 +113,23 @@ pub struct VmDetail {
     pub spec: VmSpec,
     /// argv of the current/last run, for the "changed since last start" diff.
     pub last_run_args: Option<Vec<String>>,
+    /// The configuration the running process has, including disks
+    /// hot-(un)plugged since it started. `None` while stopped.
+    #[serde(default)]
+    pub live_spec: Option<VmSpec>,
+}
+
+/// Result of a disk change on a VM (add, remove, change media).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
+pub struct DiskChange {
+    /// The change was applied to the running VM (not only saved).
+    pub live: bool,
+    /// Removal is waiting for the guest to release the device (PCI
+    /// hot-unplug needs guest cooperation); it completes on its own.
+    pub pending: bool,
+    pub message: String,
+    pub vm: VmDetail,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]

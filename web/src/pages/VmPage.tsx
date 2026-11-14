@@ -1,3 +1,4 @@
+import { DisksCard } from "../components/DisksCard";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../api/client";
@@ -106,6 +107,9 @@ function Overview({ d }: { d: VmDetail }) {
           <dd className="font-mono">{spec.display.device ?? "none"}</dd>
         </dl>
       </Card>
+      <div className="lg:col-span-2">
+        <DisksCard vm={d} />
+      </div>
       <Card title="Storage and network">
         <ul className="space-y-1 text-sm">
           {spec.disks.map((x, i) => (

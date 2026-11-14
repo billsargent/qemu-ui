@@ -116,6 +116,7 @@ mod tests {
             cache: CacheMode::None,
             aio: None,
             discard: true,
+            slot: None,
         }
     }
 

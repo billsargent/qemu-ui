@@ -54,7 +54,7 @@ export function useLiveInvalidation() {
           }
           return;
         }
-        if (["state", "created", "updated", "deleted", "started", "exited", "reattached"].includes(ev.kind)) {
+        if (["state", "created", "updated", "deleted", "started", "exited", "reattached", "disk-added", "disk-removed", "media-changed"].includes(ev.kind)) {
           qc.invalidateQueries({ queryKey: ["vms"] });
           qc.invalidateQueries({ queryKey: ["vm", ev.vm_id] });
         }

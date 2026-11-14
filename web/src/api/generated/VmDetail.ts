@@ -6,4 +6,9 @@ export type VmDetail = { summary: VmSummary, spec: VmSpec,
 /**
  * argv of the current/last run, for the "changed since last start" diff.
  */
-last_run_args: Array<string> | null, };
+last_run_args: Array<string> | null, 
+/**
+ * The configuration the running process has, including disks
+ * hot-(un)plugged since it started. `None` while stopped.
+ */
+live_spec: VmSpec | null, };

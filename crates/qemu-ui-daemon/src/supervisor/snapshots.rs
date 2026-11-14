@@ -140,7 +140,7 @@ impl Supervisor {
                 kind: "image".into(),
                 pool: spec.disks[i].image.pool.clone(),
                 name: spec.disks[i].image.name.clone(),
-                node: format!("qui-disk{i}"),
+                node: qemu_ui_core::spec::disk_node(spec, i),
             })
             .collect();
         if matches!(spec.firmware, FirmwareSpec::Descriptor { .. })
@@ -457,7 +457,11 @@ fn check_disks_match(disks: &[SnapshotDisk], spec: &VmSpec) -> std::result::Resu
             }
             continue;
         }
-        let idx: Option<usize> = d.node.strip_prefix("qui-disk").and_then(|n| n.parse().ok());
+        let idx: Option<usize> = d
+            .node
+            .strip_prefix("qui-disk")
+            .and_then(|n| n.parse().ok())
+            .and_then(|n| qemu_ui_core::spec::disk_position(spec, n));
         let same = idx
             .and_then(|i| spec.disks.get(i))
             .is_some_and(|x| x.image.pool == d.pool && x.image.name == d.name);
@@ -532,6 +536,7 @@ mod tests {
             cache: CacheMode::None,
             aio: None,
             discard: true,
+            slot: None,
         };
         let spec = VmSpec {
             spec_version: SPEC_VERSION,
@@ -815,6 +820,7 @@ mod real {
                 cache: CacheMode::None,
                 aio: None,
                 discard: true,
+                slot: None,
             });
             sv.update(&id, spec)
                 .await
