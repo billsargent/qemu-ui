@@ -14,12 +14,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
+use qemu_ui_core::buses::MachineBuses;
 use qemu_ui_core::caps::BinaryCaps;
 use qemu_ui_core::compile::{
     self, Compiled, Diagnostic, ResolvedFirmware, ResolvedImage, RunPaths, Severity, VncListen,
 };
 use qemu_ui_core::lint::{self, LintResult};
-use qemu_ui_core::spec::{FirmwareSpec, ImageRef, Media, VmSpec, valid_name};
+use qemu_ui_core::spec::{FirmwareSpec, ImageRef, Media, VmSpec, disk_node, valid_name};
 use qemu_ui_core::vm::{VmDetail, VmEvent, VmState, VmSummary, mac_from_bytes, state_from_qmp};
 use qemu_ui_qmp::{Qmp, transport};
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,7 @@ use crate::procs::{self, ProcId};
 use crate::scan::Scanner;
 use crate::store::{NewRun, RunRow, Store};
 
+mod disks;
 mod snapshots;
 
 const QMP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -59,6 +61,10 @@ pub struct Supervisor {
     pub scanner: Arc<Scanner>,
     pub pools: Arc<Pools>,
     pub jobs: Arc<crate::jobs::Jobs>,
+    /// Registered share roots for shared folders (M2-13).
+    pub shares: crate::shares::ShareRoots,
+    /// `virtiofsd`, when installed: writable shares then use virtiofs.
+    pub virtiofsd: Option<PathBuf>,
     data_dir: PathBuf,
     run_root: PathBuf,
     events: broadcast::Sender<VmEvent>,
@@ -67,6 +73,8 @@ pub struct Supervisor {
     ops: tokio::sync::Mutex<()>,
     /// Dry-lint results by (binary, lint spec) hash.
     lint_cache: Mutex<HashMap<String, LintResult>>,
+    /// Machine buses by (binary sha256, machine), probed lazily (M2-09).
+    bus_cache: Mutex<HashMap<(String, String), Option<MachineBuses>>>,
 }
 
 /// How `clone_vm` copies writable disks.
@@ -148,6 +156,17 @@ impl Supervisor {
         let jobs = crate::jobs::Jobs::new(store.clone(), events.clone(), data_dir.join("jobs"))?;
         Ok(Arc::new(Supervisor {
             pools: Arc::new(Pools::new(data_dir, store.clone())?),
+            shares: crate::shares::ShareRoots::new(store.clone()),
+            virtiofsd: {
+                let v = crate::shares::find_virtiofsd();
+                if let Some(p) = &v {
+                    tracing::info!(
+                        "virtiofsd found at {}; writable shares use virtiofs",
+                        p.display()
+                    );
+                }
+                v
+            },
             jobs,
             store,
             scanner,
@@ -157,6 +176,7 @@ impl Supervisor {
             live: Mutex::default(),
             ops: tokio::sync::Mutex::new(()),
             lint_cache: Mutex::default(),
+            bus_cache: Mutex::default(),
         }))
     }
 
@@ -194,7 +214,7 @@ impl Supervisor {
             for (i, d) in spec.disks.iter().enumerate() {
                 if &d.image == image {
                     let ro = d.readonly || d.media == qemu_ui_core::spec::Media::Cdrom;
-                    out.push((row.name.clone(), qmp.clone(), format!("qui-disk{i}"), ro));
+                    out.push((row.name.clone(), qmp.clone(), disk_node(&spec, i), ro));
                 }
             }
         }
@@ -342,14 +362,19 @@ impl Supervisor {
     pub fn detail(&self, id: &str) -> OpResult<VmDetail> {
         let row = self.store.get_vm(id)?.ok_or(OpError::NotFound)?;
         let spec = serde_json::from_str(&row.spec_json).map_err(|e| OpError::Failed(e.into()))?;
-        let last_run_args = self
-            .store
-            .last_run(id)?
+        let last = self.store.last_run(id)?;
+        let last_run_args = last
+            .as_ref()
             .and_then(|r| serde_json::from_str::<Vec<String>>(&r.args_json).ok());
+        let live_spec = last
+            .as_ref()
+            .filter(|r| r.ended_at.is_none())
+            .and_then(|r| serde_json::from_str(&r.spec_json).ok());
         Ok(VmDetail {
             summary: self.summary(&row),
             spec,
             last_run_args,
+            live_spec,
         })
     }
 
@@ -392,6 +417,37 @@ impl Supervisor {
         Ok((spec, caps))
     }
 
+    /// The buses `machine` provides on this binary, probed once and cached.
+    /// `None` when the probe fails (unknown: buses are then not checked).
+    pub async fn machine_buses(&self, caps: &BinaryCaps, machine: &str) -> Option<MachineBuses> {
+        let key = (caps.binary.sha256.clone(), machine.to_string());
+        if let Some(hit) = self.bus_cache.lock().unwrap().get(&key) {
+            return hit.clone();
+        }
+        let probed = crate::probe::machine_buses(Path::new(&caps.binary.path), machine)
+            .await
+            .map_err(|e| tracing::warn!(machine, "probing buses: {e:#}"))
+            .ok()
+            .map(|buses| MachineBuses {
+                machine: machine.to_string(),
+                buses,
+            });
+        self.bus_cache.lock().unwrap().insert(key, probed.clone());
+        probed
+    }
+
+    /// Disk buses that cannot exist on the spec's machine are errors.
+    async fn check_buses(&self, spec: &VmSpec, caps: &BinaryCaps) -> OpResult<()> {
+        let Some(m) = self.machine_buses(caps, &spec.machine.type_name).await else {
+            return Ok(());
+        };
+        let diags = compile::validate_buses(spec, caps, &m);
+        if diags.iter().any(|d| d.severity == Severity::Error) {
+            return Err(OpError::Invalid(diags));
+        }
+        Ok(())
+    }
+
     fn check(spec: &VmSpec, caps: &BinaryCaps) -> OpResult<Vec<Diagnostic>> {
         let diags = compile::validate(spec, caps);
         if diags.iter().any(|d| d.severity == Severity::Error) {
@@ -404,6 +460,7 @@ impl Supervisor {
         let _g = self.ops.lock().await;
         let (spec, caps) = self.normalise(spec).await?;
         Self::check(&spec, &caps)?;
+        self.check_buses(&spec, &caps).await?;
         if self.store.vm_name_taken(&spec.name, None)? {
             return Err(OpError::Conflict(format!(
                 "a VM named '{}' already exists",
@@ -428,6 +485,7 @@ impl Supervisor {
         self.store.get_vm(id)?.ok_or(OpError::NotFound)?;
         let (spec, caps) = self.normalise(spec).await?;
         Self::check(&spec, &caps)?;
+        self.check_buses(&spec, &caps).await?;
         if self.store.vm_name_taken(&spec.name, Some(id))? {
             return Err(OpError::Conflict(format!(
                 "a VM named '{}' already exists",
@@ -696,8 +754,10 @@ impl Supervisor {
             Some(VncInfo::Unix { path }) => VncListen::Unix(path.clone()),
             None => VncListen::Unix(String::new()),
         };
+        let machine = self.machine_buses(caps, &spec.machine.type_name).await;
         let ctx = compile::Context {
             caps,
+            machine: machine.as_ref(),
             os: std::env::consts::OS,
             run: RunPaths {
                 qmp: s("qmp.sock"),
@@ -709,8 +769,148 @@ impl Supervisor {
             },
             images: &images,
             firmware,
+            shares: self.resolve_shares(spec, caps, &dir, scratch.is_some())?,
         };
         compile::compile(spec, &ctx).map(|c| (c, vnc))
+    }
+
+    /// Resolve each share to a confined host folder and pick its backend:
+    /// virtiofs for writable shares when `virtiofsd` is installed and the
+    /// binary supports it, else 9p. "Check config" always uses 9p (no
+    /// sidecar runs during a lint). When this QEMU has no folder sharing at
+    /// all, placeholders are returned and the compiler reports why.
+    fn resolve_shares(
+        &self,
+        spec: &VmSpec,
+        caps: &BinaryCaps,
+        run_dir: &Path,
+        lint: bool,
+    ) -> Result<Vec<compile::ResolvedShare>, Vec<Diagnostic>> {
+        let ninep = compile::ninep_device(caps).is_some();
+        let virtiofs = !lint && self.virtiofsd.is_some() && compile::virtiofs_supported(caps);
+        let mut out = Vec::new();
+        let mut errors = Vec::new();
+        for (i, share) in spec.shares.iter().enumerate() {
+            if !ninep && !virtiofs {
+                out.push(compile::ResolvedShare {
+                    path: String::new(),
+                    backend: compile::ShareBackend::NineP,
+                });
+                continue;
+            }
+            let path = match self.shares.resolve(&share.root, &share.path) {
+                Ok(p) => path_str(&p),
+                Err(e) => {
+                    errors.push(Diagnostic {
+                        severity: Severity::Error,
+                        field: format!("shares[{i}]"),
+                        rule: "share.unresolved".into(),
+                        message: format!("{e:#}"),
+                    });
+                    continue;
+                }
+            };
+            // Read-only is enforced by 9p (`readonly=on`); virtiofs is used
+            // for writable shares only.
+            let backend = if virtiofs && !share.readonly {
+                compile::ShareBackend::VirtioFs {
+                    socket: path_str(&run_dir.join(format!("vfs{i}.sock"))),
+                }
+            } else if ninep {
+                compile::ShareBackend::NineP
+            } else {
+                errors.push(Diagnostic {
+                    severity: Severity::Error,
+                    field: format!("shares[{i}].readonly"),
+                    rule: "share.readonly-needs-9p".into(),
+                    message: "this QEMU has no virtio-9p, and read-only shares need it".into(),
+                });
+                continue;
+            };
+            out.push(compile::ResolvedShare { path, backend });
+        }
+        if errors.is_empty() {
+            Ok(out)
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Start one `virtiofsd` per virtiofs share and wait for its socket.
+    /// The sidecars are detached like QEMU: they survive a daemon restart and
+    /// exit by themselves when QEMU disconnects; `finish` also terminates any
+    /// that are left once the run is over.
+    async fn start_sidecars(
+        &self,
+        spec: &VmSpec,
+        caps: &BinaryCaps,
+        run_dir: &Path,
+        logs: &Path,
+    ) -> Result<Vec<ProcId>> {
+        let shares = self
+            .resolve_shares(spec, caps, run_dir, false)
+            .map_err(|d| {
+                anyhow!(
+                    "{}",
+                    d.iter()
+                        .map(|x| x.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            })?;
+        let mut started = Vec::new();
+        for (i, r) in shares.iter().enumerate() {
+            let compile::ShareBackend::VirtioFs { socket } = &r.backend else {
+                continue;
+            };
+            let Some(bin) = &self.virtiofsd else {
+                bail!("virtiofsd is not installed")
+            };
+            let args: Vec<String> = vec![
+                format!("--socket-path={socket}"),
+                format!("--shared-dir={}", r.path),
+                // Unprivileged daemon: no namespace/chroot sandbox available.
+                "--sandbox=none".into(),
+                "--cache=auto".into(),
+            ];
+            let log = logs.join(format!("run-{}.virtiofsd{i}.log", now()));
+            let (child, id) = match procs::spawn_detached(&path_str(bin), &args, &log) {
+                Ok(x) => x,
+                Err(e) => {
+                    for p in &started {
+                        procs::terminate(*p, true);
+                    }
+                    return Err(e);
+                }
+            };
+            std::thread::spawn(move || {
+                let mut child = child;
+                let _ = child.wait();
+            });
+            started.push(id);
+            let sock = PathBuf::from(socket);
+            let mut ready = false;
+            for _ in 0..100 {
+                if sock.exists() {
+                    ready = true;
+                    break;
+                }
+                if !procs::alive(id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if !ready {
+                for p in &started {
+                    procs::terminate(*p, true);
+                }
+                bail!(
+                    "virtiofsd for share {i} did not start: {}",
+                    procs::log_tail(&log, 5)
+                );
+            }
+        }
+        Ok(started)
     }
 
     /// Compile without side effects, for the live argv drawer.
@@ -872,10 +1072,20 @@ impl Supervisor {
         self.set_state(id, VmState::Starting, None, None);
         tracing::info!(vm = %row.name, "starting: {}", compile::display_command(&compiled.program, &compiled.args));
 
+        let sidecars = match self.start_sidecars(&spec, &caps, &run_dir, &logs).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_state(id, VmState::Crashed, None, Some(&format!("{e:#}")));
+                return Err(OpError::Failed(e));
+            }
+        };
         let (child, proc_id) = match procs::spawn_detached(&compiled.program, &compiled.args, &log)
         {
             Ok(x) => x,
             Err(e) => {
+                for p in &sidecars {
+                    procs::terminate(*p, true);
+                }
                 self.set_state(id, VmState::Crashed, None, Some(&format!("{e:#}")));
                 return Err(OpError::Failed(e));
             }
@@ -906,6 +1116,11 @@ impl Supervisor {
                 shutdown_seen: false,
             },
         );
+        for p in &sidecars {
+            let _ = self
+                .store
+                .insert_sidecar(run_id, "virtiofsd", p.pid, p.start_time);
+        }
         // The run is recorded: image operations now see this VM as a user.
         drop(start_locks);
 
@@ -1058,6 +1273,10 @@ impl Supervisor {
     }
 
     async fn on_event(&self, id: &str, qmp: &Qmp, kind: String, data: Value) {
+        if kind == "DEVICE_DELETED" {
+            // A disk unplug the guest acknowledged late: free its nodes.
+            self.disk_device_deleted(qmp, &data).await;
+        }
         self.emit(id, &kind, data);
         match kind.as_str() {
             "SHUTDOWN" => {
@@ -1098,6 +1317,16 @@ impl Supervisor {
             .as_ref()
             .is_some_and(|l| l.stop_requested || l.shutdown_seen);
         let _ = self.store.end_run(run_id, now(), exit_status);
+        // Helpers (virtiofsd) normally exit with QEMU; make sure.
+        for (_, pid, start) in self.store.sidecars(run_id).unwrap_or_default() {
+            let p = ProcId {
+                pid,
+                start_time: start,
+            };
+            if procs::alive(p) {
+                procs::terminate(p, true);
+            }
+        }
         let _ = std::fs::remove_dir_all(self.run_dir(id));
         if expected && error.is_none() {
             self.set_state(id, VmState::Stopped, None, None);
@@ -1128,7 +1357,8 @@ impl Supervisor {
             .and_then(|l| l.qmp.clone())
     }
 
-    /// The running VM (id) and disk index that have this image open.
+    /// The running VM (id) and disk node index (`qui-disk<N>`) that have
+    /// this image open.
     pub fn find_open_disk(&self, r: &ImageRef) -> Option<(String, usize)> {
         self.store.list_vms().ok()?.into_iter().find_map(|row| {
             let run = self
@@ -1139,7 +1369,7 @@ impl Supervisor {
                 .filter(|r| r.ended_at.is_none())?;
             let spec: VmSpec = serde_json::from_str(&run.spec_json).ok()?;
             let i = spec.disks.iter().position(|d| &d.image == r)?;
-            Some((row.id, i))
+            Some((row.id, spec.disks[i].node_index(i)))
         })
     }
 
@@ -1618,6 +1848,28 @@ pub(crate) mod test_support {
         );
     }
 
+    /// Kills every QEMU the test's store still records as running when it
+    /// is dropped, including during a panic. VMs are spawned detached, so
+    /// without this a failing assertion leaves them running.
+    pub struct KillVmsOnDrop(pub PathBuf);
+
+    impl Drop for KillVmsOnDrop {
+        fn drop(&mut self) {
+            let Ok(store) = Store::open(&self.0.join("t.db")) else {
+                return;
+            };
+            for run in store.open_runs().unwrap_or_default() {
+                procs::terminate(
+                    ProcId {
+                        pid: run.pid,
+                        start_time: run.proc_start,
+                    },
+                    true,
+                );
+            }
+        }
+    }
+
     /// A short data dir (unix socket paths are limited to 108 bytes).
     pub fn short_data_dir(tag: &str) -> PathBuf {
         let base = if cfg!(windows) {
@@ -1655,6 +1907,7 @@ pub(crate) mod test_support {
             cache: CacheMode::None,
             aio: None,
             discard: true,
+            slot: None,
         });
         sv.create(spec)
             .await
@@ -1719,6 +1972,7 @@ mod lifecycle {
                 cache: CacheMode::Writeback,
                 aio: None,
                 discard: true,
+                slot: None,
             });
             let vm = sv.create(spec).await.map_err(|e| format!("{e:?}")).unwrap();
             let id = vm.summary.id.clone();

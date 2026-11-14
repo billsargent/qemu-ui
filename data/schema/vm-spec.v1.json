@@ -132,6 +132,15 @@
         "readonly": {
           "default": false,
           "type": "boolean"
+        },
+        "slot": {
+          "description": "Index used in this disk's QEMU ids (`qui-disk<N>`, `qui-dev<N>`).\nAbsent: the disk's position in `disks`. Hotplug pins it so a disk\nkeeps its ids when others are added or removed while the VM runs\n(and across restarts). Must be unique within a spec.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -341,6 +350,34 @@
       ],
       "type": "object"
     },
+    "ShareSpec": {
+      "description": "A host folder shared into the guest (M2-13).\n\nLike images, shares never hold host paths: they name a registered\n*share root* and a folder relative to it, which the daemon canonicalises\nand confines to that root. The guest mounts the share by its tag:\n`mount -t 9p -o trans=virtio <tag> /mnt` or `mount -t virtiofs <tag> /mnt`.",
+      "properties": {
+        "path": {
+          "default": "",
+          "description": "Folder inside the root, `/`-separated; empty for the root itself.",
+          "type": "string"
+        },
+        "readonly": {
+          "default": false,
+          "description": "The guest cannot write. Read-only shares always use 9p.",
+          "type": "boolean"
+        },
+        "root": {
+          "description": "Name of a registered share root.",
+          "type": "string"
+        },
+        "tag": {
+          "description": "Mount tag the guest uses (letters, digits, `-`, `_`; up to 31).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "tag"
+      ],
+      "type": "object"
+    },
     "Topology": {
       "properties": {
         "cores": {
@@ -363,6 +400,50 @@
         "sockets",
         "cores",
         "threads"
+      ],
+      "type": "object"
+    },
+    "UsbPassthrough": {
+      "description": "A host USB device to pass through, matched the way QEMU's `usb-host`\nmatches: by vendor and product, optionally narrowed to a bus and port so\ntwo identical devices can be told apart. The guest sees the device\nwhenever it is plugged in; QEMU waits for it otherwise.",
+      "properties": {
+        "host_bus": {
+          "default": null,
+          "description": "Linux bus number (`hostbus`); not available on Windows hosts.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "host_port": {
+          "default": null,
+          "description": "Linux port path such as `1.2` (`hostport`); stable per physical port.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "default": null,
+          "description": "Display name remembered from the host (e.g. \"Logitech USB Receiver\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "product_id": {
+          "description": "4 hex digits, e.g. `c52b`.",
+          "type": "string"
+        },
+        "vendor_id": {
+          "description": "4 hex digits, e.g. `046d`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vendor_id",
+        "product_id"
       ],
       "type": "object"
     }
@@ -434,10 +515,26 @@
       },
       "type": "array"
     },
+    "shares": {
+      "default": [],
+      "description": "Host folders shared into the guest (Linux hosts; plan.md §9.6).",
+      "items": {
+        "$ref": "#/$defs/ShareSpec"
+      },
+      "type": "array"
+    },
     "spec_version": {
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
+    },
+    "usb": {
+      "default": [],
+      "description": "Host USB devices passed through to the guest (M2-12).",
+      "items": {
+        "$ref": "#/$defs/UsbPassthrough"
+      },
+      "type": "array"
     }
   },
   "required": [

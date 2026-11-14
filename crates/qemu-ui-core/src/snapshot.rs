@@ -116,6 +116,7 @@ mod tests {
             cache: CacheMode::None,
             aio: None,
             discard: true,
+            slot: None,
         }
     }
 
@@ -140,7 +141,9 @@ mod tests {
             disks,
             nics: vec![],
             display: DisplaySpec::default(),
+            shares: vec![],
             input: InputSpec::default(),
+            usb: vec![],
             passthrough: vec![],
         }
     }

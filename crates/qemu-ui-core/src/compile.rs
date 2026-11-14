@@ -16,10 +16,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use ts_rs::TS;
 
+use crate::buses::{MachineBuses, SPARE_ROOT_PORTS};
 use crate::caps::BinaryCaps;
 use crate::spec::{
     CacheMode, DiskBus, DiskSpec, FirmwareSpec, ImageRef, Media, NicBackend, VmSpec,
-    valid_image_name, valid_mac, valid_name,
+    valid_image_name, valid_mac, valid_name, valid_share_path, valid_share_tag,
 };
 
 /// Prefix reserved for ids we generate.
@@ -92,6 +93,24 @@ pub struct ResolvedImage {
     pub format: String,
 }
 
+/// How a shared folder reaches the guest; chosen by the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShareBackend {
+    /// virtio-9p: built into QEMU, works everywhere QEMU has fsdev support.
+    NineP,
+    /// virtiofs: faster, needs a `virtiofsd` sidecar listening on `socket`
+    /// and the guest RAM in shared memory.
+    VirtioFs { socket: String },
+}
+
+/// A share after the daemon resolved its root and folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedShare {
+    /// Canonical host folder, confined to its share root.
+    pub path: String,
+    pub backend: ShareBackend,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedFirmware {
     pub code: String,
@@ -112,6 +131,12 @@ pub struct Context<'a> {
     pub images: &'a BTreeMap<ImageRef, ResolvedImage>,
     /// Required when the spec uses `FirmwareSpec::Descriptor`.
     pub firmware: Option<ResolvedFirmware>,
+    /// One per `spec.shares`, in order.
+    pub shares: Vec<ResolvedShare>,
+    /// The machine's buses, from introspection (M2-09). When known, disk
+    /// buses are validated against it and, on PCIe machines, PCI disks are
+    /// placed behind root ports so they can be hot-(un)plugged.
+    pub machine: Option<&'a MachineBuses>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +196,65 @@ pub fn resolve_accel(spec: &VmSpec, caps: &BinaryCaps) -> Result<String, Diagnos
             format!("this QEMU does not support accelerator '{}'", spec.accel),
         )),
     }
+}
+
+/// The virtio-9p device this binary offers, if folder sharing via 9p works.
+/// Absent on Windows builds ("fsdev support is disabled").
+pub fn ninep_device(caps: &BinaryCaps) -> Option<&'static str> {
+    ["virtio-9p-pci", "virtio-9p-device"]
+        .into_iter()
+        .find(|d| has_device(caps, d))
+}
+
+/// Can this binary attach a virtiofs share (given a `virtiofsd`)?
+pub fn virtiofs_supported(caps: &BinaryCaps) -> bool {
+    has_device(caps, "vhost-user-fs-pci") && caps.backends.has_object("memory-backend-memfd")
+}
+
+fn validate_shares(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
+    let mut d = Vec::new();
+    let supported = ninep_device(caps).is_some() || virtiofs_supported(caps);
+    let mut tags = BTreeMap::new();
+    for (i, s) in spec.shares.iter().enumerate() {
+        let f = |x: &str| format!("shares[{i}].{x}");
+        if !supported {
+            d.push(Diagnostic::error(
+                format!("shares[{i}]"),
+                "share.unsupported",
+                "this QEMU has no folder sharing (no virtio-9p device). QEMU on Windows hosts cannot \
+                 share host folders at all (platform support: folder sharing); use an SMB share or \
+                 SFTP inside the guest instead",
+            ));
+        }
+        if !crate::storage::valid_pool_name(&s.root) {
+            d.push(Diagnostic::error(
+                f("root"),
+                "share.root-invalid",
+                "choose a registered share root",
+            ));
+        }
+        if !valid_share_path(&s.path) {
+            d.push(Diagnostic::error(
+                f("path"),
+                "share.path-invalid",
+                "use a folder inside the root, like 'projects/web' (no '..', no absolute paths)",
+            ));
+        }
+        if !valid_share_tag(&s.tag) {
+            d.push(Diagnostic::error(
+                f("tag"),
+                "share.tag-invalid",
+                "mount tags use 1-31 letters, digits, '-' or '_', starting with a letter or digit",
+            ));
+        } else if let Some(prev) = tags.insert(s.tag.clone(), i) {
+            d.push(Diagnostic::error(
+                f("tag"),
+                "share.tag-duplicate",
+                format!("tag '{}' is also used by share {prev}", s.tag),
+            ));
+        }
+    }
+    d
 }
 
 fn has_device(caps: &BinaryCaps, name: &str) -> bool {
@@ -425,6 +509,17 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
         }
     }
 
+    let mut indices = BTreeMap::new();
+    for (i, disk) in spec.disks.iter().enumerate() {
+        if let Some(prev) = indices.insert(disk.node_index(i), i) {
+            d.push(Diagnostic::error(
+                format!("disks[{i}].slot"),
+                "disk.slot-duplicate",
+                format!("disk {i} uses the same QEMU id index as disk {prev}"),
+            ));
+        }
+    }
+
     // NICs
     for (i, nic) in spec.nics.iter().enumerate() {
         let f = |s: &str| format!("nics[{i}].{s}");
@@ -533,6 +628,7 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
             "firmware descriptor id is empty",
         ));
     }
+    d.extend(validate_shares(spec, caps));
     if spec
         .machine
         .props
@@ -546,8 +642,130 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
         ));
     }
 
+    d.extend(validate_usb(spec, caps));
     d.extend(validate_passthrough(&spec.passthrough));
     d
+}
+
+/// USB passthrough rules (M2-12).
+fn validate_usb(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
+    use crate::usb::{normalize_id, valid_port};
+    let mut d = Vec::new();
+    if spec.usb.is_empty() {
+        return d;
+    }
+    if !(has_device(caps, "usb-host") && has_device(caps, "qemu-xhci")) {
+        d.push(Diagnostic::error(
+            "usb",
+            "usb.host-missing",
+            "this QEMU was built without usb-host (libusb), so host USB devices cannot be passed through",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for (i, u) in spec.usb.iter().enumerate() {
+        let f = |s: &str| format!("usb[{i}].{s}");
+        if normalize_id(&u.vendor_id).is_none() {
+            d.push(Diagnostic::error(
+                f("vendor_id"),
+                "usb.id-invalid",
+                "vendor id must be 4 hex digits",
+            ));
+        }
+        if normalize_id(&u.product_id).is_none() {
+            d.push(Diagnostic::error(
+                f("product_id"),
+                "usb.id-invalid",
+                "product id must be 4 hex digits",
+            ));
+        }
+        if let Some(p) = &u.host_port
+            && !valid_port(p)
+        {
+            d.push(Diagnostic::error(
+                f("host_port"),
+                "usb.port-invalid",
+                "port must look like 1 or 1.2.3",
+            ));
+        }
+        let key = (
+            u.vendor_id.to_ascii_lowercase(),
+            u.product_id.to_ascii_lowercase(),
+            u.host_bus,
+            u.host_port.clone(),
+        );
+        if !seen.insert(key) {
+            d.push(Diagnostic::warning(
+                f("vendor_id"),
+                "usb.duplicate",
+                "the same device is listed twice; only one VM-side device can hold it",
+            ));
+        }
+    }
+    d
+}
+
+/// The `-device` JSON for USB passthrough rule `i` (also used for hotplug).
+pub fn usb_host_device(spec: &VmSpec, i: usize) -> Value {
+    let u = &spec.usb[i];
+    let hex = |s: &str| u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(0);
+    let mut dev = json!({
+        "driver": "usb-host",
+        "id": crate::usb::device_id(&spec.usb, i),
+        "bus": "qui-usb.0",
+        "vendorid": hex(&u.vendor_id),
+        "productid": hex(&u.product_id),
+    });
+    if let Some(b) = u.host_bus {
+        dev["hostbus"] = b.into();
+    }
+    if let Some(p) = &u.host_port {
+        dev["hostport"] = p.as_str().into();
+    }
+    dev
+}
+
+/// Check disk buses against what the machine actually provides (M2-09).
+pub fn validate_buses(spec: &VmSpec, caps: &BinaryCaps, machine: &MachineBuses) -> Vec<Diagnostic> {
+    let mut d = Vec::new();
+    for (i, disk) in spec.disks.iter().enumerate() {
+        let s = machine.support(caps, disk.bus);
+        if !s.available {
+            d.push(Diagnostic::error(
+                format!("disks[{i}].bus"),
+                "disk.bus-unavailable",
+                s.reason
+                    .unwrap_or_else(|| "this bus is not available on this machine".into()),
+            ));
+        }
+    }
+    d
+}
+
+/// Whether a disk on `bus` is a PCI device of its own (and so goes behind a
+/// PCIe root port on PCIe machines).
+pub fn is_pci_disk(bus: DiskBus) -> bool {
+    matches!(bus, DiskBus::Virtio | DiskBus::Nvme)
+}
+
+/// Root ports to create: one per PCI disk plus spares for hotplug, when the
+/// machine's PCI root is PCIe and this QEMU has `pcie-root-port`.
+pub fn root_port_count(spec: &VmSpec, caps: &BinaryCaps, machine: Option<&MachineBuses>) -> usize {
+    let Some(m) = machine else { return 0 };
+    if !m.pcie_root() || !caps.devices.iter().any(|x| x.name == "pcie-root-port") {
+        return 0;
+    }
+    spec.disks.iter().filter(|d| is_pci_disk(d.bus)).count() + SPARE_ROOT_PORTS
+}
+
+/// The `-device` JSON for root port `k` on root bus `root`.
+pub fn root_port_device(k: usize, root: &str) -> Value {
+    json!({
+        "driver": "pcie-root-port",
+        "id": format!("qui-rp{k}"),
+        "bus": root,
+        "chassis": k + 1,
+        "port": 16 + k,
+    })
 }
 
 fn validate_passthrough(tokens: &[String]) -> Vec<Diagnostic> {
@@ -642,6 +860,22 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
             ));
         }
     }
+    if ctx.shares.len() != spec.shares.len() {
+        diags.push(Diagnostic::error(
+            "shares",
+            "share.unresolved",
+            "shared folders could not be resolved",
+        ));
+    }
+    for (i, r) in ctx.shares.iter().enumerate() {
+        if matches!(r.backend, ShareBackend::VirtioFs { .. }) && !virtiofs_supported(caps) {
+            diags.push(Diagnostic::error(
+                format!("shares[{i}]"),
+                "share.virtiofs-unsupported",
+                "this QEMU cannot attach virtiofs shares",
+            ));
+        }
+    }
     if matches!(spec.firmware, FirmwareSpec::Descriptor { .. }) && ctx.firmware.is_none() {
         diags.push(Diagnostic::error(
             "firmware",
@@ -681,6 +915,9 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
                 "aio=native needs direct I/O, which this host does not support",
             ));
         }
+    }
+    if let Some(m) = ctx.machine {
+        diags.extend(validate_buses(spec, caps, m));
     }
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(diags);
@@ -786,7 +1023,7 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
 
     // Controllers needed by disks and input
     let buses: BTreeSet<DiskBus> = spec.disks.iter().map(|d| d.bus).collect();
-    let need_usb = spec.input.usb_tablet || buses.contains(&DiskBus::Usb);
+    let need_usb = spec.input.usb_tablet || buses.contains(&DiskBus::Usb) || !spec.usb.is_empty();
     if need_usb {
         push(
             &mut a,
@@ -802,10 +1039,31 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
         );
     }
 
+    // PCIe root ports: one per PCI disk, plus spares for hotplug.
+    let ports = root_port_count(spec, caps, ctx.machine);
+    if ports > 0 {
+        let root = ctx
+            .machine
+            .and_then(|m| m.pci_root())
+            .map(|b| b.name.clone())
+            .unwrap_or_default();
+        for k in 0..ports {
+            push(&mut a, "-device", json_arg(root_port_device(k, &root)));
+        }
+    }
+
     // Disks
+    let mut next_port = 0;
     for (i, disk) in spec.disks.iter().enumerate() {
         let img = &ctx.images[&disk.image];
-        a.extend(disk_args(i, disk, img, ctx.os));
+        let (file, format, mut dev) = disk_objects(disk.node_index(i), disk, img, ctx.os);
+        if ports > 0 && is_pci_disk(disk.bus) {
+            dev["bus"] = format!("qui-rp{next_port}").into();
+            next_port += 1;
+        }
+        for (opt, v) in [("-blockdev", file), ("-blockdev", format), ("-device", dev)] {
+            push(&mut a, opt, v.to_string());
+        }
     }
 
     // NICs
@@ -841,6 +1099,9 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
             json_arg(json!({"driver": "usb-tablet", "id": "qui-tablet", "bus": "qui-usb.0"})),
         );
     }
+    for i in 0..spec.usb.len() {
+        push(&mut a, "-device", json_arg(usb_host_device(spec, i)));
+    }
     if spec.display.vdagent {
         push(
             &mut a,
@@ -860,6 +1121,64 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
             ),
         );
     }
+    // Shared folders
+    let mut shared_memory = false;
+    for (i, (share, r)) in spec.shares.iter().zip(&ctx.shares).enumerate() {
+        match &r.backend {
+            ShareBackend::NineP => {
+                let dev = ninep_device(caps).expect("validated");
+                let mut fsdev = format!(
+                    "local,id=qui-fs{i},path={},security_model=mapped-xattr",
+                    kv(&r.path)
+                );
+                if share.readonly {
+                    fsdev.push_str(",readonly=on");
+                }
+                push(&mut a, "-fsdev", fsdev);
+                push(
+                    &mut a,
+                    "-device",
+                    json_arg(json!({
+                        "driver": dev,
+                        "id": format!("qui-share{i}"),
+                        "fsdev": format!("qui-fs{i}"),
+                        "mount_tag": share.tag,
+                    })),
+                );
+            }
+            ShareBackend::VirtioFs { socket } => {
+                shared_memory = true;
+                push(
+                    &mut a,
+                    "-chardev",
+                    format!("socket,id=qui-vfs{i},path={}", kv(socket)),
+                );
+                push(
+                    &mut a,
+                    "-device",
+                    json_arg(json!({
+                        "driver": "vhost-user-fs-pci",
+                        "id": format!("qui-share{i}"),
+                        "chardev": format!("qui-vfs{i}"),
+                        "tag": share.tag,
+                    })),
+                );
+            }
+        }
+    }
+    if shared_memory {
+        // vhost-user devices need the guest RAM in shared memory.
+        push(
+            &mut a,
+            "-object",
+            format!(
+                "memory-backend-memfd,id=qui-mem,size={}M,share=on",
+                spec.memory.size_mib
+            ),
+        );
+        push(&mut a, "-numa", "node,memdev=qui-mem".into());
+    }
+
     // Never open a local window (Windows builds default to SDL/GTK).
     push(&mut a, "-display", "none".into());
     if spec.display.vnc {
@@ -914,7 +1233,16 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
     })
 }
 
-fn disk_args(i: usize, disk: &DiskSpec, img: &ResolvedImage, os: &str) -> Vec<String> {
+/// The protocol node, format node and device for disk index `i` (its
+/// `node_index`): the same JSON serves `-blockdev`/`-device` on the command
+/// line and `blockdev-add`/`device_add` for hotplug. The caller sets the
+/// device's `bus` when it must go behind a root port.
+pub fn disk_objects(
+    i: usize,
+    disk: &DiskSpec,
+    img: &ResolvedImage,
+    os: &str,
+) -> (Value, Value, Value) {
     let (direct, no_flush, write_cache) = cache_flags(effective_cache(disk.cache, os));
     let readonly = disk.readonly || disk.media == Media::Cdrom;
     // `threads` works everywhere; io_uring/native are opt-in until the probe
@@ -967,14 +1295,7 @@ fn disk_args(i: usize, disk: &DiskSpec, img: &ResolvedImage, os: &str) -> Vec<St
     if let Some(b) = disk.boot_index {
         dev["bootindex"] = b.into();
     }
-    vec![
-        "-blockdev".into(),
-        file.to_string(),
-        "-blockdev".into(),
-        format.to_string(),
-        "-device".into(),
-        dev.to_string(),
-    ]
+    (file, format, dev)
 }
 
 /// Render argv for display/copying, quoting for a POSIX shell. Never executed.

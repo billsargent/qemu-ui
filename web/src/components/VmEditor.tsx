@@ -11,6 +11,7 @@ import type { Firmware } from "../api/generated/Firmware";
 import type { LintResult } from "../api/generated/LintResult";
 import type { Media } from "../api/generated/Media";
 import type { NicSpec } from "../api/generated/NicSpec";
+import type { ShareSpec } from "../api/generated/ShareSpec";
 import type { VmSpec } from "../api/generated/VmSpec";
 import { Badge, Button, Card, Field, inputCls } from "./ui";
 
@@ -78,6 +79,22 @@ const BUS_LABEL: Record<DiskBus, string> = {
   ide: "IDE / SATA (works with any installer)",
   usb: "USB storage",
 };
+// Trade-offs shown under the Bus and Cache fields (M2-09).
+const BUS_HINT: Record<DiskBus, string> = {
+  virtio: "Fastest. Linux has drivers built in; Windows needs the virtio-win drivers during setup.",
+  scsi: "virtio-scsi: many disks, discard/TRIM, CD-ROMs, hotplug. Needs virtio drivers on Windows.",
+  nvme: "Fast and natively supported by modern OSes; one controller per disk.",
+  ide: "IDE/SATA works with every installer, but is slow and cannot be hotplugged.",
+  usb: "USB storage: removable, hotpluggable, slow. Handy for small images.",
+};
+const CACHE_HINT: Record<CacheMode, string> = {
+  none: "Bypasses the host page cache (best default). Windows hosts cannot do direct I/O and use writeback.",
+  writeback: "Uses the host cache; fast, and safe as long as the guest flushes.",
+  writethrough: "Every write reaches the disk before it completes; safe but slow.",
+  directsync: "Direct I/O plus synchronous writes; safest, slowest.",
+  unsafe: "Ignores flushes. Only for throwaway VMs: a host crash can corrupt the image.",
+};
+
 const CACHE_LABEL: Record<CacheMode, string> = {
   none: "none (direct I/O)",
   writeback: "writeback",
@@ -114,6 +131,14 @@ export function VmEditor({
   const caps = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
   const pool = useQuery({ queryKey: ["images", "all"], queryFn: api.allImages });
   const bin: BinaryCaps | undefined = caps.data?.caps?.binaries.find((b) => b.arch === spec.arch);
+  // Which disk buses this machine actually has (from QEMU introspection).
+  const busSupport = useQuery({
+    queryKey: ["buses", spec.arch, spec.machine.type],
+    queryFn: () => api.diskBuses(spec.arch, spec.machine.type),
+    enabled: !!spec.machine.type,
+    staleTime: Infinity,
+  });
+  const busInfo = (b: DiskBus) => busSupport.data?.find((s) => s.bus === b);
 
   // Live argv (M1-14): compile on every change, debounced.
   const debounced = useDebounced(spec, 300);
@@ -366,13 +391,21 @@ export function VmEditor({
                       <option value="cdrom">CD-ROM</option>
                     </select>
                   </Field>
-                  <Field label="Bus">
+                  <Field
+                    label="Bus"
+                    hint={busInfo(d.bus)?.available === false ? busInfo(d.bus)?.reason : BUS_HINT[d.bus]}
+                  >
                     <select className={inputCls} value={d.bus} onChange={(e) => updateDisk(i, { bus: e.target.value as DiskBus })}>
-                      {(Object.keys(BUS_LABEL) as DiskBus[]).map((b) => (
-                        <option key={b} value={b}>
-                          {BUS_LABEL[b]}
-                        </option>
-                      ))}
+                      {(Object.keys(BUS_LABEL) as DiskBus[]).map((b) => {
+                        const s = busInfo(b);
+                        const unavailable = s?.available === false;
+                        return (
+                          <option key={b} value={b} disabled={unavailable && b !== d.bus} title={unavailable ? (s?.reason ?? "") : BUS_HINT[b]}>
+                            {BUS_LABEL[b]}
+                            {unavailable ? " — not on this machine" : ""}
+                          </option>
+                        );
+                      })}
                     </select>
                   </Field>
                   <Field label="Boot order">
@@ -385,13 +418,29 @@ export function VmEditor({
                       onChange={(e) => updateDisk(i, { boot_index: e.target.value === "" ? null : Number(e.target.value) })}
                     />
                   </Field>
-                  <Field label="Cache">
+                  <Field label="Cache" hint={CACHE_HINT[d.cache]}>
                     <select className={inputCls} value={d.cache} onChange={(e) => updateDisk(i, { cache: e.target.value as CacheMode })}>
                       {(Object.keys(CACHE_LABEL) as CacheMode[]).map((c) => (
                         <option key={c} value={c}>
                           {CACHE_LABEL[c]}
                         </option>
                       ))}
+                    </select>
+                  </Field>
+                  <Field
+                    label="I/O mode"
+                    hint={
+                      d.aio === "io_uring"
+                        ? "Linux 5.1+ hosts with a QEMU built with io_uring; Check with QEMU confirms."
+                        : d.aio === "native"
+                          ? "Linux AIO; needs cache none or directsync (direct I/O)."
+                          : "Thread pool: works on every host."
+                    }
+                  >
+                    <select className={inputCls} value={d.aio ?? ""} onChange={(e) => updateDisk(i, { aio: e.target.value || null })}>
+                      <option value="">threads (default)</option>
+                      <option value="native">native (Linux)</option>
+                      <option value="io_uring">io_uring (Linux)</option>
                     </select>
                   </Field>
                   <label className="flex items-end gap-2 pb-1 text-xs">
@@ -536,6 +585,13 @@ export function VmEditor({
           <Diags list={[...diagsFor("display"), ...diagsFor("input")]} />
         </Card>
 
+        <SharesCard
+          shares={spec.shares}
+          onChange={(shares) => set({ shares })}
+          diagsFor={(i) => diagsFor(`shares[${i}]`)}
+          other={diagsFor("shares").filter((d) => d.field === "shares")}
+        />
+
         <Card title="Extra QEMU options (passthrough)">
           <p className="mb-2 text-xs text-zinc-500">
             One argv token per line, appended verbatim after the generated options. Options the editor manages are refused.
@@ -678,5 +734,94 @@ function ArgvDrawer({
         </p>
       </Card>
     </div>
+  );
+}
+
+/** Host folders shared into the guest (M2-13). Linux hosts only. */
+function SharesCard({
+  shares,
+  onChange,
+  diagsFor,
+  other,
+}: {
+  shares: ShareSpec[];
+  onChange: (s: ShareSpec[]) => void;
+  diagsFor: (i: number) => Diagnostic[];
+  other: Diagnostic[];
+}) {
+  const info = useQuery({ queryKey: ["shares"], queryFn: api.shares });
+  const roots = info.data?.roots ?? [];
+  const update = (i: number, patch: Partial<ShareSpec>) => onChange(shares.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  const supported = info.data?.supported ?? true;
+  return (
+    <Card
+      title="Shared folders"
+      actions={
+        supported && (
+          <Button
+            variant="ghost"
+            disabled={!roots.length}
+            title={roots.length ? undefined : "Register a share root on the Storage page first"}
+            onClick={() =>
+              onChange([...shares, { root: roots[0]?.name ?? "", path: "", tag: `share${shares.length}`, readonly: false }])
+            }
+          >
+            Add folder
+          </Button>
+        )
+      }
+    >
+      {!supported ? (
+        <p className="text-sm text-zinc-500">{info.data?.reason}</p>
+      ) : shares.length === 0 ? (
+        <p className="text-sm text-zinc-500">
+          No shared folders.{" "}
+          {roots.length ? "" : "Register a folder as a share root on the Storage page to share it with VMs."}
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {shares.map((s, i) => (
+            <div key={i} className="rounded border border-zinc-200 p-2 dark:border-zinc-800">
+              <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                <Field label="Share root">
+                  <select className={inputCls} value={s.root} onChange={(e) => update(i, { root: e.target.value })}>
+                    {!roots.some((r) => r.name === s.root) && <option value={s.root}>{s.root || "— choose —"}</option>}
+                    {roots.map((r) => (
+                      <option key={r.name} value={r.name} title={r.path}>
+                        {r.name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Folder inside it">
+                  <input className={`${inputCls} font-mono`} value={s.path} placeholder="(the whole root)" onChange={(e) => update(i, { path: e.target.value })} />
+                </Field>
+                <Field label="Mount tag">
+                  <input className={`${inputCls} font-mono`} value={s.tag} onChange={(e) => update(i, { tag: e.target.value })} />
+                </Field>
+                <label className="flex items-end gap-2 pb-1 text-xs">
+                  <input type="checkbox" checked={s.readonly} onChange={(e) => update(i, { readonly: e.target.checked })} />
+                  Read-only
+                </label>
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <code className="text-xs text-zinc-500">
+                  {s.readonly || !info.data?.virtiofs
+                    ? `mount -t 9p -o trans=virtio,version=9p2000.L ${s.tag} /mnt`
+                    : `mount -t virtiofs ${s.tag} /mnt`}
+                </code>
+                <span className="ml-auto">
+                  <Button variant="ghost" onClick={() => onChange(shares.filter((_, j) => j !== i))}>
+                    Remove
+                  </Button>
+                </span>
+              </div>
+              <Diags list={diagsFor(i)} />
+            </div>
+          ))}
+        </div>
+      )}
+      <Diags list={other} />
+    </Card>
   );
 }

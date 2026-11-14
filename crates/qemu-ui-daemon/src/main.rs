@@ -1,6 +1,8 @@
 //! qemu-uid: the qemu-ui daemon (plan.md §3).
 
 mod api;
+mod api_disks;
+mod api_fetch;
 mod api_snapshots;
 mod api_storage;
 mod api_upload;
@@ -14,8 +16,10 @@ mod jobs;
 mod probe;
 mod procs;
 mod scan;
+mod shares;
 mod store;
 mod supervisor;
+mod usb;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -47,6 +51,12 @@ struct Args {
     /// limited to 108 bytes. Defaults to `<data-dir>/r`.
     #[arg(long, env = "QEMU_UI_RUN_DIR")]
     run_dir: Option<PathBuf>,
+
+    /// Allow URL downloads from private network ranges (RFC 1918, CGNAT,
+    /// IPv6 ULA), e.g. a NAS on the LAN. Loopback and link-local addresses
+    /// (including cloud metadata) stay refused.
+    #[arg(long, env = "QEMU_UI_ALLOW_PRIVATE_FETCH")]
+    allow_private_fetch: bool,
 
     /// Re-probe every binary at startup even if a cached snapshot exists.
     #[arg(long)]
@@ -91,6 +101,7 @@ async fn main() -> Result<()> {
         let d = std::env::current_dir().ok()?.join("web").join("dist");
         d.is_dir().then_some(d)
     });
+    api_fetch::set_allow_private(args.allow_private_fetch);
     let token = guard::load_or_create_token(&data_dir)?;
     let app = api::router(api::App::new(scanner, supervisor, token), web_dir);
 

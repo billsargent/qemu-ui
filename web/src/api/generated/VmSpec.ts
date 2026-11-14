@@ -7,6 +7,8 @@ import type { InputSpec } from "./InputSpec";
 import type { MachineSpec } from "./MachineSpec";
 import type { MemorySpec } from "./MemorySpec";
 import type { NicSpec } from "./NicSpec";
+import type { ShareSpec } from "./ShareSpec";
+import type { UsbPassthrough } from "./UsbPassthrough";
 
 export type VmSpec = { spec_version: number, 
 /**
@@ -25,6 +27,14 @@ machine: MachineSpec,
  * `auto`, or an accelerator name (`kvm`, `whpx`, `hvf`, `tcg`).
  */
 accel: string, cpu: CpuSpec, memory: MemorySpec, firmware: FirmwareSpec, disks: Array<DiskSpec>, nics: Array<NicSpec>, display: DisplaySpec, input: InputSpec, 
+/**
+ * Host folders shared into the guest (Linux hosts; plan.md §9.6).
+ */
+shares: Array<ShareSpec>, 
+/**
+ * Host USB devices passed through to the guest (M2-12).
+ */
+usb: Array<UsbPassthrough>, 
 /**
  * Raw argv tokens appended after generated options (§5.3).
  */

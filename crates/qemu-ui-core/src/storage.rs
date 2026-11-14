@@ -163,6 +163,29 @@ pub struct Job {
     pub cancellable: bool,
 }
 
+/// A registered share root: a host folder VMs may share subfolders of.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
+pub struct ShareRoot {
+    pub name: String,
+    /// Canonical host folder.
+    pub path: String,
+}
+
+/// `GET /shares`: share roots plus what this host supports.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
+pub struct SharesInfo {
+    pub roots: Vec<ShareRoot>,
+    /// Folder sharing can work on this host (per VM it still depends on the
+    /// QEMU binary; the editor's diagnostics say so).
+    pub supported: bool,
+    /// Why not, when `supported` is false.
+    pub reason: Option<String>,
+    /// A `virtiofsd` was found: writable shares use virtiofs, else 9p.
+    pub virtiofs: bool,
+}
+
 /// Parse a `qemu-img … -p` progress update such as `    (12.34/100%)`.
 /// The tool redraws the line with `\r`; pass any fragment.
 pub fn parse_qemu_img_progress(s: &str) -> Option<f64> {

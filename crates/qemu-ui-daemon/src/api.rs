@@ -64,10 +64,14 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
             get(device_properties),
         )
         .merge(crate::api_vms::routes())
+        .merge(crate::shares::routes())
         .merge(crate::api_storage::routes())
+        .merge(crate::api_fetch::routes())
         .merge(crate::image_ops::routes())
         .merge(crate::api_snapshots::routes())
+        .merge(crate::usb::routes())
         .merge(crate::api_upload::routes())
+        .merge(crate::api_disks::routes())
         .merge(crate::consoles::routes())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "no such endpoint".into()) })
         .layer(axum::middleware::from_fn_with_state(

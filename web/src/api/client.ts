@@ -3,6 +3,9 @@
 import type { CapabilitiesResponse } from "./generated/CapabilitiesResponse";
 import type { CompileResponse } from "./generated/CompileResponse";
 import type { DeviceProperty } from "./generated/DeviceProperty";
+import type { DiskBusSupport } from "./generated/DiskBusSupport";
+import type { DiskChange } from "./generated/DiskChange";
+import type { DiskSpec } from "./generated/DiskSpec";
 import type { LintResult } from "./generated/LintResult";
 import type { Diagnostic } from "./generated/Diagnostic";
 import type { CheckResult } from "./generated/CheckResult";
@@ -11,9 +14,13 @@ import type { Job } from "./generated/Job";
 import type { MeasureResult } from "./generated/MeasureResult";
 import type { PoolInfo } from "./generated/PoolInfo";
 import type { PoolSummary } from "./generated/PoolSummary";
+import type { HostUsb } from "./generated/HostUsb";
 import type { UploadProgress } from "./generated/UploadProgress";
+import type { UsbPassthrough } from "./generated/UsbPassthrough";
 import type { UploadSession } from "./generated/UploadSession";
 import type { ScanStatus } from "./generated/ScanStatus";
+import type { ShareRoot } from "./generated/ShareRoot";
+import type { SharesInfo } from "./generated/SharesInfo";
 import type { SnapshotList } from "./generated/SnapshotList";
 import type { VmDetail } from "./generated/VmDetail";
 import type { VmEvent } from "./generated/VmEvent";
@@ -85,12 +92,28 @@ export const api = {
     ),
   compile: (spec: VmSpec, vmId?: string) => post<CompileResponse>("/vms/compile", { spec, vm_id: vmId }),
   lint: (spec: VmSpec, vmId?: string) => post<LintResult>("/vms/lint", { spec, vm_id: vmId }),
+  /** Disk-bus support for a machine; `null` when it could not be probed. */
+  diskBuses: (arch: string, machine: string) =>
+    request<DiskBusSupport[] | null>(
+      `/host/buses?arch=${encodeURIComponent(arch)}&machine=${encodeURIComponent(machine)}`,
+    ),
+  /** Add a disk; hotplugged when the VM runs. */
+  addDisk: (id: string, disk: DiskSpec) => post<DiskChange>(`/vms/${id}/disks`, { disk }),
+  /** Remove disk `n` (its `qui-disk<n>` index); hot-unplugged when running. */
+  removeDisk: (id: string, n: number, force = false) =>
+    request<DiskChange>(`/vms/${id}/disks/${n}?force=${force}`, { method: "DELETE" }),
+  changeMedia: (id: string, n: number, pool: string, name: string) =>
+    post<DiskChange>(`/vms/${id}/disks/${n}/media`, { image: { pool, name } }),
   serialLog: async (id: string) => {
     const res = await fetch(`/api/v1/vms/${id}/serial-log`);
     return res.ok ? res.text() : "";
   },
   consoleTicket: (id: string, kind: "vnc" | "serial") => post<ConsoleTicket>(`/vms/${id}/consoles/${kind}/ticket`),
 
+  shares: () => request<SharesInfo>("/shares"),
+  addShareRoot: (name: string, path: string) => post<ShareRoot>("/shares/roots", { name, path }),
+  removeShareRoot: (name: string) =>
+    request<void>(`/shares/roots/${encodeURIComponent(name)}`, { method: "DELETE" }),
   pools: () => request<PoolSummary[]>("/pools"),
   addPool: (name: string, path: string, quotaBytes: number | null) =>
     post<void>("/pools", { name, path, quota_bytes: quotaBytes }),
@@ -149,6 +172,9 @@ export const api = {
     post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/commit`),
   cloneVm: (id: string, name: string, mode: "linked" | "full", pool: string) =>
     post<{ vm: VmDetail | null; job: Job | null }>(`/vms/${id}/clone`, { name, mode, pool }),
+  hostUsb: () => request<HostUsb>("/host/usb"),
+  attachUsb: (id: string, rule: UsbPassthrough) => post<VmDetail>(`/vms/${id}/usb`, rule),
+  detachUsb: (id: string, index: number) => request<VmDetail>(`/vms/${id}/usb/${index}`, { method: "DELETE" }),
   uploads: () => request<UploadSession[]>("/uploads"),
   createUpload: (pool: string, name: string, sizeBytes: number, clientKey: string) =>
     post<UploadSession>("/uploads", { pool, name, size_bytes: sizeBytes, client_key: clientKey }),
@@ -172,6 +198,9 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, body.error ?? res.statusText);
     return body as UploadProgress;
   },
+
+  fetchUrl: (pool: string, url: string, name?: string, sha256?: string) =>
+    post<Job>(`/pools/${encodeURIComponent(pool)}/fetch`, { url, name, sha256 }),
 
   jobs: () => request<Job[]>("/jobs"),
   cancelJob: (id: string) => post<void>(`/jobs/${id}/cancel`),

@@ -434,6 +434,24 @@ Windows hosts `aio=threads`. Warn on `cache=unsafe`. Hotplug via `blockdev-add` 
 - Better defaults for "attach a physical thing": USB passthrough (`usb-host`, hotplug,
   remembered per VM) and folder sharing (virtiofs via `virtiofsd` or 9p on Linux hosts).
 
+### 9.7 Shared folders (M2-13)
+- **Path-free like images.** A spec share names a registered *share root* plus a folder
+  relative to it and a mount tag; the daemon canonicalises and confines the folder to the
+  root. Share roots may not overlap storage pools (in either direction), so a guest can never
+  write VM disks through a share.
+- **Backends.** 9p (`-fsdev local,…,security_model=mapped-xattr` + `virtio-9p-pci`) is the
+  default and enforces read-only shares. virtiofs is used for writable shares when a
+  `virtiofsd` is installed and the binary has `vhost-user-fs-pci` + `memory-backend-memfd`;
+  the guest RAM then moves to a shared memfd backend (`-numa node,memdev=…`). "Check config"
+  always lints with 9p, since no sidecar runs during a lint.
+- **virtiofsd sidecar.** One per virtiofs share, started before QEMU (detached, logged,
+  `--sandbox=none` because the daemon is unprivileged), recorded per run with pid + start
+  time. It exits on its own when QEMU disconnects, so it survives a daemon restart exactly as
+  long as its VM; when a run ends the daemon also terminates any sidecar still alive.
+- **Windows hosts.** The upstream Windows build has no fsdev/9p support at all ("fsdev
+  support is disabled"); registering roots is refused and a spec with shares fails validation
+  with `share.unsupported`, citing the parity ledger.
+
 ---
 
 ## 10. Networking
