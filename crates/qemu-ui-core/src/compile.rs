@@ -19,7 +19,7 @@ use ts_rs::TS;
 use crate::buses::{MachineBuses, SPARE_ROOT_PORTS};
 use crate::caps::BinaryCaps;
 use crate::spec::{
-    CacheMode, DiskBus, DiskSpec, FirmwareSpec, ImageRef, Media, NicBackend, VmSpec,
+    CacheMode, DiskBus, DiskSpec, FirmwareSpec, ImageRef, Media, NicBackend, PortForward, VmSpec,
     valid_image_name, valid_mac, valid_name, valid_share_path, valid_share_tag,
 };
 
@@ -596,6 +596,7 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
             }
         }
     }
+    d.extend(validate_forward_duplicates(spec));
 
     // Display / input
     if let Some(dev) = &spec.display.device
@@ -1091,7 +1092,7 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
         if !forwards.is_empty() {
             netdev["hostfwd"] = forwards
                 .iter()
-                .map(|f| json!({"str": format!("{}:{}:{}-:{}", f.proto, f.host_addr, f.host_port, f.guest_port)}))
+                .map(|f| json!({"str": hostfwd_rule(f)}))
                 .collect();
         }
         push(&mut a, "-netdev", json_arg(netdev));
@@ -1343,4 +1344,122 @@ pub fn display_command(program: &str, args: &[String]) -> String {
         .map(quote)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+// ---------------------------------------------------------- port forwards
+
+/// A slirp `hostfwd` rule, as `-netdev user,hostfwd=` and HMP `hostfwd_add`
+/// take it: `tcp:127.0.0.1:2222-:22`.
+pub fn hostfwd_rule(f: &PortForward) -> String {
+    format!(
+        "{}:{}:{}-:{}",
+        f.proto, f.host_addr, f.host_port, f.guest_port
+    )
+}
+
+/// The host side of a forward, as HMP `hostfwd_remove` takes it.
+pub fn hostfwd_host(f: &PortForward) -> String {
+    format!("{}:{}:{}", f.proto, f.host_addr, f.host_port)
+}
+
+/// Do two forwards claim the same host socket? A wildcard address overlaps
+/// every address.
+pub fn forwards_overlap(a: &PortForward, b: &PortForward) -> bool {
+    if a.proto != b.proto || a.host_port != b.host_port {
+        return false;
+    }
+    match (
+        a.host_addr.parse::<std::net::IpAddr>(),
+        b.host_addr.parse::<std::net::IpAddr>(),
+    ) {
+        (Ok(x), Ok(y)) => x == y || x.is_unspecified() || y.is_unspecified(),
+        _ => a.host_addr == b.host_addr,
+    }
+}
+
+/// The same host port claimed twice within one VM (across all its NICs).
+fn validate_forward_duplicates(spec: &VmSpec) -> Vec<Diagnostic> {
+    let all: Vec<(String, &PortForward)> = spec
+        .nics
+        .iter()
+        .enumerate()
+        .flat_map(|(i, nic)| {
+            let NicBackend::User { forwards } = &nic.backend;
+            forwards
+                .iter()
+                .enumerate()
+                .map(move |(j, f)| (format!("nics[{i}].backend.forwards[{j}]"), f))
+        })
+        .collect();
+    let mut d = Vec::new();
+    for (k, (field, f)) in all.iter().enumerate() {
+        if let Some((other, _)) = all[..k].iter().find(|(_, g)| forwards_overlap(f, g)) {
+            d.push(Diagnostic::error(
+                field,
+                "forward.duplicate",
+                format!(
+                    "host {} port {} is already forwarded by {other}",
+                    f.proto, f.host_port
+                ),
+            ));
+        }
+    }
+    d
+}
+
+#[cfg(test)]
+mod forward_tests {
+    use super::*;
+
+    fn fw(proto: &str, addr: &str, port: u16) -> PortForward {
+        PortForward {
+            proto: proto.into(),
+            host_addr: addr.into(),
+            host_port: port,
+            guest_port: 22,
+        }
+    }
+
+    #[test]
+    fn rules_match_slirp_syntax() {
+        let f = fw("tcp", "127.0.0.1", 2222);
+        assert_eq!(hostfwd_rule(&f), "tcp:127.0.0.1:2222-:22");
+        assert_eq!(hostfwd_host(&f), "tcp:127.0.0.1:2222");
+    }
+
+    #[test]
+    fn overlap_rules() {
+        let a = fw("tcp", "127.0.0.1", 2222);
+        assert!(forwards_overlap(&a, &fw("tcp", "127.0.0.1", 2222)));
+        assert!(forwards_overlap(&a, &fw("tcp", "0.0.0.0", 2222)), "wildcard");
+        assert!(!forwards_overlap(&a, &fw("udp", "127.0.0.1", 2222)), "protocol");
+        assert!(!forwards_overlap(&a, &fw("tcp", "127.0.0.2", 2222)), "address");
+        assert!(!forwards_overlap(&a, &fw("tcp", "127.0.0.1", 2223)), "port");
+    }
+
+    #[test]
+    fn duplicates_across_nics_are_errors() {
+        // JSON keeps the test independent of fields other work adds.
+        let nic = |fs: serde_json::Value| {
+            serde_json::json!({"backend": {"kind": "user", "forwards": fs},
+                "model": "e1000", "mac": "52:54:00:00:00:01"})
+        };
+        let f = |proto: &str, addr: &str| {
+            serde_json::json!({"proto": proto, "host_addr": addr, "host_port": 2222, "guest_port": 22})
+        };
+        let spec: VmSpec = serde_json::from_value(serde_json::json!({
+            "spec_version": crate::spec::SPEC_VERSION, "name": "t", "arch": "x86_64",
+            "machine": {"type": "pc"}, "cpu": {"count": 1}, "memory": {"size_mib": 128},
+            "nics": [
+                nic(serde_json::json!([f("tcp", "127.0.0.1"), f("udp", "127.0.0.1")])),
+                nic(serde_json::json!([f("tcp", "0.0.0.0")])),
+            ],
+        }))
+        .unwrap();
+        let d = validate_forward_duplicates(&spec);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].rule, "forward.duplicate");
+        assert_eq!(d[0].field, "nics[1].backend.forwards[0]");
+        assert!(d[0].message.contains("nics[0].backend.forwards[0]"));
+    }
 }

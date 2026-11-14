@@ -33,6 +33,7 @@ use crate::scan::Scanner;
 use crate::store::{NewRun, RunRow, Store};
 
 mod disks;
+mod forwards;
 mod snapshots;
 
 const QMP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -941,7 +942,8 @@ impl Supervisor {
             .await
         {
             Ok((c, _)) => {
-                let w = c.warnings.clone();
+                let mut w = c.warnings.clone();
+                w.extend(self.forward_conflicts(id, &spec));
                 Ok((c, w))
             }
             Err(d) => Err(OpError::Invalid(d)),
@@ -954,6 +956,8 @@ impl Supervisor {
     pub async fn lint(&self, id: Option<&str>, spec: VmSpec) -> OpResult<LintResult> {
         let began = std::time::Instant::now();
         let (spec, caps) = self.normalise(spec).await?;
+        // Depends on other VMs, so it is never cached.
+        let conflicts = self.forward_conflicts(id, &spec);
         let lspec = lint::lint_spec(&spec);
         let key = {
             use sha2::{Digest, Sha256};
@@ -964,6 +968,7 @@ impl Supervisor {
         };
         if let Some(mut hit) = self.lint_cache.lock().unwrap().get(&key).cloned() {
             hit.cached = true;
+            hit.diagnostics.extend(conflicts);
             return Ok(hit);
         }
 
@@ -986,6 +991,8 @@ impl Supervisor {
             cache.clear();
         }
         cache.insert(key, res.clone());
+        let mut res = res;
+        res.diagnostics.extend(conflicts);
         Ok(res)
     }
 

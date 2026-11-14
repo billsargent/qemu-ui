@@ -100,7 +100,7 @@ async fn free_root_port(qmp: &Qmp) -> Result<Option<String>> {
 
 impl Supervisor {
     /// The active run of a VM, if any.
-    fn active_run(&self, id: &str) -> Option<RunRow> {
+    pub(super) fn active_run(&self, id: &str) -> Option<RunRow> {
         self.store
             .last_run(id)
             .ok()
