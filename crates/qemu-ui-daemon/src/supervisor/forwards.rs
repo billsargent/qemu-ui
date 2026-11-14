@@ -300,16 +300,36 @@ mod rules {
             net("nat", NetworkConfig::Nat { subnet: None }),
             net("passt", NetworkConfig::Passt { mtu: None }),
             net("iso", NetworkConfig::Isolated {}),
+            net("host-only", NetworkConfig::HostOnly {}),
         ];
+        // Bridged and Tap carry host-specific settings; build them from JSON.
+        let nets: Vec<Network> = nets
+            .into_iter()
+            .chain([
+                net(
+                    "bridged",
+                    serde_json::from_value(json!({"kind": "bridged", "bridge": "br0"})).unwrap(),
+                ),
+                net(
+                    "tap",
+                    serde_json::from_value(json!({"kind": "tap", "adapter": "TAP0"})).unwrap(),
+                ),
+            ])
+            .collect();
         let on = |n: &str| spec_on(json!({"kind": "network", "network": n}));
         assert!(live_forwardable(&spec_on(json!({"kind": "user"})), 0, &nets).is_ok());
         assert!(live_forwardable(&on("nat"), 0, &nets).is_ok());
         let passt = format!("{:?}", live_forwardable(&on("passt"), 0, &nets));
         assert!(passt.contains("restart the VM to apply"), "{passt}");
-        assert!(matches!(
-            live_forwardable(&on("iso"), 0, &nets),
-            Err(OpError::Conflict(_))
-        ));
+        for kind in ["iso", "bridged", "host-only", "tap"] {
+            assert!(
+                matches!(
+                    live_forwardable(&on(kind), 0, &nets),
+                    Err(OpError::Conflict(_))
+                ),
+                "{kind} has no forwards"
+            );
+        }
         assert!(matches!(
             live_forwardable(&on("gone"), 0, &nets),
             Err(OpError::Conflict(_))
