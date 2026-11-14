@@ -11,9 +11,11 @@ import type { Firmware } from "../api/generated/Firmware";
 import type { LintResult } from "../api/generated/LintResult";
 import type { Media } from "../api/generated/Media";
 import type { NicSpec } from "../api/generated/NicSpec";
+import type { PortForward } from "../api/generated/PortForward";
 import type { ShareSpec } from "../api/generated/ShareSpec";
 import type { VmSpec } from "../api/generated/VmSpec";
 import { Badge, Button, Card, Field, inputCls } from "./ui";
+import { kindLabel } from "../pages/NetworksPage";
 
 // ---------------------------------------------------------------- helpers
 
@@ -131,6 +133,7 @@ export function VmEditor({
   const caps = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
   const pool = useQuery({ queryKey: ["images", "all"], queryFn: api.allImages });
   const hostDisks = useQuery({ queryKey: ["host-disks"], queryFn: api.hostDisks, staleTime: 30_000 });
+  const networks = useQuery({ queryKey: ["networks"], queryFn: api.networks });
   const bin: BinaryCaps | undefined = caps.data?.caps?.binaries.find((b) => b.arch === spec.arch);
   // Which disk buses this machine actually has (from QEMU introspection).
   const busSupport = useQuery({
@@ -193,6 +196,8 @@ export function VmEditor({
     set({ disks: spec.disks.map((d, j) => (j === i ? { ...d, ...patch } : d)) });
   const updateNic = (i: number, patch: Partial<NicSpec>) =>
     set({ nics: spec.nics.map((n, j) => (j === i ? { ...n, ...patch } : n)) });
+  const setForwards = (i: number, forwards: PortForward[]) =>
+    updateNic(i, { backend: { ...spec.nics[i].backend, forwards } });
 
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,30rem)]">
@@ -510,8 +515,41 @@ export function VmEditor({
                     ))}
                   </select>
                 </Field>
-                <Field label="Backend" hint="NAT (slirp). More network types arrive in M3.">
-                  <input className={inputCls} value="NAT" disabled />
+                <Field
+                  label="Network"
+                  hint={
+                    n.backend.kind === "user" ? (
+                      "this VM's own NAT"
+                    ) : (
+                      <a className="underline" href="#/networks">
+                        manage networks
+                      </a>
+                    )
+                  }
+                >
+                  <select
+                    className={inputCls}
+                    value={n.backend.kind === "user" ? "" : n.backend.network}
+                    onChange={(e) =>
+                      updateNic(i, {
+                        backend: e.target.value
+                          ? { kind: "network", network: e.target.value, forwards: n.backend.forwards }
+                          : { kind: "user", forwards: n.backend.forwards },
+                      })
+                    }
+                  >
+                    <option value="">Private NAT</option>
+                    {(networks.data ?? []).map((net) => (
+                      <option key={net.id} value={net.id}>
+                        {net.name} ({kindLabel(net.config)})
+                      </option>
+                    ))}
+                    {n.backend.kind === "network" &&
+                      ((id) =>
+                        !(networks.data ?? []).some((net) => net.id === id) && <option value={id}>missing network</option>)(
+                        n.backend.network,
+                      )}
+                  </select>
                 </Field>
                 <Field label="MAC" hint={n.mac ? undefined : "assigned on save"}>
                   <input className={`${inputCls} font-mono`} value={n.mac ?? ""} onChange={(e) => updateNic(i, { mac: e.target.value || null })} />
@@ -525,7 +563,7 @@ export function VmEditor({
                       className={inputCls}
                       value={f.proto}
                       onChange={(e) =>
-                        updateNic(i, { backend: { kind: "user", forwards: n.backend.forwards.map((x, k) => (k === j ? { ...x, proto: e.target.value } : x)) } })
+                        setForwards(i, n.backend.forwards.map((x, k) => (k === j ? { ...x, proto: e.target.value } : x)))
                       }
                     >
                       <option>tcp</option>
@@ -535,7 +573,7 @@ export function VmEditor({
                       className={`${inputCls} w-28 font-mono`}
                       value={f.host_addr}
                       onChange={(e) =>
-                        updateNic(i, { backend: { kind: "user", forwards: n.backend.forwards.map((x, k) => (k === j ? { ...x, host_addr: e.target.value } : x)) } })
+                        setForwards(i, n.backend.forwards.map((x, k) => (k === j ? { ...x, host_addr: e.target.value } : x)))
                       }
                     />
                     :
@@ -544,7 +582,7 @@ export function VmEditor({
                       type="number"
                       value={f.host_port}
                       onChange={(e) =>
-                        updateNic(i, { backend: { kind: "user", forwards: n.backend.forwards.map((x, k) => (k === j ? { ...x, host_port: Number(e.target.value) } : x)) } })
+                        setForwards(i, n.backend.forwards.map((x, k) => (k === j ? { ...x, host_port: Number(e.target.value) } : x)))
                       }
                     />
                     → guest
@@ -553,10 +591,10 @@ export function VmEditor({
                       type="number"
                       value={f.guest_port}
                       onChange={(e) =>
-                        updateNic(i, { backend: { kind: "user", forwards: n.backend.forwards.map((x, k) => (k === j ? { ...x, guest_port: Number(e.target.value) } : x)) } })
+                        setForwards(i, n.backend.forwards.map((x, k) => (k === j ? { ...x, guest_port: Number(e.target.value) } : x)))
                       }
                     />
-                    <Button variant="ghost" onClick={() => updateNic(i, { backend: { kind: "user", forwards: n.backend.forwards.filter((_, k) => k !== j) } })}>
+                    <Button variant="ghost" onClick={() => setForwards(i, n.backend.forwards.filter((_, k) => k !== j))}>
                       ✕
                     </Button>
                   </div>
@@ -564,7 +602,7 @@ export function VmEditor({
                 <Button
                   variant="ghost"
                   onClick={() =>
-                    updateNic(i, { backend: { kind: "user", forwards: [...n.backend.forwards, { proto: "tcp", host_addr: "127.0.0.1", host_port: 2222, guest_port: 22 }] } })
+                    setForwards(i, [...n.backend.forwards, { proto: "tcp", host_addr: "127.0.0.1", host_port: 2222, guest_port: 22 }])
                   }
                 >
                   Add forward

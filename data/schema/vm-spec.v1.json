@@ -274,7 +274,7 @@
     "NicBackend": {
       "oneOf": [
         {
-          "description": "slirp NAT (M1). Network objects arrive in M3.",
+          "description": "This VM's own slirp NAT.",
           "properties": {
             "forwards": {
               "default": [],
@@ -290,6 +290,30 @@
           },
           "required": [
             "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Attached to a network object by id (M3-01). Forwards apply only to\nnetwork kinds that take them (NAT).",
+          "properties": {
+            "forwards": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PortForward"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "network",
+              "type": "string"
+            },
+            "network": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "network"
           ],
           "type": "object"
         }

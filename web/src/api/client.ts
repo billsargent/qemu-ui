@@ -24,6 +24,9 @@ import type { UploadSession } from "./generated/UploadSession";
 import type { ScanStatus } from "./generated/ScanStatus";
 import type { ShareRoot } from "./generated/ShareRoot";
 import type { SharesInfo } from "./generated/SharesInfo";
+import type { Network } from "./generated/Network";
+import type { NetworkConfig } from "./generated/NetworkConfig";
+import type { NetworkInfo } from "./generated/NetworkInfo";
 import type { SnapshotList } from "./generated/SnapshotList";
 import type { VmDetail } from "./generated/VmDetail";
 import type { VmEvent } from "./generated/VmEvent";
@@ -113,6 +116,11 @@ export const api = {
   },
   consoleTicket: (id: string, kind: "vnc" | "serial") => post<ConsoleTicket>(`/vms/${id}/consoles/${kind}/ticket`),
 
+  networks: () => request<NetworkInfo[]>("/networks"),
+  createNetwork: (name: string, config: NetworkConfig) => post<Network>("/networks", { name, config }),
+  updateNetwork: (id: string, name: string, config: NetworkConfig) =>
+    request<Network>(`/networks/${id}`, { method: "PUT", body: JSON.stringify({ name, config }) }),
+  deleteNetwork: (id: string) => request<void>(`/networks/${id}`, { method: "DELETE" }),
   shares: () => request<SharesInfo>("/shares"),
   addShareRoot: (name: string, path: string) => post<ShareRoot>("/shares/roots", { name, path }),
   removeShareRoot: (name: string) =>
