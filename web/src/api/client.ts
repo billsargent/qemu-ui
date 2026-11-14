@@ -9,11 +9,13 @@ import type { DiskSpec } from "./generated/DiskSpec";
 import type { LintResult } from "./generated/LintResult";
 import type { Diagnostic } from "./generated/Diagnostic";
 import type { CheckResult } from "./generated/CheckResult";
+import type { GuestNetInfo } from "./generated/GuestNetInfo";
 import type { HostDisk } from "./generated/HostDisk";
 import type { ImageDetail } from "./generated/ImageDetail";
 import type { Job } from "./generated/Job";
 import type { MeasureResult } from "./generated/MeasureResult";
 import type { PoolInfo } from "./generated/PoolInfo";
+import type { PortForward } from "./generated/PortForward";
 import type { PoolSummary } from "./generated/PoolSummary";
 import type { HostUsb } from "./generated/HostUsb";
 import type { UploadProgress } from "./generated/UploadProgress";
@@ -228,6 +230,21 @@ export const api = {
     post<Job>(`/vms/${vmId}/snapshots/${snapshotId}/revert`, { safety_snapshot: safetySnapshot }),
   deleteSnapshot: (vmId: string, snapshotId: string) =>
     request<Job>(`/vms/${vmId}/snapshots/${snapshotId}`, { method: "DELETE" }),
+
+  /** Guest addresses per NIC, best source first (M3-08). */
+  guestNet: (vmId: string) => request<GuestNetInfo>(`/vms/${vmId}/guest-net`),
+  /**
+   * Add a port forward to NIC `nic`. Edits the saved spec, so on a running
+   * VM it applies at the next start.
+   */
+  addForward: async (vm: VmDetail, nic: number, fwd: PortForward): Promise<{ live: boolean }> => {
+    const spec: VmSpec = structuredClone(vm.spec);
+    const n = spec.nics[nic];
+    if (!n || n.backend.kind !== "user") throw new ApiError(400, "this NIC has no port forwards");
+    n.backend.forwards.push(fwd);
+    await request<VmDetail>(`/vms/${vm.summary.id}`, { method: "PUT", body: JSON.stringify({ spec }) });
+    return { live: false };
+  },
 };
 
 export function wsUrl(path: string): string {
