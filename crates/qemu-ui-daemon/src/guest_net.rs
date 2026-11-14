@@ -13,9 +13,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use qemu_ui_core::guest_net::normalize_mac;
 use qemu_ui_core::guest_net::{
-    GuestNetInfo, GuestNic, UsernetHub, agent_addr, nat_addr, parse_agent_interfaces,
-    parse_usernet, rank,
+    GuestNetInfo, GuestNic, UsernetHub, agent_addr, parse_agent_interfaces, parse_usernet, rank,
 };
+use qemu_ui_core::network::NetworkConfig;
 use qemu_ui_core::spec::NicBackend;
 use qemu_ui_core::vm::VmState;
 use qemu_ui_qmp::Qmp;
@@ -53,6 +53,7 @@ pub async fn guest_net(sv: &Supervisor, id: &str) -> OpResult<GuestNetInfo> {
         });
     };
 
+    let networks = sv.networks.list().unwrap_or_default();
     let hubs = usernet(&qmp).await.unwrap_or_else(|e| {
         tracing::debug!(vm = %id, "info usernet: {e:#}");
         vec![]
@@ -78,16 +79,30 @@ pub async fn guest_net(sv: &Supervisor, id: &str) -> OpResult<GuestNetInfo> {
                 .flat_map(|(_, ips)| ips.iter().cloned().map(agent_addr))
                 .collect();
             let mut active_forwards = vec![];
-            match &nic.backend {
-                NicBackend::User { .. } => {
-                    let netdev = format!("qui-net{i}");
-                    let hub = hubs.iter().find(|h| h.netdev == netdev);
-                    addrs.push(hub.map_or_else(
-                        || nat_addr(qemu_ui_core::guest_net::SLIRP_GUEST_IP.into(), false),
-                        UsernetHub::guest_addr,
-                    ));
-                    active_forwards = hub.map(UsernetHub::forwards).unwrap_or_default();
-                }
+            // NAT (a per-VM `user` NIC or a NAT network) is slirp either way.
+            let nat_subnet: Option<Option<String>> = match &nic.backend {
+                NicBackend::User { .. } => Some(None),
+                NicBackend::Network { network, .. } => networks
+                    .iter()
+                    .find(|n| &n.id == network)
+                    .map(|n| match &n.config {
+                        NetworkConfig::Nat { subnet } => subnet.clone(),
+                    }),
+            };
+            if let Some(subnet) = nat_subnet {
+                let netdev = format!("qui-net{i}");
+                let hub = hubs.iter().find(|h| h.netdev == netdev);
+                addrs.push(hub.map_or_else(
+                    || {
+                        UsernetHub {
+                            netdev: netdev.clone(),
+                            conns: vec![],
+                        }
+                        .guest_addr_in(subnet.as_deref())
+                    },
+                    |h| h.guest_addr_in(subnet.as_deref()),
+                ));
+                active_forwards = hub.map(UsernetHub::forwards).unwrap_or_default();
             }
             GuestNic {
                 nic: i,
@@ -169,7 +184,7 @@ mod real {
     use axum::body::Body;
     use axum::http::Request;
     use qemu_ui_core::guest_net::{AddrSource, GuestNetInfo};
-    use qemu_ui_core::spec::{NicBackend, PortForward};
+    use qemu_ui_core::spec::PortForward;
     use qemu_ui_core::vm::VmState;
     use tower::ServiceExt;
 
@@ -215,8 +230,7 @@ mod real {
                 let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
                 l.local_addr().unwrap().port()
             };
-            let NicBackend::User { forwards } = &mut spec.nics[0].backend;
-            forwards.push(PortForward {
+            spec.nics[0].backend.forwards_mut().push(PortForward {
                 proto: "tcp".into(),
                 host_addr: "127.0.0.1".into(),
                 host_port: port,

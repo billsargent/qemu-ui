@@ -14,10 +14,6 @@ use ts_rs::TS;
 
 /// The guest address QEMU's user network hands out first (DHCP start).
 pub const SLIRP_GUEST_IP: &str = "10.0.2.15";
-/// The host side of QEMU's default user network.
-const SLIRP_NET_PREFIX: &str = "10.0.2.";
-const SLIRP_GATEWAY: &str = "10.0.2.2";
-const SLIRP_DNS: &str = "10.0.2.3";
 
 /// Where an address came from.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -167,11 +163,32 @@ impl UsernetHub {
             .collect()
     }
 
+    /// The guest's NAT address on QEMU's default 10.0.2.0/24.
+    pub fn guest_addr(&self) -> GuestAddr {
+        self.guest_addr_in(None)
+    }
+
     /// The guest's NAT address: observed from guest-originated traffic when
     /// there is any (confirmed), else the forward target or the DHCP default.
-    pub fn guest_addr(&self) -> GuestAddr {
-        let is_guest =
-            |ip: &str| ip.starts_with(SLIRP_NET_PREFIX) && ip != SLIRP_GATEWAY && ip != SLIRP_DNS;
+    /// `subnet` is a NAT network's `a.b.c.d/n` (`None`: QEMU's default);
+    /// slirp puts its gateway at .2, DNS at .3 and the first lease at .15.
+    pub fn guest_addr_in(&self, subnet: Option<&str>) -> GuestAddr {
+        let net = subnet.and_then(crate::network::parse_ipv4_cidr);
+        let (base, prefix) = net.map_or(
+            (u32::from(std::net::Ipv4Addr::new(10, 0, 2, 0)), 24),
+            |(a, p)| (u32::from(a), p),
+        );
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        };
+        let at = |n: u32| std::net::Ipv4Addr::from(base + n).to_string();
+        let (gateway, dns, default_guest) = (at(2), at(3), at(15));
+        let is_guest = |ip: &str| {
+            ip.parse::<std::net::Ipv4Addr>()
+                .is_ok_and(|a| u32::from(a) & mask == base && ip != gateway && ip != dns)
+        };
         let observed = self
             .conns
             .iter()
@@ -184,7 +201,7 @@ impl UsernetHub {
                     .iter()
                     .find(|c| c.state == "HOST_FORWARD" && is_guest(&c.dst))
                     .map(|c| c.dst.clone())
-                    .unwrap_or_else(|| SLIRP_GUEST_IP.to_string()),
+                    .unwrap_or(default_guest),
                 false,
             ),
         };
@@ -436,6 +453,8 @@ Hub -1 (qui-net1):
         // Nothing at all: the DHCP default.
         assert_eq!(hubs[1].guest_addr().ip, SLIRP_GUEST_IP);
         assert!(!hubs[1].guest_addr().confirmed);
+        // On a NAT network with its own subnet the default lease moves too.
+        assert_eq!(hubs[1].guest_addr_in(Some("10.77.0.0/24")).ip, "10.77.0.15");
     }
 
     #[test]
