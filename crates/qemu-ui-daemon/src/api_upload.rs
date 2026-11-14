@@ -719,7 +719,9 @@ mod real {
     }
 
     async fn wait_job(r: &axum::Router, id: &str, status: &str) -> Value {
-        for _ in 0..200 {
+        // Generous: hashing and verifying run slower on loaded CI runners.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             let j = job(r, id).await;
             if j["status"] == status {
                 return j;
