@@ -690,6 +690,7 @@ mod compile_smoke {
             ResolvedImage {
                 path: disk.display().to_string(),
                 format: "qcow2".into(),
+                nbd: None,
             },
         );
         images.insert(
@@ -697,6 +698,7 @@ mod compile_smoke {
             ResolvedImage {
                 path: iso.display().to_string(),
                 format: "raw".into(),
+                nbd: None,
             },
         );
 

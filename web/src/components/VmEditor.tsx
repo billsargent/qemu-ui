@@ -130,6 +130,7 @@ export function VmEditor({
 
   const caps = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
   const pool = useQuery({ queryKey: ["images", "all"], queryFn: api.allImages });
+  const hostDisks = useQuery({ queryKey: ["host-disks"], queryFn: api.hostDisks, staleTime: 30_000 });
   const bin: BinaryCaps | undefined = caps.data?.caps?.binaries.find((b) => b.arch === spec.arch);
   // Which disk buses this machine actually has (from QEMU introspection).
   const busSupport = useQuery({
@@ -376,7 +377,31 @@ export function VmEditor({
                           {img.name} ({img.format})
                         </option>
                       ))}
+                      {/* Physical disks, exported by the privileged helper. */}
+                      {hostDisks.data?.available && (
+                        <optgroup label="Host disks (via the qemu-ui helper)">
+                          {hostDisks.data.disks.map((hd) => (
+                            <option key={hd.id} value={`@host/${hd.id}`} disabled={hd.system}>
+                              {hd.label} · {Math.round(hd.size_bytes / 1024 ** 3)} GiB · {hd.bus}
+                              {hd.system ? " (system disk)" : hd.in_use.length ? " (in use)" : ""}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {d.image.pool === "@host" && !hostDisks.data?.disks.some((hd) => hd.id === d.image.name) && (
+                        <option value={`@host/${d.image.name}`}>Host disk {d.image.name} (not visible now)</option>
+                      )}
                     </select>
+                    {d.image.pool === "@host" && (
+                      <span className="text-xs text-zinc-500">
+                        Physical disk, exported read-only unless allowed in the helper&apos;s configuration. Attach while the VM is stopped.
+                      </span>
+                    )}
+                    {!hostDisks.data?.available && hostDisks.data?.reason && (
+                      <span className="text-xs text-zinc-500" title={hostDisks.data.reason}>
+                        Host disks need the qemu-ui helper (not running).
+                      </span>
+                    )}
                   </Field>
                   <Field label="Media">
                     <select

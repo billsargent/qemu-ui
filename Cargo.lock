@@ -1215,6 +1215,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uds_windows",
  "ureq",
  "url",
  "which",

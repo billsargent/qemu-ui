@@ -139,6 +139,12 @@ impl Supervisor {
         let caps = self.caps_for(&saved.arch).await?;
         disk.slot = None;
 
+        if qemu_ui_core::spec::is_host_disk(&disk.image) && self.active_run(id).is_some() {
+            return Err(OpError::Conflict(
+                "physical host disks are attached while the VM is stopped; stop it, add the disk, then start it"
+                    .into(),
+            ));
+        }
         let Some(run) = self.active_run(id) else {
             saved.disks.push(disk);
             Self::check(&saved, &caps)?;
@@ -217,6 +223,7 @@ impl Supervisor {
         let img = ResolvedImage {
             path: path_str(&path),
             format,
+            nbd: None,
         };
 
         // Never reuse an index still present in QEMU (e.g. an unplug the
@@ -479,6 +486,7 @@ impl Supervisor {
         let img = ResolvedImage {
             path: path_str(&path),
             format,
+            nbd: None,
         };
         let (file, fmt, _) = disk_objects(n, &disk, &img, std::env::consts::OS);
         let dev_id = format!("qui-dev{n}");

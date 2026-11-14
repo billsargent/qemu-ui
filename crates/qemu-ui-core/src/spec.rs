@@ -361,6 +361,23 @@ pub fn valid_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Pseudo-pool for physical host disks (M2-11): `ImageRef { pool: "@host",
+/// name: <helper disk id> }`. The privileged helper exports the disk over
+/// NBD; QEMU never opens the device itself (docs/design/privileged-helper.md).
+pub const HOST_DISK_POOL: &str = "@host";
+
+/// Is this a reference to a physical host disk?
+pub fn is_host_disk(r: &ImageRef) -> bool {
+    r.pool == HOST_DISK_POOL
+}
+
+/// Helper disk ids are opaque (`/dev/disk/by-id` names, Windows UniqueIds
+/// with `\` and `&`); they are only ever sent to the helper, never used as
+/// paths, so only basic sanity is checked.
+pub fn valid_host_disk_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 256 && !id.chars().any(|c| c.is_control())
+}
+
 /// Is `name` acceptable as a file name inside a pool?
 pub fn valid_image_name(name: &str) -> bool {
     // Windows device names resolve to devices in any directory ("nul.qcow2"
