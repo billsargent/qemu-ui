@@ -239,11 +239,32 @@ pub struct PortForward {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 #[ts(export)]
 pub enum NicBackend {
-    /// slirp NAT (M1). Network objects arrive in M3.
+    /// This VM's own slirp NAT.
     User {
         #[serde(default)]
         forwards: Vec<PortForward>,
     },
+    /// Attached to a network object by id (M3-01). Forwards apply only to
+    /// network kinds that take them (NAT).
+    Network {
+        network: String,
+        #[serde(default)]
+        forwards: Vec<PortForward>,
+    },
+}
+
+impl NicBackend {
+    pub fn forwards(&self) -> &[PortForward] {
+        match self {
+            NicBackend::User { forwards } | NicBackend::Network { forwards, .. } => forwards,
+        }
+    }
+
+    pub fn forwards_mut(&mut self) -> &mut Vec<PortForward> {
+        match self {
+            NicBackend::User { forwards } | NicBackend::Network { forwards, .. } => forwards,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]

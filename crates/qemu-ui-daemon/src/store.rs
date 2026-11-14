@@ -147,6 +147,15 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX run_sidecar_run ON run_sidecar(run_id);
     "#,
+    // 8: network objects (M3-01); NICs reference them by id from the spec
+    r#"
+    CREATE TABLE network (
+        id          TEXT NOT NULL PRIMARY KEY,
+        name        TEXT NOT NULL UNIQUE,
+        config_json TEXT NOT NULL,
+        created_at  INTEGER NOT NULL
+    );
+    "#,
 ];
 
 /// A resumable upload session row.
@@ -957,6 +966,44 @@ impl Store {
     pub fn delete_share_root(&self, name: &str) -> Result<()> {
         self.with(|c| {
             c.execute("DELETE FROM share_root WHERE name = ?1", [name])
+                .map(|_| ())
+        })
+    }
+
+    // -------------------------------------------------------------- networks
+
+    pub fn insert_network(&self, id: &str, name: &str, config_json: &str, now: u64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO network (id, name, config_json, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![id, name, config_json, now as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn update_network(&self, id: &str, name: &str, config_json: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE network SET name = ?2, config_json = ?3 WHERE id = ?1",
+                params![id, name, config_json],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// (id, name, config_json), by name.
+    pub fn list_networks(&self) -> Result<Vec<(String, String, String)>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT id, name, config_json FROM network ORDER BY name")?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect()
+        })
+    }
+
+    pub fn delete_network(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM network WHERE id = ?1", [id])
                 .map(|_| ())
         })
     }
