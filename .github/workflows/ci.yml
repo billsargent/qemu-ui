@@ -56,6 +56,44 @@ jobs:
         shell: bash
         run: git diff --exit-code -- web/src/api/generated
 
+  lint-matrix:
+    name: Lint matrix (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU system emulators (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-system-arm qemu-system-misc qemu-system-ppc qemu-system-s390x qemu-utils
+
+      - name: Cache project-local QEMU (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: .tools/downloads
+          key: qemu-win-${{ hashFiles('scripts/bootstrap.sh') }}
+
+      - name: Install QEMU into .tools (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          scripts/bootstrap.sh qemu
+          echo "QEMU_UI_QEMU_DIR=$PWD/.tools/qemu" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Dry-lint generated specs on every installed arch
+        env:
+          QEMU_UI_LINT_MATRIX: "1"
+        run: cargo test -p qemu-ui-daemon --bin qemu-uid lint_matrix -- --nocapture
+
   web:
     name: Web
     runs-on: ubuntu-latest

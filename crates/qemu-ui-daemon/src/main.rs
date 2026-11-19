@@ -20,6 +20,7 @@ mod hostnet;
 mod image_ops;
 mod images;
 mod jobs;
+mod lint_matrix;
 mod netswitch;
 mod networks;
 mod passt;

@@ -452,7 +452,7 @@ fn validation_errors_are_pinned_to_rules() {
         "-machine".into(),
         "pc".into(),
         "-device".into(),
-        "e1000,id=qui-x".into(),
+        "e1000e,id=qui-x".into(),
     ];
     assert_eq!(
         errors(&s),
@@ -1232,5 +1232,104 @@ fn tap_networks_are_checked_for_host_resolution_and_queues() {
         rules(compile_with_taps(&s, &nets, BTreeMap::new(), "linux")),
         ["nic.mq-backend"],
         "NAT networks stay single-queue"
+    );
+}
+
+// ------------------------------------------------------------------ M4-01
+
+fn all_rules(
+    spec: &VmSpec,
+    caps: &BinaryCaps,
+    m: Option<&qemu_ui_core::buses::MachineBuses>,
+) -> Vec<String> {
+    let images = images();
+    let ctx = Context {
+        taps: Default::default(),
+        networks: &[],
+        switch_sockets: &Default::default(),
+        caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/x".into())),
+        images: &images,
+        firmware: None,
+        machine: m,
+        shares: vec![],
+    };
+    match compile(spec, &ctx) {
+        Ok(c) => c.warnings.into_iter().map(|d| d.rule).collect(),
+        Err(d) => d.into_iter().map(|d| d.rule).collect(),
+    }
+}
+
+#[test]
+fn passthrough_devices_must_exist() {
+    let caps = caps(true);
+    let mut s = base_spec();
+    s.passthrough = vec!["-device".into(), "virtio-rng-pci,id=rng0".into()];
+    assert!(all_rules(&s, &caps, None).contains(&"device.unknown".to_string()));
+    s.passthrough = vec!["-device".into(), "virtio-serial-pci,id=s0".into()];
+    assert!(!all_rules(&s, &caps, None).contains(&"device.unknown".to_string()));
+}
+
+#[test]
+fn internal_only_devices_are_refused() {
+    let mut caps = caps(true);
+    caps.devices
+        .iter_mut()
+        .find(|d| d.name == "e1000e")
+        .unwrap()
+        .no_user = true;
+    let mut s = base_spec();
+    s.nics[0].model = "e1000e".into();
+    assert!(all_rules(&s, &caps, None).contains(&"device.no-user".to_string()));
+}
+
+#[test]
+fn display_device_needs_a_bus_on_the_machine() {
+    let mut caps = caps(true);
+    for d in caps
+        .devices
+        .iter_mut()
+        .filter(|d| d.name == "virtio-vga" || d.name == "VGA")
+    {
+        d.bus = Some("PCI".into());
+    }
+    let mut s = base_spec();
+    s.display.device = Some("VGA".into());
+    let no_pci = qemu_ui_core::buses::MachineBuses {
+        machine: "isapc".into(),
+        buses: vec![],
+    };
+    let rules = all_rules(&s, &caps, Some(&no_pci));
+    assert!(
+        rules.contains(&"device.bus-unavailable".to_string()),
+        "{rules:?}"
+    );
+    let q35 = machine_buses("qtree-x86_64-q35.txt", "pc-q35-11.1");
+    let rules = all_rules(&s, &caps, Some(&q35));
+    assert!(
+        !rules.contains(&"device.bus-unavailable".to_string()),
+        "{rules:?}"
+    );
+}
+
+#[test]
+fn cpu_model_facts_are_warnings() {
+    let mut caps = caps(true);
+    let sky = caps
+        .cpus
+        .iter_mut()
+        .find(|c| c.name == "Skylake-Client")
+        .unwrap();
+    sky.deprecated = true;
+    sky.unavailable_features = vec!["avx512f".into(), "pcid".into()];
+    let mut s = base_spec();
+    s.accel = "tcg".into();
+    s.cpu.model = Some("Skylake-Client".into());
+    let rules = all_rules(&s, &caps, None);
+    assert!(rules.contains(&"cpu.deprecated".to_string()), "{rules:?}");
+    assert!(
+        rules.contains(&"cpu.unavailable-features".to_string()),
+        "{rules:?}"
     );
 }

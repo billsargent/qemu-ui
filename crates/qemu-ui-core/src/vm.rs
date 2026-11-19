@@ -198,8 +198,16 @@ pub struct PoolInfo {
 
 /// A reasonable starting spec for `arch` on this binary, for the wizard.
 pub fn default_spec(name: &str, caps: &BinaryCaps) -> (VmSpec, Vec<Diagnostic>) {
-    let has = |d: &str| caps.devices.iter().any(|x| x.name == d);
-    let pick = |opts: &[&str]| opts.iter().find(|d| has(d)).map(|d| d.to_string());
+    default_spec_on(name, caps, |_| None)
+}
+
+/// [`default_spec`] knowing the chosen machine's buses (`buses(machine)`),
+/// so devices that cannot plug into it are not suggested.
+pub fn default_spec_on(
+    name: &str,
+    caps: &BinaryCaps,
+    buses: impl FnOnce(&str) -> Option<crate::buses::MachineBuses>,
+) -> (VmSpec, Vec<Diagnostic>) {
     let machine = match caps.arch.as_str() {
         "x86_64" | "i386" => pin_machine("q35", caps).ok(),
         "aarch64" | "arm" | "riscv64" | "riscv32" | "loongarch64" => pin_machine("virt", caps).ok(),
@@ -213,6 +221,26 @@ pub fn default_spec(name: &str, caps: &BinaryCaps) -> (VmSpec, Vec<Diagnostic>) 
             .map(|m| m.name.clone())
     })
     .unwrap_or_default();
+    let machine_buses = buses(&machine);
+    // A device is suggested only if it exists and, when the machine's buses
+    // are known, plugs into one of them.
+    let has = |d: &str| {
+        caps.devices.iter().any(|x| {
+            x.name == d
+                && !x.no_user
+                && machine_buses
+                    .as_ref()
+                    .is_none_or(|m| crate::nic::bus_fits(x.bus.as_deref(), m).is_ok())
+        })
+    };
+    let pick = |opts: &[&str]| opts.iter().find(|d| has(d)).map(|d| d.to_string());
+    // Many embedded and older machines take a single CPU.
+    let cpu_max = caps
+        .machines
+        .iter()
+        .find(|m| m.name == machine)
+        .and_then(|m| m.cpu_max)
+        .unwrap_or(u32::MAX);
     let hardware = caps.best_accel().is_some_and(|a| a.hardware);
     let cpu_model = if hardware {
         Some("host".to_string())
@@ -233,7 +261,7 @@ pub fn default_spec(name: &str, caps: &BinaryCaps) -> (VmSpec, Vec<Diagnostic>) 
         cpu: CpuSpec {
             model: cpu_model,
             props: BTreeMap::new(),
-            count: 2,
+            count: 2.min(cpu_max).max(1),
             topology: None,
         },
         memory: MemorySpec { size_mib: 2048 },
@@ -261,7 +289,9 @@ pub fn default_spec(name: &str, caps: &BinaryCaps) -> (VmSpec, Vec<Diagnostic>) 
             vdagent: false,
         },
         input: InputSpec {
-            usb_tablet: has("usb-tablet") && has("qemu-xhci"),
+            // usb-tablet's bus comes with the controller, so only the
+            // controller has to fit the machine.
+            usb_tablet: caps.devices.iter().any(|x| x.name == "usb-tablet") && has("qemu-xhci"),
         },
         usb: vec![],
         shares: vec![],
