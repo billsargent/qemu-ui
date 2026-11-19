@@ -63,7 +63,9 @@ struct Live {
     write: tokio::sync::Mutex<()>,
     /// The job body's context, for progress reports.
     ctx: Mutex<Option<Arc<JobCtx>>>,
-    /// Set once the upload completes or fails; ends the job.
+    /// Set once the upload completes or fails; ends the job. Written with
+    /// `send_replace`: the job may not have subscribed yet, and a plain
+    /// `send` drops the value when nobody is listening.
     done: watch::Sender<Option<Result<String, String>>>,
     job_id: String,
 }
@@ -434,7 +436,7 @@ impl Uploads {
         live: &Live,
     ) -> Result<UploadProgress, ApiError> {
         let fail = |msg: String| {
-            let _ = live.done.send(Some(Err(msg.clone())));
+            let _ = live.done.send_replace(Some(Err(msg.clone())));
             msg
         };
         if let Some(expected) = &row.sha256 {
@@ -491,7 +493,7 @@ impl Uploads {
             Some(q) => self.sv.pools.info(&q, &dest).await.ok().map(|(f, _, _)| f),
             None => None,
         };
-        let _ = live.done.send(Some(Ok(format!(
+        let _ = live.done.send_replace(Some(Ok(format!(
             "Uploaded {} ({})",
             row.name,
             format.as_deref().unwrap_or("unknown format")
