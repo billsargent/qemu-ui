@@ -265,6 +265,7 @@ pub fn default_spec(name: &str, caps: &BinaryCaps) -> (VmSpec, Vec<Diagnostic>) 
         },
         usb: vec![],
         shares: vec![],
+        devices: vec![],
         passthrough: vec![],
     };
     let diags = crate::compile::validate(&spec, caps)

@@ -144,6 +144,7 @@ mod tests {
             shares: vec![],
             input: InputSpec::default(),
             usb: vec![],
+            devices: vec![],
             passthrough: vec![],
         }
     }

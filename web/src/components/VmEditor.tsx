@@ -16,6 +16,7 @@ import type { ShareSpec } from "../api/generated/ShareSpec";
 import type { VmSpec } from "../api/generated/VmSpec";
 import { MacField, NicModelField, VirtioNetFields } from "./NicFields";
 import { Badge, Button, Card, Field, inputCls } from "./ui";
+import { HardwareCard } from "./HardwareTree";
 import { kindLabel } from "../pages/NetworksPage";
 
 // ---------------------------------------------------------------- helpers
@@ -651,6 +652,15 @@ export function VmEditor({
           onChange={(shares) => set({ shares })}
           diagsFor={(i) => diagsFor(`shares[${i}]`)}
           other={diagsFor("shares").filter((d) => d.field === "shares")}
+        />
+
+        <HardwareCard
+          spec={spec}
+          treeSpec={debounced}
+          vmId={vmId}
+          binaryId={bin?.binary.id}
+          onChange={(devices) => set({ devices })}
+          diagsFor={diagsFor}
         />
 
         <Card title="Extra QEMU options (passthrough)">

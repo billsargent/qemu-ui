@@ -561,6 +561,7 @@ mod tests {
             display: DisplaySpec::default(),
             input: InputSpec::default(),
             usb: vec![],
+            devices: vec![],
             passthrough: vec![],
         };
         let snap = |name: &str, node: &str| SnapshotDisk {
