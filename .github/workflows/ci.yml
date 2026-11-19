@@ -41,7 +41,8 @@ jobs:
         shell: bash
         run: |
           scripts/bootstrap.sh qemu
-          echo "QEMU_UI_QEMU_DIR=$PWD/.tools/qemu" >> "$GITHUB_ENV"
+          # A Windows path: Rust can't open Git Bash's /d/... form.
+          echo "QEMU_UI_QEMU_DIR=$(cygpath -w "$PWD/.tools/qemu")" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
