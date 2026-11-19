@@ -26,6 +26,8 @@ import type { UploadSession } from "./generated/UploadSession";
 import type { ScanStatus } from "./generated/ScanStatus";
 import type { ShareRoot } from "./generated/ShareRoot";
 import type { SharesInfo } from "./generated/SharesInfo";
+import type { ImportFormat } from "./generated/ImportFormat";
+import type { ImportResult } from "./generated/ImportResult";
 import type { Network } from "./generated/Network";
 import type { NetworkConfig } from "./generated/NetworkConfig";
 import type { NetworkInfo } from "./generated/NetworkInfo";
@@ -91,6 +93,8 @@ export const api = {
   vm: (id: string) => request<VmDetail>(`/vms/${id}`),
   vmEvents: (id: string) => request<VmEvent[]>(`/vms/${id}/events`),
   createVm: (spec: VmSpec) => post<VmDetail>("/vms", { spec }),
+  /** Read a QEMU command line or libvirt XML into a spec to review (M4-07). */
+  importVm: (format: ImportFormat, text: string) => post<ImportResult>("/vms/import", { format, text }),
   updateVm: (id: string, spec: VmSpec) =>
     request<VmDetail>(`/vms/${id}`, { method: "PUT", body: JSON.stringify({ spec }) }),
   deleteVm: (id: string) => request<void>(`/vms/${id}`, { method: "DELETE" }),
