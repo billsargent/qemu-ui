@@ -5,6 +5,7 @@ mod api_disks;
 mod api_fetch;
 mod api_forwards;
 mod api_guest_net;
+mod api_hardware;
 mod api_nics;
 mod api_rules;
 mod api_snapshots;

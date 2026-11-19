@@ -44,7 +44,8 @@ pub fn lint_spec(spec: &VmSpec) -> VmSpec {
 }
 
 /// Which spec field a reserved id belongs to.
-fn field_for_id(id: &str, spec: &VmSpec) -> Option<String> {
+/// The spec field a `qui-` id belongs to (heuristic error mapping, §6.3).
+pub fn field_for_id(id: &str, spec: &VmSpec) -> Option<String> {
     let num = |prefix: &str| {
         id.strip_prefix(prefix).and_then(|r| {
             let digits: String = r.chars().take_while(char::is_ascii_digit).collect();
@@ -55,6 +56,9 @@ fn field_for_id(id: &str, spec: &VmSpec) -> Option<String> {
         // Ids use the disk's slot, which may differ from its position.
         let pos = crate::spec::disk_position(spec, n).unwrap_or(n);
         return Some(format!("disks[{pos}]"));
+    }
+    if let Some(n) = num(crate::devices::GENERIC_ID_PREFIX) {
+        return Some(format!("devices[{n}]"));
     }
     if id.starts_with("qui-rp") {
         return Some("disks".into());
@@ -205,6 +209,7 @@ mod tests {
             display: DisplaySpec::default(),
             input: InputSpec::default(),
             usb: vec![],
+            devices: vec![],
             passthrough: vec!["-global".into(), "ICH9-LPC.bogus=1".into()],
         }
     }

@@ -45,6 +45,9 @@ pub struct VmSpec {
     /// Host USB devices passed through to the guest (M2-12).
     #[serde(default)]
     pub usb: Vec<UsbPassthrough>,
+    /// Devices added from the palette (M4-05); ids `qui-xdev<N>`.
+    #[serde(default)]
+    pub devices: Vec<crate::devices::DeviceSpec>,
     /// Raw argv tokens appended after generated options (§5.3).
     #[serde(default)]
     pub passthrough: Vec<String>,
