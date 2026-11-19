@@ -287,6 +287,7 @@ pub fn default_spec_on(
             ]),
             vnc: true,
             vdagent: false,
+            spice: false,
         },
         input: InputSpec {
             // usb-tablet's bus comes with the controller, so only the

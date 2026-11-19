@@ -48,15 +48,34 @@ export function VncConsole({ vmId, running }: { vmId: string; running: boolean }
     enabled: running,
   });
   usePresenceUpdates(vmId);
-  const engine = display.data?.engines.find((e) => e.available) ?? null;
+  // This view embeds the VNC engine; other engines are offered as links.
+  const engine = display.data?.engines.find((e) => e.available && e.id.startsWith("vnc:")) ?? null;
+  const others = display.data?.engines.filter((e) => e.available && e !== engine) ?? [];
   const caps = engine?.caps;
   const presence = display.data?.presence;
   const me = presence?.viewers.find((v) => v.id === viewerId);
   const controlling = !!me?.controlling;
   const engineId = engine?.id;
 
+  const qc = useQueryClient();
   const takeControl = useMutation({
     mutationFn: () => api.takeControl(vmId, viewerId!),
+  });
+  const recordings = useQuery({
+    queryKey: ["recordings", vmId],
+    queryFn: () => api.recordings(vmId),
+    enabled: running && !!caps?.record,
+  });
+  const activeRecording = recordings.data?.recordings.find((r) => r.status === "recording");
+  const toggleRecording = useMutation({
+    mutationFn: () => (activeRecording ? api.stopRecording(vmId, activeRecording.id) : api.startRecording(vmId)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["recordings", vmId] }),
+  });
+  const openOther = useMutation({
+    mutationFn: async (id: string) => {
+      const a = await api.attachDisplay(vmId, id);
+      if (a.transport === "download") window.location.href = a.url;
+    },
   });
 
   useEffect(() => {
@@ -69,6 +88,7 @@ export function VncConsole({ vmId, running }: { vmId: string; running: boolean }
         // A fresh single-use ticket per connection.
         const a = await api.attachDisplay(vmId, engineId, watchOnly);
         if (cancelled || !target.current) return;
+        if (a.transport !== "websocket") throw new Error("this engine does not stream to the browser");
         setViewerId(a.viewer_id);
         const r = new RFB(target.current, wsUrl(a.path), {
           wsProtocols: [a.protocol, "binary"],
@@ -180,6 +200,21 @@ export function VncConsole({ vmId, running }: { vmId: string; running: boolean }
             Screenshot
           </a>
         )}
+        {caps?.record && (
+          <Button
+            variant="ghost"
+            disabled={toggleRecording.isPending}
+            title="Recordings are listed on the Recordings tab"
+            onClick={() => toggleRecording.mutate()}
+          >
+            {activeRecording ? "● Stop recording" : "Record"}
+          </Button>
+        )}
+        {others.map((e) => (
+          <Button key={e.id} variant="ghost" title={e.label} onClick={() => openOther.mutate(e.id)}>
+            {e.id === "spice:native" ? "Open in remote-viewer" : e.label}
+          </Button>
+        ))}
         {caps?.view_only && (
           <label className="ml-1 flex items-center gap-1" title="Join without the ability to type or click">
             <input type="checkbox" checked={watchOnly} onChange={(e) => setWatchOnly(e.target.checked)} />
@@ -190,6 +225,9 @@ export function VncConsole({ vmId, running }: { vmId: string; running: boolean }
           <Button onClick={() => setAttempt((a) => a + 1)}>Reconnect</Button>
         )}
         {message && <span className="ml-2 text-rose-600">{message}</span>}
+        {(toggleRecording.error ?? openOther.error) && (
+          <span className="ml-2 text-rose-600">{(toggleRecording.error ?? openOther.error)?.message}</span>
+        )}
       </div>
       {caps?.take_control && presence && presence.viewers.length > 0 && (
         <div className="flex flex-wrap items-center gap-1 text-xs" data-testid="console-presence">

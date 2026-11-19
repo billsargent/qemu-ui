@@ -43,6 +43,8 @@ pub enum Attachment {
         /// RFB password when QEMU's VNC is on loopback TCP (Windows).
         vnc_password: Option<String>,
     },
+    /// Download `url` and open it with a native client.
+    Download { url: String, filename: String },
 }
 
 pub trait DisplayEngine: Send + Sync {
@@ -77,6 +79,8 @@ impl DisplayEngine for NoVnc {
             scale: true,
             fullscreen: true,
             screenshot: spec.display.device.is_some(),
+            // Recordings capture the VNC stream (`recording.rs`).
+            record: spec.display.vnc && spec.display.device.is_some(),
             view_only: true,
             take_control: true,
             ..EngineCaps::default()
@@ -117,9 +121,55 @@ impl DisplayEngine for NoVnc {
     }
 }
 
+/// remote-viewer on the user's machine, through a `.vv` file (M5-05). QEMU
+/// serves SPICE on loopback with a per-run password (`spice.rs`).
+pub struct SpiceNative;
+
+impl DisplayEngine for SpiceNative {
+    fn id(&self) -> &'static str {
+        "spice:native"
+    }
+
+    fn label(&self) -> &'static str {
+        "Native client (SPICE)"
+    }
+
+    fn capabilities(&self, spec: &VmSpec) -> EngineCaps {
+        EngineCaps {
+            // remote-viewer has its own send-key menu, scaling and full
+            // screen. The compiled `-spice` adds no usbredir channels, audio
+            // device or extra heads yet, so those stay absent.
+            keys: true,
+            scale: true,
+            fullscreen: true,
+            screenshot: spec.display.device.is_some(),
+            ..EngineCaps::default()
+        }
+    }
+
+    fn available(&self, sv: &Supervisor, vm: &str, spec: &VmSpec) -> Result<(), String> {
+        if !spec.display.spice {
+            return Err("SPICE is off for this VM; turn it on in its display settings".into());
+        }
+        if sv.live_qmp(vm).is_none() {
+            return Err("the VM is not running".into());
+        }
+        crate::spice::lookup(&sv.store, vm)
+            .map(|_| ())
+            .ok_or_else(|| "this run was started without SPICE; restart the VM".into())
+    }
+
+    fn attach(&self, _app: &App, vm: &str, _read_only: bool) -> Result<Attachment, ApiError> {
+        Ok(Attachment::Download {
+            url: format!("/api/v1/vms/{vm}/console.vv"),
+            filename: "console.vv".into(),
+        })
+    }
+}
+
 /// Every engine, preferred first.
 pub fn engines() -> Vec<Box<dyn DisplayEngine>> {
-    vec![Box::new(NoVnc)]
+    vec![Box::new(NoVnc), Box::new(SpiceNative)]
 }
 
 fn engine(id: &str) -> Option<Box<dyn DisplayEngine>> {
@@ -261,7 +311,15 @@ mod tests {
         assert!(c.keys && c.screenshot && c.take_control && !c.clipboard && !c.audio);
         spec.display.vdagent = true;
         assert!(NoVnc.capabilities(&spec).clipboard);
+        assert!(NoVnc.capabilities(&spec).record);
+        let s = SpiceNative.capabilities(&spec);
+        assert!(s.keys && !s.usb && !s.audio && !s.multihead && !s.take_control);
         spec.display.device = None;
         assert!(!NoVnc.capabilities(&spec).screenshot);
+        assert!(!NoVnc.capabilities(&spec).record);
+        assert_eq!(
+            engines().iter().map(|e| e.id()).collect::<Vec<_>>(),
+            ["vnc:novnc", "spice:native"]
+        );
     }
 }

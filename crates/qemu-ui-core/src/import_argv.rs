@@ -1343,6 +1343,7 @@ impl Importer {
                 device,
                 vnc: true,
                 vdagent: false,
+                spice: false,
             },
             input: InputSpec {
                 usb_tablet: self.usb_tablet,

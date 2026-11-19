@@ -287,6 +287,11 @@ impl Supervisor {
         (used, open)
     }
 
+    /// The daemon's data directory.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     fn vm_dir(&self, id: &str) -> PathBuf {
         self.data_dir.join("vms").join(id)
     }
@@ -832,6 +837,25 @@ impl Supervisor {
             };
             switch_sockets.insert(network.clone(), path_str(&path));
         }
+        // SPICE (M5-05): a loopback port and password per run. Previews show
+        // the last run's port so the "changes since start" diff stays quiet.
+        let spice_port = if !spec.display.spice {
+            if run {
+                crate::spice::clear(&self.store, id);
+            }
+            None
+        } else if run {
+            let port = crate::spice::free_port()
+                .map_err(|e| fail("display.spice", "spice.port", e.to_string()))?;
+            let info = crate::spice::SpiceInfo {
+                port,
+                password: crate::spice::password(),
+            };
+            crate::spice::record(&self.store, id, &info);
+            Some(port)
+        } else {
+            Some(crate::spice::lookup(&self.store, id).map_or(6900, |s| s.port))
+        };
         let ctx = compile::Context {
             taps,
             switch_sockets: &switch_sockets,
@@ -846,6 +870,7 @@ impl Supervisor {
                 serial_log: path_str(&serial_log),
                 pidfile: s("qemu.pid"),
                 vnc: vnc_listen,
+                spice_port,
             },
             images: &images,
             firmware,
@@ -1324,6 +1349,15 @@ impl Supervisor {
             .await
             .context("setting the VNC password")?;
         }
+        if let Some(s) = crate::spice::lookup(&self.store, id) {
+            // Never logged: the password only travels over QMP.
+            qmp.execute(
+                "set_password",
+                Some(json!({"protocol": "spice", "password": s.password})),
+            )
+            .await
+            .context("setting the SPICE password")?;
+        }
         qmp.execute("cont", None).await?;
         Ok(qmp)
     }
@@ -1445,6 +1479,7 @@ impl Supervisor {
         self.release_host_disks(id);
         self.release_taps(id);
         self.switches.release(id);
+        crate::spice::clear(&self.store, id);
         let expected = live
             .as_ref()
             .is_some_and(|l| l.stop_requested || l.shutdown_seen);

@@ -515,6 +515,7 @@ mod tests {
                 device: Some("virtio-vga".into()),
                 vnc: true,
                 vdagent: false,
+                spice: false,
             },
             input: InputSpec { usb_tablet: true },
             shares: vec![],

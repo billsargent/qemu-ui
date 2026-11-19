@@ -15,6 +15,8 @@ import type { GuestNetInfo } from "./generated/GuestNetInfo";
 import type { HostDisk } from "./generated/HostDisk";
 import type { ImageDetail } from "./generated/ImageDetail";
 import type { Job } from "./generated/Job";
+import type { RecordingInfo } from "./generated/RecordingInfo";
+import type { RecordingsInfo } from "./generated/RecordingsInfo";
 import type { MeasureResult } from "./generated/MeasureResult";
 import type { NicModel } from "./generated/NicModel";
 import type { PoolInfo } from "./generated/PoolInfo";
@@ -92,14 +94,16 @@ export interface ConsoleTicket {
 }
 
 /** How a browser connects to a display engine (`POST /vms/{id}/display/{engine}/attach`). */
-export type DisplayAttachment = {
-  transport: "websocket";
-  path: string;
-  protocol: string;
-  viewer_id: number | null;
-  read_only: boolean;
-  vnc_password: string | null;
-};
+export type DisplayAttachment =
+  | {
+      transport: "websocket";
+      path: string;
+      protocol: string;
+      viewer_id: number | null;
+      read_only: boolean;
+      vnc_password: string | null;
+    }
+  | { transport: "download"; url: string; filename: string };
 
 export const api = {
   capabilities: () => request<CapabilitiesResponse>("/host/capabilities"),
@@ -273,6 +277,20 @@ export const api = {
 
   jobs: () => request<Job[]>("/jobs"),
   cancelJob: (id: string) => post<void>(`/jobs/${id}/cancel`),
+  recordings: (vm: string) => request<RecordingsInfo>(`/vms/${vm}/recordings`),
+  startRecording: (vm: string) => post<RecordingInfo>(`/vms/${vm}/recordings`),
+  stopRecording: (vm: string, rid: string) => post<RecordingInfo>(`/vms/${vm}/recordings/${rid}/stop`),
+  bookmarkRecording: (vm: string, rid: string, label: string) =>
+    post<RecordingInfo>(`/vms/${vm}/recordings/${rid}/bookmarks`, { label }),
+  deleteRecording: (vm: string, rid: string) => request<void>(`/vms/${vm}/recordings/${rid}`, { method: "DELETE" }),
+  exportRecording: (vm: string, rid: string) => post<Job>(`/vms/${vm}/recordings/${rid}/export`),
+  /** The raw recording, for the player. */
+  recordingStream: async (vm: string, rid: string) => {
+    const res = await fetch(`/api/v1/vms/${vm}/recordings/${rid}/stream`);
+    if (!res.ok) throw new Error(`loading the recording failed (${res.status})`);
+    return res.arrayBuffer();
+  },
+  recordingWebmUrl: (vm: string, rid: string) => `/api/v1/vms/${vm}/recordings/${rid}/webm`,
   jobLog: async (id: string) => {
     const res = await fetch(`/api/v1/jobs/${id}/log`);
     return res.ok ? res.text() : "";

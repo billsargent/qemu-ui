@@ -95,6 +95,18 @@ linux = { status = "native", note = "" }
 windows = { status = "degraded", note = "QEMU on Windows does not listen on unix VNC sockets; loopback TCP with a per-run password is used instead." }
 
 [[row]]
+id = "spice-native"
+feature = "Native SPICE client handoff (remote-viewer .vv)"
+linux = { status = "native", note = "Needs a QEMU built with SPICE (most distributions); loopback port, per-run password." }
+windows = { status = "native", note = "The bundled QEMU includes SPICE; install virt-viewer for remote-viewer." }
+
+[[row]]
+id = "thumbnails"
+feature = "Dashboard thumbnails and screenshots (QMP screendump)"
+linux = { status = "native", note = "" }
+windows = { status = "native", note = "" }
+
+[[row]]
 id = "guacd"
 feature = "guacd rich display engine (SPICE, audio, multi-monitor)"
 linux = { status = "needs-setup", note = "Deferred (spike M0-15): no guacamole-server release supports SPICE; VNC-only via a system guacd. SPICE uses the native client handoff." }

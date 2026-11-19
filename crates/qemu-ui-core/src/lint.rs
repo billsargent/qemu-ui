@@ -37,6 +37,7 @@ pub fn lint_spec(spec: &VmSpec) -> VmSpec {
         nic.backend = NicBackend::User { forwards: vec![] };
     }
     s.display.vnc = false;
+    s.display.spice = false;
     // Passing a real USB device through would take it away from the host
     // (or from the running VM); the check never touches host devices.
     s.usb.clear();

@@ -186,6 +186,11 @@
             "null"
           ]
         },
+        "spice": {
+          "default": false,
+          "description": "Also serve SPICE on loopback for a native client (remote-viewer):\nUSB redirection and smoother video than VNC (M5-05).",
+          "type": "boolean"
+        },
         "vdagent": {
           "default": false,
           "description": "qemu-vdagent: clipboard + absolute pointer (needs guest agent).",
@@ -580,6 +585,7 @@
       "$ref": "#/$defs/DisplaySpec",
       "default": {
         "device": null,
+        "spice": false,
         "vdagent": false,
         "vnc": true
       }
