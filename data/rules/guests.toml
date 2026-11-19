@@ -1,0 +1,55 @@
+# L2 curated rules: guest operating systems (plan.md §6.2). A Windows guest
+# is recognised by its Hyper-V enlightenments (cpu.props `hv-*`).
+
+[[rule]]
+id = "l2.guest.windows-virtio-disk"
+verified_against = ["11.1"]
+field = "disks[*].bus"
+message = "Windows has no built-in virtio storage driver, so its installer will not see this disk. Attach the virtio-win driver ISO as a CD-ROM and load the driver during setup, or use SATA/IDE until the drivers are installed."
+docs = "https://github.com/virtio-win/virtio-win-pkg-scripts/blob/master/README.md"
+when = { all = [{ path = "facts.windows_guest", eq = true }, { path = "spec.disks[*].bus", eq = "virtio" }] }
+
+[[rule.test]]
+name = "Windows on a virtio disk"
+spec = { cpu = { props = { "hv-relaxed" = "on" } } }
+fires = true
+
+[[rule.test]]
+name = "Linux on a virtio disk"
+fires = false
+
+[[rule]]
+id = "l2.guest.windows-virtio-net"
+verified_against = ["11.1"]
+field = "nics[*].model"
+message = "Windows has no built-in virtio network driver: install it from the virtio-win driver ISO, or use e1000e until then."
+docs = "https://github.com/virtio-win/virtio-win-pkg-scripts/blob/master/README.md"
+when = { all = [{ path = "facts.windows_guest", eq = true }, { path = "spec.nics[*].model", starts_with = "virtio-net" }] }
+
+[[rule.test]]
+name = "Windows with virtio-net"
+spec = { cpu = { props = { "hv-relaxed" = "on" } } }
+fires = true
+
+[[rule.test]]
+name = "Windows with e1000e"
+spec = { cpu = { props = { "hv-relaxed" = "on" } }, nics = [{ backend = { kind = "user", forwards = [] }, model = "e1000e", mac = "52:54:00:12:34:56" }] }
+fires = false
+
+[[rule]]
+id = "l2.guest.windows-usb-tablet"
+verified_against = ["11.1"]
+field = "input.usb_tablet"
+message = "Without a USB tablet, Windows guests get relative mouse input and the pointer drifts away from the cursor in the console."
+when = { all = [{ path = "facts.windows_guest", eq = true }, { path = "spec.input.usb_tablet", eq = false }] }
+autofix = { description = "Add a USB tablet", set = [{ path = "input.usb_tablet", value = true }] }
+
+[[rule.test]]
+name = "Windows without a tablet"
+spec = { cpu = { props = { "hv-relaxed" = "on" } }, input = { usb_tablet = false } }
+fires = true
+
+[[rule.test]]
+name = "Windows with a tablet"
+spec = { cpu = { props = { "hv-relaxed" = "on" } } }
+fires = false

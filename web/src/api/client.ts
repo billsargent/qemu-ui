@@ -34,6 +34,8 @@ import type { SnapshotList } from "./generated/SnapshotList";
 import type { VmDetail } from "./generated/VmDetail";
 import type { VmEvent } from "./generated/VmEvent";
 import type { VmSpec } from "./generated/VmSpec";
+import type { RuleInfo } from "./generated/RuleInfo";
+import type { FixResult } from "./generated/FixResult";
 import type { VmSummary } from "./generated/VmSummary";
 
 export class ApiError extends Error {
@@ -103,6 +105,9 @@ export const api = {
     request<{ spec: VmSpec; diagnostics: Diagnostic[] }>(
       `/vms/defaults?arch=${encodeURIComponent(arch)}&name=${encodeURIComponent(name)}`,
     ),
+  rules: () => request<RuleInfo[]>("/rules"),
+  /** Apply a curated rule's automatic fix (M4-04). */
+  fixSpec: (spec: VmSpec, rule: string) => post<FixResult>("/vms/fix", { spec, rule }),
   compile: (spec: VmSpec, vmId?: string) => post<CompileResponse>("/vms/compile", { spec, vm_id: vmId }),
   lint: (spec: VmSpec, vmId?: string) => post<LintResult>("/vms/lint", { spec, vm_id: vmId }),
   /** Disk-bus support for a machine; `null` when it could not be probed. */
