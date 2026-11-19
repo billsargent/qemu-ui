@@ -25,6 +25,8 @@ pub struct App {
     pub supervisor: Arc<Supervisor>,
     pub consoles: crate::consoles::Consoles,
     pub uploads: Arc<crate::api_upload::Uploads>,
+    /// Console recordings (M5-03).
+    pub recordings: Arc<crate::recording::Recordings>,
     /// Local API token for non-browser clients (see `guard`).
     pub token: String,
     props: Mutex<HashMap<(String, String), Vec<DeviceProperty>>>,
@@ -35,6 +37,10 @@ impl App {
         Arc::new(App {
             scanner,
             uploads: crate::api_upload::Uploads::new(supervisor.clone()),
+            recordings: crate::recording::Recordings::new(
+                supervisor.data_dir(),
+                crate::recording::Limits::default(),
+            ),
             supervisor,
             token,
             consoles: crate::consoles::Consoles::default(),
@@ -82,6 +88,7 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
         .merge(crate::api_nics::routes())
         .merge(crate::api_hardware::routes())
         .merge(crate::consoles::routes())
+        .merge(crate::recording::routes())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "no such endpoint".into()) })
         .layer(axum::middleware::from_fn_with_state(
             app.clone(),

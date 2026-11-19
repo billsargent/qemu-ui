@@ -28,6 +28,7 @@ mod networks;
 mod passt;
 mod probe;
 mod procs;
+mod recording;
 mod scan;
 mod shares;
 mod store;
