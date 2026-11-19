@@ -97,6 +97,7 @@ impl Lv {
         let os_type = os.and_then(|o| child(o, "type"));
         let arch = attr(os_type, "arch").unwrap_or_else(|| "x86_64".into());
         let x86 = matches!(arch.as_str(), "x86_64" | "i686" | "i386");
+        let s390 = arch == "s390x";
         let arch = if arch == "i686" { "i386".into() } else { arch };
         let mut machine = MachineSpec {
             type_name: attr(os_type, "machine")
@@ -119,7 +120,7 @@ impl Lv {
         }
         let mut res = Devices::default();
         if let Some(devs) = child(dom, "devices") {
-            res = self.devices(devs, x86);
+            res = self.devices(devs, x86, s390);
         }
         // Boot order from <os><boot dev=…/> when no device had <boot order>.
         if !res.explicit_boot
@@ -180,6 +181,7 @@ impl Lv {
             },
             shares: vec![],
             usb: res.usb,
+            devices: res.devices,
             passthrough,
         };
         ImportResult {
@@ -349,7 +351,7 @@ impl Lv {
         }
     }
 
-    fn devices(&mut self, devs: Node, x86: bool) -> Devices {
+    fn devices(&mut self, devs: Node, x86: bool, s390: bool) -> Devices {
         let mut out = Devices::default();
         let mut skipped: Vec<String> = vec![];
         for d in devs.children().filter(|c| c.is_element()) {
@@ -394,11 +396,34 @@ impl Lv {
                          (needs a share root)"
                     ));
                 }
-                "graphics" | "controller" | "emulator" | "serial" | "console" | "channel" | "memballoon" => {}
+                "graphics" | "controller" | "emulator" | "serial" | "console" | "channel"
+                | "memballoon" => {}
                 "tpm" => self.warn("TPM not imported (not modelled yet)".into()),
                 "sound" | "audio" => self.warn("sound device not imported (not modelled)".into()),
-                "watchdog" => self.warn("watchdog not imported; add it as passthrough if needed".into()),
-                "rng" => self.warn("virtio RNG not imported; add `-device virtio-rng-pci` as passthrough if needed".into()),
+                "watchdog" => match d.attribute("model") {
+                    Some(m @ ("i6300esb" | "ib700" | "diag288")) => out.devices.push(device(m)),
+                    other => self.warn(format!("watchdog model {other:?} not imported")),
+                },
+                "panic" => match d.attribute("model") {
+                    Some("isa") | None if x86 => out.devices.push(device("pvpanic")),
+                    Some("pci") => out.devices.push(device("pvpanic-pci")),
+                    other => self.warn(format!("panic device model {other:?} not imported")),
+                },
+                "rng" => {
+                    let backend = child(d, "backend");
+                    if d.attribute("model") == Some("virtio")
+                        && backend.and_then(|b| b.attribute("model")) == Some("random")
+                    {
+                        // QEMU's default RNG backend reads the host's random source.
+                        out.devices.push(device(if s390 {
+                            "virtio-rng-ccw"
+                        } else {
+                            "virtio-rng-pci"
+                        }));
+                    } else {
+                        self.warn("RNG device with a non-random backend not imported".into());
+                    }
+                }
                 other => skipped.push(other.into()),
             }
         }
@@ -632,8 +657,18 @@ impl Lv {
     }
 }
 
+/// A generic device with QEMU's defaults.
+fn device(driver: &str) -> crate::devices::DeviceSpec {
+    crate::devices::DeviceSpec {
+        driver: driver.into(),
+        bus: None,
+        props: Default::default(),
+    }
+}
+
 #[derive(Default)]
 struct Devices {
+    devices: Vec<crate::devices::DeviceSpec>,
     disks: Vec<DiskSpec>,
     nics: Vec<NicSpec>,
     display: Option<String>,
@@ -827,7 +862,8 @@ mod tests {
         assert_eq!(s.nics[0].backend.forwards()[0].guest_port, 22);
         assert_eq!(s.display.device.as_deref(), Some("VGA"));
         assert!(r.warnings.iter().any(|w| w.contains("sound")));
-        assert!(r.warnings.iter().any(|w| w.contains("panic")));
+        assert_eq!(s.devices.len(), 1, "the ISA panic device");
+        assert_eq!(s.devices[0].driver, "pvpanic");
     }
 
     #[test]

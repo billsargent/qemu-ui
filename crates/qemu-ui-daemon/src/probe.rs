@@ -755,6 +755,7 @@ mod compile_smoke {
             input: InputSpec { usb_tablet: true },
             usb: vec![],
             shares: vec![],
+            devices: vec![],
             passthrough: vec![],
         };
         start_and_check(&caps, &spec, &images, None, &dir).await;

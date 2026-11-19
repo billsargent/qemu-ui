@@ -80,6 +80,7 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
         .merge(crate::api_rules::routes())
         .merge(crate::api_guest_net::routes())
         .merge(crate::api_nics::routes())
+        .merge(crate::api_hardware::routes())
         .merge(crate::consoles::routes())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "no such endpoint".into()) })
         .layer(axum::middleware::from_fn_with_state(
@@ -146,9 +147,18 @@ async fn device_properties(
     State(app): State<Arc<App>>,
     UrlPath((id, device)): UrlPath<(String, String)>,
 ) -> ApiResult<Vec<DeviceProperty>> {
-    let key = (id.clone(), device.clone());
+    cached_device_properties(&app, &id, &device).await.map(Json)
+}
+
+/// A device type's properties, probed once per binary and cached.
+pub(crate) async fn cached_device_properties(
+    app: &App,
+    id: &str,
+    device: &str,
+) -> Result<Vec<DeviceProperty>, ApiError> {
+    let key = (id.to_string(), device.to_string());
     if let Some(p) = app.props.lock().await.get(&key) {
-        return Ok(Json(p.clone()));
+        return Ok(p.clone());
     }
     let path = {
         let caps = app.scanner.caps.read().await;
@@ -165,9 +175,9 @@ async fn device_properties(
         }
         bin.binary.path.clone()
     };
-    let props = probe::device_properties(Path::new(&path), &device)
+    let props = probe::device_properties(Path::new(&path), device)
         .await
         .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")))?;
     app.props.lock().await.insert(key, props.clone());
-    Ok(Json(props))
+    Ok(props)
 }

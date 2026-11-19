@@ -8,6 +8,7 @@ pub mod arch;
 pub mod buses;
 pub mod caps;
 pub mod compile;
+pub mod devices;
 pub mod export_libvirt;
 pub mod fetch;
 pub mod firmware;

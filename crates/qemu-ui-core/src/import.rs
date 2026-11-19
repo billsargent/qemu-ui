@@ -125,6 +125,53 @@ pub fn suggest_vm_name(name: &str) -> String {
     }
 }
 
+/// Properties that point at other objects (`-object`, `-chardev`, …) by
+/// id. A device using one cannot stand alone, so it stays in passthrough
+/// together with what it refers to.
+pub const REFERENCE_PROPS: &[&str] = &[
+    "rng", "chardev", "netdev", "drive", "iothread", "memdev", "fsdev", "audiodev", "vhostfd",
+    "fd", "secret",
+];
+
+/// A generic device (M4-05) from parsed `key=value` properties, or `None`
+/// when it refers to other objects by id. Values become booleans or
+/// numbers when they look like one; `id`, `bus` and `addr` are dropped
+/// (qemu-ui assigns ids and lets QEMU place the device).
+pub fn generic_device(
+    driver: &str,
+    props: &[(String, String)],
+) -> Option<crate::devices::DeviceSpec> {
+    if props
+        .iter()
+        .any(|(k, _)| REFERENCE_PROPS.contains(&k.as_str()))
+    {
+        return None;
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for (k, v) in props {
+        if matches!(
+            k.as_str(),
+            "driver" | "id" | "bus" | "addr" | "multifunction"
+        ) {
+            continue;
+        }
+        let value = match v.as_str() {
+            "on" | "true" | "yes" => serde_json::Value::Bool(true),
+            "off" | "false" | "no" => serde_json::Value::Bool(false),
+            x => match x.parse::<i64>() {
+                Ok(n) if !x.starts_with('0') || x == "0" => serde_json::Value::from(n),
+                _ => serde_json::Value::String(x.to_string()),
+            },
+        };
+        out.insert(k.clone(), value);
+    }
+    Some(crate::devices::DeviceSpec {
+        driver: driver.to_string(),
+        bus: None,
+        props: out,
+    })
+}
+
 /// Does `path` name a raw host block device rather than an image file?
 pub fn is_block_device_path(path: &str) -> bool {
     let p = path.to_ascii_lowercase();

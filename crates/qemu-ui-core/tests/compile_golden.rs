@@ -49,6 +49,7 @@ fn caps(monitor_objects: bool) -> BinaryCaps {
         "virtserialport",
         "virtio-9p-pci",
         "vhost-user-fs-pci",
+        "virtio-rng-pci",
     ]
     .into_iter()
     .map(|n| DeviceInfo {
@@ -190,6 +191,7 @@ fn base_spec() -> VmSpec {
         shares: vec![],
         input: InputSpec { usb_tablet: true },
         usb: vec![],
+        devices: vec![],
         passthrough: vec![],
     }
 }
@@ -1283,4 +1285,53 @@ fn imported_argv_compiles_after_mapping_files() {
         "{argv}"
     );
     assert!(argv.contains("hostfwd"), "{argv}");
+}
+
+// ------------------------------------------------------------- M4-05
+
+#[test]
+fn linux_generic_devices() {
+    use qemu_ui_core::devices::DeviceSpec;
+    let caps = caps(true);
+    let mut s = base_spec();
+    let mut props = std::collections::BTreeMap::new();
+    props.insert("max-bytes".to_string(), serde_json::json!(1024));
+    props.insert("period".to_string(), serde_json::json!(1000));
+    s.devices.push(DeviceSpec {
+        driver: "virtio-rng-pci".into(),
+        bus: None,
+        props,
+    });
+    s.devices.push(DeviceSpec {
+        driver: "usb-tablet".into(),
+        bus: Some("qui-usb.0".into()),
+        props: Default::default(),
+    });
+    s.input.usb_tablet = true; // provides qui-usb
+    let images = images();
+    let ctx = Context {
+        taps: Default::default(),
+        networks: &[],
+        switch_sockets: &Default::default(),
+        shares: vec![],
+        caps: &caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
+        images: &images,
+        firmware: None,
+        machine: None,
+    };
+    let c = compile(&s, &ctx).unwrap();
+    golden("linux-generic-devices", &c);
+    let rng = c.args.iter().position(|a| a.contains("qui-xdev0")).unwrap();
+    let display = c.args.iter().position(|a| a == "-display").unwrap();
+    assert!(rng < display, "generic devices come after the curated ones");
+
+    s.devices[0].driver = "no-such-device".into();
+    let errs = compile(&s, &ctx).unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|d| d.rule == "device.missing" && d.field == "devices[0].driver"),
+        "{errs:?}"
+    );
 }

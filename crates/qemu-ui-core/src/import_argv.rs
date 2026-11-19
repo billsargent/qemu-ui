@@ -336,6 +336,7 @@ const DISPLAYS: &[&str] = &[
 
 struct Importer {
     arch: String,
+    devices: Vec<crate::devices::DeviceSpec>,
     spec_name: Option<String>,
     machine: Option<MachineSpec>,
     accel: Option<String>,
@@ -554,6 +555,7 @@ impl Importer {
             boot_order: None,
             explicit_boot: false,
             firmware: None,
+            devices: vec![],
             passthrough: vec![],
             warnings: vec![],
             managed: vec![],
@@ -1154,7 +1156,10 @@ impl Importer {
                 self.managed.push(format!("-device {driver}"))
             }
             d if CONTROLLERS.contains(&d) => self.generated.push(d.to_string()),
-            _ => self.keep(raw, Some(v)),
+            _ => match crate::import::generic_device(&driver, &kv) {
+                Some(dev) if !driver.is_empty() => self.devices.push(dev),
+                _ => self.keep(raw, Some(v)),
+            },
         }
     }
 
@@ -1344,6 +1349,7 @@ impl Importer {
             },
             shares: vec![],
             usb: self.usb,
+            devices: self.devices,
             passthrough: self.passthrough,
         };
         ImportResult {
@@ -1569,7 +1575,7 @@ mod tests {
              -drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd \
              -drive file=/vm/arm.img,format=raw -cdrom /iso/arm.iso -boot d \
              -netdev tap,id=t0,ifname=tap0 -device virtio-net-device,netdev=t0 \
-             -device virtio-rng-pci -object rng-random,id=rng0,filename=/dev/urandom",
+             -device virtio-rng-pci,max-bytes=1024,period=1000 -device i6300esb              -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0",
         )
         .unwrap();
         let s = &r.spec;
@@ -1588,11 +1594,17 @@ mod tests {
         assert_eq!(s.disks[0].boot_index, None);
         assert_eq!(s.display.device, None);
         assert!(r.warnings.iter().any(|w| w.contains("'tap' network")));
-        assert!(
-            s.passthrough.contains(&"-device".into())
-                && s.passthrough.contains(&"virtio-rng-pci".into())
+        // Stand-alone devices become generic devices with typed properties.
+        assert_eq!(s.devices.len(), 2, "{:?}", s.devices);
+        assert_eq!(s.devices[0].driver, "virtio-rng-pci");
+        assert_eq!(
+            s.devices[0].props.get("max-bytes"),
+            Some(&serde_json::json!(1024))
         );
+        assert_eq!(s.devices[1].driver, "i6300esb");
+        // A device naming another object by id stays in passthrough with it.
         assert!(s.passthrough.contains(&"-object".into()));
+        assert!(s.passthrough.contains(&"virtio-rng-pci,rng=rng0".into()));
     }
 
     #[test]

@@ -94,7 +94,20 @@ pub fn export_libvirt(spec: &VmSpec, ctx: &ExportContext) -> LibvirtExport {
         );
     }
     let mut x = String::new();
-    let qemu_ns = !spec.passthrough.is_empty();
+    let qemu_ns = !spec.passthrough.is_empty()
+        || spec.devices.iter().any(|d| {
+            !matches!(
+                d.driver.as_str(),
+                "virtio-rng-pci"
+                    | "virtio-rng-device"
+                    | "virtio-rng-ccw"
+                    | "i6300esb"
+                    | "ib700"
+                    | "diag288"
+                    | "pvpanic"
+                    | "pvpanic-pci"
+            ) || (d.driver.starts_with("virtio-rng") && !d.props.is_empty())
+        });
     let _ = write!(x, "<domain type='{dom_type}'");
     if qemu_ns {
         x.push_str(" xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'");
@@ -355,6 +368,37 @@ pub fn export_libvirt(spec: &VmSpec, ctx: &ExportContext) -> LibvirtExport {
             esc(&u.product_id)
         );
     }
+    // Generic devices: libvirt elements where one exists, else -device args.
+    let mut extra_args: Vec<String> = vec![];
+    for (i, d) in spec.devices.iter().enumerate() {
+        match d.driver.as_str() {
+            "virtio-rng-pci" | "virtio-rng-device" | "virtio-rng-ccw" if d.props.is_empty() => {
+                x.push_str("    <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>\n")
+            }
+            m @ ("i6300esb" | "ib700" | "diag288") => {
+                let _ = writeln!(x, "    <watchdog model='{m}' action='reset'/>");
+            }
+            "pvpanic" => x.push_str("    <panic model='isa'/>\n"),
+            "pvpanic-pci" => x.push_str("    <panic model='pci'/>\n"),
+            _ => {
+                let mut arg = d.driver.replace(',', ",,");
+                for (k, v) in &d.props {
+                    let v = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Bool(b) => if *b { "on" } else { "off" }.to_string(),
+                        other => other.to_string(),
+                    };
+                    let _ = write!(arg, ",{k}={}", v.replace(',', ",,"));
+                }
+                lossy.push(format!(
+                    "device {i} ({}) has no libvirt element; exported as a <qemu:arg> -device",
+                    d.driver
+                ));
+                extra_args.push("-device".into());
+                extra_args.push(arg);
+            }
+        }
+    }
     for s in &spec.shares {
         lossy.push(format!(
             "folder share '{}' is not exported; add a <filesystem> pointing at the folder",
@@ -364,7 +408,7 @@ pub fn export_libvirt(spec: &VmSpec, ctx: &ExportContext) -> LibvirtExport {
     x.push_str("  </devices>\n");
     if qemu_ns {
         x.push_str("  <qemu:commandline>\n");
-        for a in &spec.passthrough {
+        for a in extra_args.iter().chain(&spec.passthrough) {
             let _ = writeln!(x, "    <qemu:arg value='{}'/>", esc(a));
         }
         x.push_str("  </qemu:commandline>\n");
@@ -481,6 +525,18 @@ mod tests {
                 host_port: None,
                 label: None,
             }],
+            devices: vec![
+                crate::devices::DeviceSpec {
+                    driver: "virtio-rng-pci".into(),
+                    bus: None,
+                    props: Default::default(),
+                },
+                crate::devices::DeviceSpec {
+                    driver: "i6300esb".into(),
+                    bus: None,
+                    props: Default::default(),
+                },
+            ],
             passthrough: vec!["-rtc".into(), "base=utc".into()],
         }
     }
@@ -543,6 +599,7 @@ mod tests {
         assert_eq!(t.display, s.display);
         assert_eq!(t.input, s.input);
         assert_eq!(t.usb, s.usb);
+        assert_eq!(t.devices, s.devices);
         assert_eq!(t.passthrough, s.passthrough);
     }
 
