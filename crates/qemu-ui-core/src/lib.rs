@@ -27,6 +27,7 @@ pub mod rules;
 pub mod snapshot;
 pub mod spec;
 pub mod storage;
+pub mod structural;
 pub mod upload;
 pub mod usb;
 pub mod vm;

@@ -1089,6 +1089,7 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
         ));
     }
     diags.extend(validate_networks(spec, ctx.networks));
+    diags.extend(crate::structural::check(spec, ctx));
     diags.extend(validate_network_hosts(spec, ctx.networks, ctx.os));
     for (i, nic) in spec.nics.iter().enumerate() {
         if let NicBackend::Network { network, .. } = &nic.backend {

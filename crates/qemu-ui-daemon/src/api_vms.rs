@@ -176,7 +176,16 @@ async fn defaults(
                 format!("no qemu-system-{} installed", q.arch),
             )
         })?;
-    let (mut spec, diagnostics) = default_spec(q.name.as_deref().unwrap_or("new-vm"), bin);
+    let bin = bin.clone();
+    drop(caps);
+    // Knowing the default machine's buses keeps unpluggable devices out.
+    let (default_machine, _) = default_spec("probe", &bin);
+    let buses = app
+        .supervisor
+        .machine_buses(&bin, &default_machine.machine.type_name)
+        .await;
+    let (mut spec, diagnostics) =
+        qemu_ui_core::vm::default_spec_on(q.name.as_deref().unwrap_or("new-vm"), &bin, |_| buses);
     // Assign MACs now so the form and the argv preview show the same address.
     for nic in &mut spec.nics {
         nic.mac = Some(qemu_ui_core::vm::mac_from_bytes(rand::random()));
