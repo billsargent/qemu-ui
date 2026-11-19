@@ -12,6 +12,7 @@ import { VncConsole } from "../components/VncConsole";
 import { VmEditor } from "../components/VmEditor";
 import { Badge, Button, Card, Field, inputCls } from "../components/ui";
 import { ExportCard } from "../components/ImportExport";
+import { DisplayCard } from "../components/Screens";
 import { AccelBadge, StateBadge, VmActions, explainPause, useUptime } from "../components/vm";
 import { navigate } from "../router";
 
@@ -145,6 +146,7 @@ function Overview({ d }: { d: VmDetail }) {
         </ul>
       </Card>
       <ConnectCards vm={d} />
+      <DisplayCard vm={d} />
       <div className="lg:col-span-2">
         <ForwardsCard vm={d} />
       </div>

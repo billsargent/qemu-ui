@@ -89,6 +89,9 @@ pub struct RunPaths {
     pub serial_log: String,
     pub pidfile: String,
     pub vnc: VncListen,
+    /// Loopback TCP port for SPICE when `display.spice` is on; the
+    /// supervisor sets a per-run password via QMP.
+    pub spice_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1089,6 +1092,13 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
         ));
     }
     diags.extend(validate_networks(spec, ctx.networks));
+    if spec.display.spice && !caps.backends.has_spice() {
+        diags.push(Diagnostic::error(
+            "display.spice",
+            "display.spice-unsupported",
+            "this QEMU was built without SPICE; use the browser console (VNC) instead",
+        ));
+    }
     diags.extend(crate::structural::check(spec, ctx));
     diags.extend(validate_network_hosts(spec, ctx.networks, ctx.os));
     for (i, nic) in spec.nics.iter().enumerate() {
@@ -1427,6 +1437,13 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
             VncListen::Tcp { display } => format!("127.0.0.1:{display},password=on"),
         };
         push(&mut a, "-vnc", vnc);
+    }
+    if spec.display.spice
+        && let Some(port) = ctx.run.spice_port
+    {
+        // Ticketing stays on: nobody can connect until the supervisor sets
+        // the run's password over QMP.
+        push(&mut a, "-spice", format!("port={port},addr=127.0.0.1"));
     }
 
     // Monitors and serial

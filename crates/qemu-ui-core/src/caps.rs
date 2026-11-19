@@ -116,6 +116,13 @@ pub struct Backends {
 }
 
 impl Backends {
+    /// Built with SPICE? `-display spice-app` exists only in such builds.
+    pub fn has_spice(&self) -> bool {
+        self.display
+            .as_ref()
+            .is_some_and(|d| d.iter().any(|x| x == "spice-app"))
+    }
+
     /// QEMU 11.1 deprecates `-mon` in favour of `-object monitor-qmp`.
     pub fn has_object(&self, name: &str) -> bool {
         self.object
