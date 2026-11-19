@@ -595,6 +595,7 @@ mod compile_smoke {
             serial_log: s("serial.log"),
             pidfile: s("qemu.pid"),
             vnc,
+            spice_port: None,
         };
         let ctx = Context {
             taps: Default::default(),
@@ -751,6 +752,7 @@ mod compile_smoke {
                 device: Some("virtio-vga".into()),
                 vnc: true,
                 vdagent: true,
+                spice: false,
             },
             input: InputSpec { usb_tablet: true },
             usb: vec![],

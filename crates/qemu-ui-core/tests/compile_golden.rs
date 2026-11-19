@@ -134,6 +134,7 @@ fn run_paths(vnc: VncListen) -> RunPaths {
         serial_log: "/var/lib/qemu-ui/vms/vm1/serial.log".into(),
         pidfile: "/run/qui/vm1/qemu.pid".into(),
         vnc,
+        spice_port: None,
     }
 }
 
@@ -187,6 +188,7 @@ fn base_spec() -> VmSpec {
             device: Some("virtio-vga".into()),
             vnc: true,
             vdagent: false,
+            spice: false,
         },
         shares: vec![],
         input: InputSpec { usb_tablet: true },
@@ -316,6 +318,7 @@ fn windows_uefi_secure_boot_cdrom_with_comma() {
             serial_log: r"C:\qui\vms\vm1\serial.log".into(),
             pidfile: r"C:\qui\r\vm1\qemu.pid".into(),
             vnc: VncListen::Tcp { display: 7 },
+            spice_port: None,
         },
         images: &images,
         firmware: Some(ResolvedFirmware {
@@ -1426,5 +1429,53 @@ fn cpu_model_facts_are_warnings() {
     assert!(
         rules.contains(&"cpu.unavailable-features".to_string()),
         "{rules:?}"
+    );
+}
+
+fn compile_spice(spice_build: bool, port: Option<u16>) -> Result<Compiled, Vec<Diagnostic>> {
+    let mut caps = caps(true);
+    if spice_build {
+        caps.backends.display = Some(vec!["none".into(), "spice-app".into()]);
+    }
+    let images = images();
+    let mut run = run_paths(VncListen::Unix("/x".into()));
+    run.spice_port = port;
+    let mut s = base_spec();
+    s.display.spice = true;
+    let ctx = Context {
+        taps: Default::default(),
+        switch_sockets: &BTreeMap::new(),
+        networks: &[],
+        shares: vec![],
+        caps: &caps,
+        os: "linux",
+        run,
+        images: &images,
+        firmware: None,
+        machine: None,
+    };
+    compile(&s, &ctx)
+}
+
+#[test]
+fn spice_listens_on_loopback_with_ticketing() {
+    let c = compile_spice(true, Some(6901)).unwrap();
+    let i = c.args.iter().position(|a| a == "-spice").expect("-spice");
+    assert_eq!(c.args[i + 1], "port=6901,addr=127.0.0.1");
+    assert!(
+        !c.args[i + 1].contains("disable-ticketing") && !c.args[i + 1].contains("password"),
+        "the password is set over QMP, never on the command line"
+    );
+    // VNC (the browser console) stays on alongside.
+    assert!(c.args.iter().any(|a| a == "-vnc"));
+}
+
+#[test]
+fn spice_without_a_spice_build_is_an_error() {
+    let errs = compile_spice(false, Some(6901)).unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|d| d.rule == "display.spice-unsupported" && d.field == "display.spice"),
+        "{errs:?}"
     );
 }

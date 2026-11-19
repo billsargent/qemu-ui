@@ -321,6 +321,10 @@ pub struct DisplaySpec {
     /// qemu-vdagent: clipboard + absolute pointer (needs guest agent).
     #[serde(default)]
     pub vdagent: bool,
+    /// Also serve SPICE on loopback for a native client (remote-viewer):
+    /// USB redirection and smoother video than VNC (M5-05).
+    #[serde(default)]
+    pub spice: bool,
 }
 
 impl Default for DisplaySpec {
@@ -329,6 +333,7 @@ impl Default for DisplaySpec {
             device: None,
             vnc: true,
             vdagent: false,
+            spice: false,
         }
     }
 }

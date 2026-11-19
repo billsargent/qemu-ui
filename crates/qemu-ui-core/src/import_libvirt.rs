@@ -175,6 +175,7 @@ impl Lv {
                 device: res.display,
                 vnc: true,
                 vdagent: false,
+                spice: false,
             },
             input: InputSpec {
                 usb_tablet: res.tablet,
