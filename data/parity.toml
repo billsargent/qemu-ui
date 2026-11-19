@@ -97,8 +97,8 @@ windows = { status = "degraded", note = "QEMU on Windows does not listen on unix
 [[row]]
 id = "guacd"
 feature = "guacd rich display engine (SPICE, audio, multi-monitor)"
-linux = { status = "unverified", note = "Pending spike M0-15." }
-windows = { status = "unverified", note = "Pending spike M0-15. guacd has no native Windows build." }
+linux = { status = "needs-setup", note = "Deferred (spike M0-15): no guacamole-server release supports SPICE; VNC-only via a system guacd. SPICE uses the native client handoff." }
+windows = { status = "needs-setup", note = "Deferred (spike M0-15): guacd has no native Windows build (WSL2 or containers only)." }
 
 [[row]]
 id = "core"
