@@ -1237,6 +1237,56 @@ fn tap_networks_are_checked_for_host_resolution_and_queues() {
     );
 }
 
+/// An imported command line compiles once its files are mapped to images
+/// (M4-07): the importer's spec is a normal spec, not a special case.
+#[test]
+fn imported_argv_compiles_after_mapping_files() {
+    let r = qemu_ui_core::import_argv::import_argv(
+        "qemu-system-x86_64 -name guest=imported -machine q35 -accel kvm -smp 2 -m 2G \
+         -drive file=/srv/vms/imported.qcow2,if=virtio,format=qcow2 -cdrom /srv/iso/setup.iso \
+         -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-pci,netdev=n0 \
+         -device usb-tablet -vga std",
+    )
+    .unwrap();
+    let mut spec = r.spec;
+    let caps = caps(true);
+    spec.machine.type_name = pin_machine(&spec.machine.type_name, &caps).unwrap();
+    for n in &mut spec.nics {
+        n.mac.get_or_insert_with(|| "52:54:00:00:00:42".into());
+    }
+    let mut images = BTreeMap::new();
+    for f in &r.files_to_map {
+        let d = &spec.disks[f.disk];
+        images.insert(
+            d.image.clone(),
+            ResolvedImage {
+                path: format!("/var/lib/qemu-ui/pools/default/{}", d.image.name),
+                format: f.format.clone().unwrap_or_else(|| "raw".into()),
+                nbd: None,
+            },
+        );
+    }
+    let ctx = Context {
+        taps: Default::default(),
+        switch_sockets: &BTreeMap::new(),
+        networks: &[],
+        shares: vec![],
+        caps: &caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/x".into())),
+        images: &images,
+        firmware: None,
+        machine: None,
+    };
+    let c = compile(&spec, &ctx).unwrap_or_else(|d| panic!("{d:?}"));
+    let argv = c.args.join(" ");
+    assert!(
+        argv.contains("imported.qcow2") && argv.contains("setup.iso"),
+        "{argv}"
+    );
+    assert!(argv.contains("hostfwd"), "{argv}");
+}
+
 // ------------------------------------------------------------- M4-05
 
 #[test]

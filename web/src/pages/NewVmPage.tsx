@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { VmSpec } from "../api/generated/VmSpec";
 import { VmEditor } from "../components/VmEditor";
+import { ImportCard } from "../components/ImportExport";
 import { navigate } from "../router";
 
 export default function NewVmPage() {
@@ -11,6 +12,8 @@ export default function NewVmPage() {
   const [arch, setArch] = useState<string | null>(null);
   const [spec, setSpec] = useState<VmSpec | null>(null);
   const [saving, setSaving] = useState(false);
+  // An import sets the architecture itself; don't replace its spec with defaults.
+  const imported = useRef(false);
 
   // Default to the host's native architecture.
   useEffect(() => {
@@ -20,6 +23,10 @@ export default function NewVmPage() {
 
   useEffect(() => {
     if (!arch) return;
+    if (imported.current) {
+      imported.current = false;
+      return;
+    }
     let cancelled = false;
     api.defaults(arch, spec?.name ?? "new-vm").then((d) => !cancelled && setSpec(d.spec));
     return () => {
@@ -37,6 +44,13 @@ export default function NewVmPage() {
   return (
     <div className="max-w-7xl space-y-4">
       <h1 className="text-xl font-semibold">New virtual machine</h1>
+      <ImportCard
+        onImported={(s) => {
+          if (s.arch !== arch) imported.current = true;
+          setArch(s.arch);
+          setSpec(s);
+        }}
+      />
       <VmEditor
         initial={spec}
         archEditable
