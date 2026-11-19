@@ -39,6 +39,8 @@ import type { VmSpec } from "./generated/VmSpec";
 import type { RuleInfo } from "./generated/RuleInfo";
 import type { FixResult } from "./generated/FixResult";
 import type { VmSummary } from "./generated/VmSummary";
+import type { ConsolePresence } from "./generated/ConsolePresence";
+import type { DisplayInfo } from "./generated/DisplayInfo";
 
 export class ApiError extends Error {
   constructor(
@@ -85,7 +87,19 @@ export interface ConsoleTicket {
   ticket: string;
   protocol: string;
   vnc_password: string | null;
+  viewer_id: number | null;
+  read_only: boolean;
 }
+
+/** How a browser connects to a display engine (`POST /vms/{id}/display/{engine}/attach`). */
+export type DisplayAttachment = {
+  transport: "websocket";
+  path: string;
+  protocol: string;
+  viewer_id: number | null;
+  read_only: boolean;
+  vnc_password: string | null;
+};
 
 export const api = {
   capabilities: () => request<CapabilitiesResponse>("/host/capabilities"),
@@ -148,6 +162,12 @@ export const api = {
     return res.ok ? res.text() : "";
   },
   consoleTicket: (id: string, kind: "vnc" | "serial") => post<ConsoleTicket>(`/vms/${id}/consoles/${kind}/ticket`),
+  display: (id: string) => request<DisplayInfo>(`/vms/${id}/display`),
+  attachDisplay: (id: string, engine: string, watchOnly = false) =>
+    post<DisplayAttachment>(`/vms/${id}/display/${encodeURIComponent(engine)}/attach${watchOnly ? "?mode=view" : ""}`),
+  takeControl: (id: string, viewerId: number) =>
+    post<ConsolePresence>(`/vms/${id}/display/control`, { viewer_id: viewerId }),
+  screenshotUrl: (id: string) => `/api/v1/vms/${id}/display/screenshot`,
 
   networks: () => request<NetworkInfo[]>("/networks"),
   /** Host support for tap-backed networks: helper bridges (Linux), TAP adapters (Windows). */

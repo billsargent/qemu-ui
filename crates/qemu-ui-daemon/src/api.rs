@@ -82,6 +82,7 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
         .merge(crate::api_nics::routes())
         .merge(crate::api_hardware::routes())
         .merge(crate::consoles::routes())
+        .merge(crate::display::routes())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "no such endpoint".into()) })
         .layer(axum::middleware::from_fn_with_state(
             app.clone(),

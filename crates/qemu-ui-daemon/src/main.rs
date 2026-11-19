@@ -15,6 +15,7 @@ mod api_upload;
 mod api_vms;
 mod consoles;
 mod discovery;
+mod display;
 mod guard;
 mod guest_net;
 mod helper_client;

@@ -5,17 +5,24 @@
 //!   the API and passed as a WebSocket subprotocol (`qui-ticket.<ticket>`),
 //!   never in the URL. The `Origin` header must match the `Host`.
 //! * VNC: one upstream connection per viewer (QEMU's VNC server supports
-//!   several clients).
+//!   several clients). A VM's viewers form a session (M5-06): one holds
+//!   input control; the proxy splits every viewer's stream into RFB
+//!   messages (`qemu_ui_core::rfb`) and forwards input only from the
+//!   controller, so others can watch without typing. Watch-only tickets can
+//!   never take control. Idle viewers are disconnected, each VM takes a
+//!   bounded number of viewers, and presence changes go out as transient
+//!   `console-presence` events.
 //! * Serial: QEMU's socket chardev serves one client at a time, so the
 //!   daemon keeps a single connection per VM and fans it out (`SerialHub`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path as UrlPath, State};
+use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -25,11 +32,18 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{broadcast, mpsc};
 
+use qemu_ui_core::display::{ConsolePresence, ConsoleViewer};
+use qemu_ui_core::rfb::ClientStream;
+
 use crate::api::{ApiError, App};
 use crate::supervisor::VncInfo;
 
 const TICKET_TTL: Duration = Duration::from_secs(30);
 const PROTOCOL_PREFIX: &str = "qui-ticket.";
+/// Most graphical-console viewers per VM (connected plus ticketed).
+pub const MAX_VIEWERS: usize = 8;
+/// A viewer with no input for this long is disconnected.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -38,43 +52,253 @@ pub enum ConsoleKind {
     Serial,
 }
 
-struct Ticket {
+#[derive(Debug, Clone)]
+pub(crate) struct Ticket {
     vm_id: String,
     kind: ConsoleKind,
     expires: Instant,
+    /// Watch-only viewer.
+    read_only: bool,
+    /// The viewer this ticket admits (VNC).
+    viewer: u64,
 }
 
+/// One person watching a VM's display.
+struct Viewer {
+    id: u64,
+    label: String,
+    read_only: bool,
+    since_ms: u64,
+    joined: Instant,
+    last_input: Option<Instant>,
+    input_dropped: u64,
+}
+
+/// The viewers of one VM's graphical console.
 #[derive(Default)]
+struct Session {
+    viewers: Vec<Viewer>,
+    controller: Option<u64>,
+    /// For "Viewer N" labels; restarts when the session empties.
+    next_label: u32,
+}
+
 pub struct Consoles {
     tickets: Mutex<HashMap<String, Ticket>>,
     hubs: Mutex<HashMap<String, Arc<SerialHub>>>,
+    sessions: Mutex<HashMap<String, Session>>,
+    next_viewer: AtomicU64,
+    idle_timeout: Mutex<Duration>,
+}
+
+impl Default for Consoles {
+    fn default() -> Self {
+        Consoles {
+            tickets: Mutex::default(),
+            hubs: Mutex::default(),
+            sessions: Mutex::default(),
+            next_viewer: AtomicU64::new(1),
+            idle_timeout: Mutex::new(IDLE_TIMEOUT),
+        }
+    }
 }
 
 impl Consoles {
-    fn issue(&self, vm_id: &str, kind: ConsoleKind) -> String {
+    /// A single-use ticket and the viewer id it admits. VNC tickets count
+    /// against the VM's viewer limit until they expire or are used.
+    pub(crate) fn issue(
+        &self,
+        vm_id: &str,
+        kind: ConsoleKind,
+        read_only: bool,
+    ) -> Result<(String, u64), String> {
         let ticket: String = (0..32)
             .map(|_| format!("{:02x}", rand::random::<u8>()))
             .collect();
         let mut t = self.tickets.lock().unwrap();
         t.retain(|_, v| v.expires > Instant::now());
+        if kind == ConsoleKind::Vnc {
+            let pending = t
+                .values()
+                .filter(|v| v.kind == ConsoleKind::Vnc && v.vm_id == vm_id)
+                .count();
+            let connected = self
+                .sessions
+                .lock()
+                .unwrap()
+                .get(vm_id)
+                .map_or(0, |s| s.viewers.len());
+            if pending + connected >= MAX_VIEWERS {
+                return Err(format!(
+                    "this display already has {MAX_VIEWERS} viewers; close one first"
+                ));
+            }
+        }
+        let viewer = self.next_viewer.fetch_add(1, Ordering::Relaxed);
         t.insert(
             ticket.clone(),
             Ticket {
                 vm_id: vm_id.into(),
                 kind,
                 expires: Instant::now() + TICKET_TTL,
+                read_only,
+                viewer,
             },
         );
-        ticket
+        Ok((ticket, viewer))
     }
 
     /// Consume a ticket: valid once, for one VM and console kind.
-    fn redeem(&self, ticket: &str, vm_id: &str, kind: ConsoleKind) -> bool {
-        let Some(t) = self.tickets.lock().unwrap().remove(ticket) else {
+    fn redeem(&self, ticket: &str, vm_id: &str, kind: ConsoleKind) -> Option<Ticket> {
+        let t = self.tickets.lock().unwrap().remove(ticket)?;
+        (t.vm_id == vm_id && t.kind == kind && t.expires > Instant::now()).then_some(t)
+    }
+
+    /// Change how long a viewer may go without input (tests).
+    #[cfg(test)]
+    pub(crate) fn set_idle_timeout(&self, d: Duration) {
+        *self.idle_timeout.lock().unwrap() = d;
+    }
+
+    fn idle_timeout(&self) -> Duration {
+        *self.idle_timeout.lock().unwrap()
+    }
+
+    /// Who is watching `vm_id`.
+    pub fn presence(&self, vm_id: &str) -> ConsolePresence {
+        let sessions = self.sessions.lock().unwrap();
+        let viewers = sessions.get(vm_id).map_or_else(Vec::new, |s| {
+            s.viewers
+                .iter()
+                .map(|v| ConsoleViewer {
+                    id: v.id,
+                    label: v.label.clone(),
+                    read_only: v.read_only,
+                    controlling: s.controller == Some(v.id),
+                    since_ms: v.since_ms,
+                    input_dropped: v.input_dropped,
+                })
+                .collect()
+        });
+        ConsolePresence {
+            viewers,
+            limit: MAX_VIEWERS as u32,
+            idle_timeout_secs: self.idle_timeout().as_secs(),
+        }
+    }
+
+    /// A viewer connected. The first one able to type gets control.
+    fn join(&self, vm_id: &str, t: &Ticket) {
+        let mut sessions = self.sessions.lock().unwrap();
+        let s = sessions.entry(vm_id.to_string()).or_default();
+        s.next_label += 1;
+        s.viewers.push(Viewer {
+            id: t.viewer,
+            label: format!("Viewer {}", s.next_label),
+            read_only: t.read_only,
+            since_ms: now_ms(),
+            joined: Instant::now(),
+            last_input: None,
+            input_dropped: 0,
+        });
+        if s.controller.is_none() && !t.read_only {
+            s.controller = Some(t.viewer);
+        }
+    }
+
+    /// A viewer left. Control passes to the longest-connected viewer who can
+    /// type, so a session is never stuck with nobody at the keyboard.
+    fn leave(&self, vm_id: &str, viewer: u64) {
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(s) = sessions.get_mut(vm_id) else {
+            return;
+        };
+        s.viewers.retain(|v| v.id != viewer);
+        if s.controller == Some(viewer) {
+            s.controller = s.viewers.iter().find(|v| !v.read_only).map(|v| v.id);
+        }
+        if s.viewers.is_empty() {
+            sessions.remove(vm_id);
+        }
+    }
+
+    /// Give input control to `viewer`.
+    pub fn take_control(&self, vm_id: &str, viewer: u64) -> Result<(), String> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let s = sessions
+            .get_mut(vm_id)
+            .ok_or("nobody is viewing this display")?;
+        let v = s
+            .viewers
+            .iter()
+            .find(|v| v.id == viewer)
+            .ok_or("no such viewer")?;
+        if v.read_only {
+            return Err("this viewer joined watch-only and cannot take control".into());
+        }
+        s.controller = Some(viewer);
+        Ok(())
+    }
+
+    /// Account for one input message; returns whether to forward it.
+    fn admit_input(&self, vm_id: &str, viewer: u64) -> bool {
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(s) = sessions.get_mut(vm_id) else {
             return false;
         };
-        t.vm_id == vm_id && t.kind == kind && t.expires > Instant::now()
+        let controlling = s.controller == Some(viewer);
+        if let Some(v) = s.viewers.iter_mut().find(|v| v.id == viewer) {
+            v.last_input = Some(Instant::now());
+            if !controlling {
+                v.input_dropped += 1;
+            }
+        }
+        controlling
     }
+
+    fn is_controller(&self, vm_id: &str, viewer: u64) -> bool {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(vm_id)
+            .is_some_and(|s| s.controller == Some(viewer))
+    }
+
+    /// Why this viewer must disconnect now, if it must.
+    fn must_close(&self, vm_id: &str, viewer: u64) -> Option<String> {
+        let idle = self.idle_timeout();
+        let sessions = self.sessions.lock().unwrap();
+        let v = sessions
+            .get(vm_id)?
+            .viewers
+            .iter()
+            .find(|v| v.id == viewer)?;
+        let quiet = v.last_input.unwrap_or(v.joined).elapsed();
+        (quiet >= idle).then(|| {
+            let mins = idle.as_secs() / 60;
+            if mins > 0 {
+                format!("disconnected after {mins} minutes without input")
+            } else {
+                "disconnected: idle".to_string()
+            }
+        })
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Tell browsers who is watching (a transient event; not stored).
+pub(crate) fn publish_presence(app: &App, vm_id: &str) {
+    let p = app.consoles.presence(vm_id);
+    app.supervisor.notify(
+        vm_id,
+        "console-presence",
+        serde_json::to_value(p).unwrap_or_default(),
+    );
 }
 
 pub fn routes() -> Router<Arc<App>> {
@@ -96,11 +320,22 @@ struct TicketResponse {
     /// is already authenticated to get here; M6 replaces this with
     /// proxy-side RFB authentication.
     vnc_password: Option<String>,
+    /// The viewer this ticket admits (VNC); matches `ConsoleViewer::id`.
+    viewer_id: Option<u64>,
+    read_only: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct TicketQuery {
+    /// `view` for a watch-only viewer.
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 async fn ticket(
     State(app): State<Arc<App>>,
     UrlPath((id, kind)): UrlPath<(String, String)>,
+    Query(q): Query<TicketQuery>,
 ) -> Result<Json<TicketResponse>, ApiError> {
     let kind = match kind.as_str() {
         "vnc" => ConsoleKind::Vnc,
@@ -118,11 +353,17 @@ async fn ticket(
             None
         }
     };
-    let ticket = app.consoles.issue(&id, kind);
+    let read_only = q.mode.as_deref() == Some("view");
+    let (ticket, viewer) = app
+        .consoles
+        .issue(&id, kind, read_only)
+        .map_err(|m| ApiError(StatusCode::CONFLICT, m))?;
     Ok(Json(TicketResponse {
         protocol: format!("{PROTOCOL_PREFIX}{ticket}"),
         ticket,
         vnc_password,
+        viewer_id: (kind == ConsoleKind::Vnc).then_some(viewer),
+        read_only,
     }))
 }
 
@@ -138,6 +379,11 @@ fn origin_ok(headers: &HeaderMap) -> bool {
         (_, None) => true,
         _ => false,
     }
+}
+
+/// The WebSocket subprotocol that presents `ticket`.
+pub(crate) fn ticket_protocol_for(ticket: &str) -> String {
+    format!("{PROTOCOL_PREFIX}{ticket}")
 }
 
 /// Find our ticket among the requested subprotocols.
@@ -157,7 +403,7 @@ fn authorize(
     headers: &HeaderMap,
     id: &str,
     kind: ConsoleKind,
-) -> Result<String, ApiError> {
+) -> Result<(String, Ticket), ApiError> {
     if !origin_ok(headers) {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -166,16 +412,16 @@ fn authorize(
     }
     let proto = ticket_protocol(headers)
         .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "missing console ticket".into()))?;
-    if !app
+    let ticket = app
         .consoles
         .redeem(&proto[PROTOCOL_PREFIX.len()..], id, kind)
-    {
-        return Err(ApiError(
-            StatusCode::UNAUTHORIZED,
-            "invalid or expired console ticket".into(),
-        ));
-    }
-    Ok(proto)
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::UNAUTHORIZED,
+                "invalid or expired console ticket".into(),
+            )
+        })?;
+    Ok((proto, ticket))
 }
 
 async fn vnc_ws(
@@ -184,7 +430,7 @@ async fn vnc_ws(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let proto = match authorize(&app, &headers, &id, ConsoleKind::Vnc) {
+    let (proto, ticket) = match authorize(&app, &headers, &id, ConsoleKind::Vnc) {
         Ok(p) => p,
         Err(r) => return r.into_response(),
     };
@@ -204,36 +450,66 @@ async fn vnc_ws(
                     Box::new(s) as Box<dyn qemu_ui_qmp::transport::Stream>
                 }),
         };
-        match upstream {
-            Ok(up) => pump(socket, up).await,
-            Err(e) => close_with(socket, &format!("VNC unavailable: {e}")).await,
-        }
+        let up = match upstream {
+            Ok(up) => up,
+            Err(e) => return close_with(socket, &format!("VNC unavailable: {e}")).await,
+        };
+        app.consoles.join(&id, &ticket);
+        publish_presence(&app, &id);
+        pump_vnc(socket, up, &app, &id, ticket.viewer).await;
+        app.consoles.leave(&id, ticket.viewer);
+        publish_presence(&app, &id);
     })
 }
 
-/// Shuttle bytes between a WebSocket (binary frames) and a stream.
-async fn pump(socket: WebSocket, upstream: Box<dyn qemu_ui_qmp::transport::Stream>) {
+/// Shuttle one viewer's VNC traffic. Server→browser bytes pass untouched.
+/// Browser→server bytes are split into RFB messages, and input goes through
+/// only while this viewer holds control.
+async fn pump_vnc(
+    socket: WebSocket,
+    upstream: Box<dyn qemu_ui_qmp::transport::Stream>,
+    app: &App,
+    vm: &str,
+    viewer: u64,
+) {
     let (mut up_r, mut up_w) = tokio::io::split(upstream);
     let (mut ws_tx, mut ws_rx) = socket.split();
+    // A reason sent here closes the browser side with it.
+    let (close_tx, mut close_rx) = mpsc::channel::<String>(1);
     let to_browser = async {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
-            match up_r.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if ws_tx
-                        .send(Message::Binary(buf[..n].to_vec().into()))
-                        .await
-                        .is_err()
-                    {
-                        break;
+            tokio::select! {
+                n = up_r.read(&mut buf) => match n {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if ws_tx
+                            .send(Message::Binary(buf[..n].to_vec().into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
+                },
+                reason = close_rx.recv() => {
+                    let _ = ws_tx
+                        .send(Message::Close(Some(CloseFrame {
+                            code: 4000,
+                            reason: reason.unwrap_or_default().into(),
+                        })))
+                        .await;
+                    break;
                 }
             }
         }
         let _ = ws_tx.close().await;
     };
     let to_upstream = async {
+        let mut parser = ClientStream::new();
+        // A stream that cannot be split is forwarded whole, and only while
+        // this viewer holds control.
+        let mut opaque = false;
         while let Some(Ok(msg)) = ws_rx.next().await {
             let data = match msg {
                 Message::Binary(b) => b.to_vec(),
@@ -241,15 +517,50 @@ async fn pump(socket: WebSocket, upstream: Box<dyn qemu_ui_qmp::transport::Strea
                 Message::Close(_) => break,
                 _ => continue,
             };
-            if up_w.write_all(&data).await.is_err() {
+            let mut out = Vec::with_capacity(data.len());
+            if opaque {
+                if !app.consoles.is_controller(vm, viewer) {
+                    let _ = close_tx
+                        .send("this viewer's client can't watch without control".into())
+                        .await;
+                    return std::future::pending::<()>().await;
+                }
+                out = data;
+            } else {
+                for (kind, bytes) in parser.push(&data) {
+                    if kind.is_input() && !app.consoles.admit_input(vm, viewer) {
+                        continue;
+                    }
+                    out.extend(bytes);
+                }
+                if let Some(e) = parser.error() {
+                    tracing::debug!(vm, viewer, "VNC client stream not parseable: {e}");
+                    opaque = true;
+                    if app.consoles.is_controller(vm, viewer) {
+                        out.extend(parser.take_rest());
+                    }
+                }
+            }
+            if !out.is_empty() && up_w.write_all(&out).await.is_err() {
                 break;
             }
         }
         let _ = up_w.shutdown().await;
     };
+    let watchdog = async {
+        let mut tick = tokio::time::interval(Duration::from_millis(500));
+        loop {
+            tick.tick().await;
+            if let Some(reason) = app.consoles.must_close(vm, viewer) {
+                let _ = close_tx.send(reason).await;
+                return std::future::pending::<()>().await;
+            }
+        }
+    };
     tokio::select! {
         _ = to_browser => {},
         _ = to_upstream => {},
+        _ = watchdog => {},
     }
 }
 
@@ -303,7 +614,7 @@ async fn serial_ws(
     ws: WebSocketUpgrade,
 ) -> Response {
     let proto = match authorize(&app, &headers, &id, ConsoleKind::Serial) {
-        Ok(p) => p,
+        Ok((p, _)) => p,
         Err(r) => return r.into_response(),
     };
     let Some(sock) = app.supervisor.serial_socket(&id) else {
@@ -380,14 +691,87 @@ mod tests {
     #[test]
     fn tickets_are_single_use_and_scoped() {
         let c = Consoles::default();
-        let t = c.issue("vm1", ConsoleKind::Vnc);
-        assert!(!c.redeem(&t, "vm2", ConsoleKind::Vnc), "wrong VM");
-        let t = c.issue("vm1", ConsoleKind::Vnc);
-        assert!(!c.redeem(&t, "vm1", ConsoleKind::Serial), "wrong kind");
-        let t = c.issue("vm1", ConsoleKind::Vnc);
-        assert!(c.redeem(&t, "vm1", ConsoleKind::Vnc));
-        assert!(!c.redeem(&t, "vm1", ConsoleKind::Vnc), "single use");
-        assert!(!c.redeem("nope", "vm1", ConsoleKind::Vnc));
+        let issue = |vm: &str, k| c.issue(vm, k, false).unwrap().0;
+        let t = issue("vm1", ConsoleKind::Vnc);
+        assert!(c.redeem(&t, "vm2", ConsoleKind::Vnc).is_none(), "wrong VM");
+        let t = issue("vm1", ConsoleKind::Vnc);
+        assert!(
+            c.redeem(&t, "vm1", ConsoleKind::Serial).is_none(),
+            "wrong kind"
+        );
+        let t = issue("vm1", ConsoleKind::Vnc);
+        assert!(c.redeem(&t, "vm1", ConsoleKind::Vnc).is_some());
+        assert!(
+            c.redeem(&t, "vm1", ConsoleKind::Vnc).is_none(),
+            "single use"
+        );
+        assert!(c.redeem("nope", "vm1", ConsoleKind::Vnc).is_none());
+    }
+
+    fn joined(c: &Consoles, vm: &str, read_only: bool) -> u64 {
+        let (t, _) = c.issue(vm, ConsoleKind::Vnc, read_only).unwrap();
+        let t = c.redeem(&t, vm, ConsoleKind::Vnc).unwrap();
+        c.join(vm, &t);
+        t.viewer
+    }
+
+    #[test]
+    fn control_passes_between_viewers() {
+        let c = Consoles::default();
+        let watcher = joined(&c, "vm", true);
+        assert_eq!(c.presence("vm").viewers[0].label, "Viewer 1");
+        assert!(!c.is_controller("vm", watcher), "watch-only never controls");
+        let a = joined(&c, "vm", false);
+        let b = joined(&c, "vm", false);
+        assert!(c.is_controller("vm", a), "first viewer who can type");
+        assert!(c.admit_input("vm", a));
+        assert!(!c.admit_input("vm", b));
+        assert!(!c.admit_input("vm", watcher));
+        let p = c.presence("vm");
+        let dropped: Vec<u64> = p.viewers.iter().map(|v| v.input_dropped).collect();
+        assert_eq!(dropped, [1, 0, 1]);
+
+        c.take_control("vm", b).unwrap();
+        assert!(!c.admit_input("vm", a) && c.admit_input("vm", b));
+        assert!(c.take_control("vm", watcher).is_err());
+        assert!(c.take_control("vm", 9999).is_err());
+
+        // The controller leaves: the longest-connected typist takes over.
+        c.leave("vm", b);
+        assert!(c.is_controller("vm", a));
+        c.leave("vm", a);
+        assert!(c.presence("vm").viewers.iter().all(|v| !v.controlling));
+        c.leave("vm", watcher);
+        assert!(c.presence("vm").viewers.is_empty());
+        assert_eq!(joined(&c, "vm", false), 4, "ids keep growing");
+        assert_eq!(
+            c.presence("vm").viewers[0].label,
+            "Viewer 1",
+            "labels restart"
+        );
+    }
+
+    #[test]
+    fn viewer_limit_counts_pending_tickets() {
+        let c = Consoles::default();
+        for _ in 0..MAX_VIEWERS {
+            c.issue("vm", ConsoleKind::Vnc, true).unwrap();
+        }
+        assert!(c.issue("vm", ConsoleKind::Vnc, true).is_err());
+        assert!(c.issue("other", ConsoleKind::Vnc, true).is_ok(), "per VM");
+        assert!(
+            c.issue("vm", ConsoleKind::Serial, false).is_ok(),
+            "serial is separate"
+        );
+    }
+
+    #[test]
+    fn idle_viewers_are_closed() {
+        let c = Consoles::default();
+        let v = joined(&c, "vm", false);
+        assert!(c.must_close("vm", v).is_none());
+        c.set_idle_timeout(Duration::ZERO);
+        assert!(c.must_close("vm", v).unwrap().contains("idle"));
     }
 
     #[test]
@@ -587,3 +971,7 @@ mod real {
         let _ = std::fs::remove_dir_all(&data);
     }
 }
+
+#[cfg(test)]
+#[path = "consoles_viewers_test.rs"]
+mod viewers_test;
