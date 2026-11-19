@@ -646,6 +646,22 @@ export function VmEditor({
                 <input type="checkbox" checked={spec.display.vdagent} onChange={(e) => set({ display: { ...spec.display, vdagent: e.target.checked } })} />
                 Guest agent clipboard + absolute pointer (qemu-vdagent)
               </label>
+              <label
+                className="flex items-center gap-2"
+                title={
+                  bin && !(bin.backends.display ?? []).includes("spice-app")
+                    ? "This QEMU was built without SPICE"
+                    : "Loopback SPICE server for remote-viewer: smoother video, USB redirection"
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={spec.display.spice}
+                  disabled={!spec.display.spice && !!bin && !(bin.backends.display ?? []).includes("spice-app")}
+                  onChange={(e) => set({ display: { ...spec.display, spice: e.target.checked } })}
+                />
+                Native client (SPICE, for remote-viewer)
+              </label>
               <label className="flex items-center gap-2">
                 <input type="checkbox" checked={spec.input.usb_tablet} onChange={(e) => set({ input: { usb_tablet: e.target.checked } })} />
                 USB tablet (absolute pointer without guest tools)

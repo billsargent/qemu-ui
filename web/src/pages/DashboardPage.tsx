@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import type { VmSummary } from "../api/generated/VmSummary";
 import { Badge, Button, Card } from "../components/ui";
 import { AccelBadge, StateBadge, VmActions, explainPause, useUptime } from "../components/vm";
+import { VmThumbnail } from "../components/Screens";
 
 export default function DashboardPage() {
   const vms = useQuery({ queryKey: ["vms"], queryFn: api.vms });
@@ -49,6 +50,7 @@ function VmCard({ vm }: { vm: VmSummary }) {
         <StateBadge vm={vm} />
         <span className="ml-auto font-mono text-xs text-zinc-500">{vm.arch}</span>
       </div>
+      <VmThumbnail vm={vm} />
       <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
         {vm.state !== "stopped" && <AccelBadge accel={vm.accel} />}
         {uptime && <span>up {uptime}</span>}

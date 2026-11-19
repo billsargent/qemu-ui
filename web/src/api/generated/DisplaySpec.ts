@@ -12,4 +12,9 @@ vnc: boolean,
 /**
  * qemu-vdagent: clipboard + absolute pointer (needs guest agent).
  */
-vdagent: boolean, };
+vdagent: boolean, 
+/**
+ * Also serve SPICE on loopback for a native client (remote-viewer):
+ * USB redirection and smoother video than VNC (M5-05).
+ */
+spice: boolean, };

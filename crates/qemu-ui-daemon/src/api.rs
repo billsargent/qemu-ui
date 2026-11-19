@@ -25,6 +25,8 @@ pub struct App {
     pub supervisor: Arc<Supervisor>,
     pub consoles: crate::consoles::Consoles,
     pub uploads: Arc<crate::api_upload::Uploads>,
+    /// Dashboard thumbnails (M5-02).
+    pub thumbnails: crate::screens::Thumbnails,
     /// Local API token for non-browser clients (see `guard`).
     pub token: String,
     props: Mutex<HashMap<(String, String), Vec<DeviceProperty>>>,
@@ -38,6 +40,7 @@ impl App {
             supervisor,
             token,
             consoles: crate::consoles::Consoles::default(),
+            thumbnails: crate::screens::Thumbnails::default(),
             props: Mutex::default(),
         })
     }
@@ -82,6 +85,8 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
         .merge(crate::api_nics::routes())
         .merge(crate::api_hardware::routes())
         .merge(crate::consoles::routes())
+        .merge(crate::screens::routes())
+        .merge(crate::spice::routes())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "no such endpoint".into()) })
         .layer(axum::middleware::from_fn_with_state(
             app.clone(),
