@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../api/client";
 import type { VmDetail } from "../api/generated/VmDetail";
 import { SerialConsole } from "../components/SerialConsole";
+import { RecordingsTab } from "../components/RecordingsTab";
 import { SnapshotsTab } from "../components/SnapshotsTab";
 import { UsbShelf } from "../components/UsbShelf";
 import { VncConsole } from "../components/VncConsole";
@@ -16,7 +17,7 @@ import { DisplayCard } from "../components/Screens";
 import { AccelBadge, StateBadge, VmActions, explainPause, useUptime } from "../components/vm";
 import { navigate } from "../router";
 
-const TABS = ["overview", "console", "snapshots", "settings", "events"] as const;
+const TABS = ["overview", "console", "recordings", "snapshots", "settings", "events"] as const;
 
 export default function VmPage({ id, tab }: { id: string; tab: string }) {
   const vm = useQuery({ queryKey: ["vm", id], queryFn: () => api.vm(id) });
@@ -49,6 +50,7 @@ export default function VmPage({ id, tab }: { id: string; tab: string }) {
           <SerialConsole vmId={id} running={active} />
         </div>
       )}
+      {current === "recordings" && <RecordingsTab d={d} />}
       {current === "snapshots" && <SnapshotsTab vm={d.summary} />}
       {current === "settings" && <Settings d={d} />}
       {current === "events" && <Events id={id} />}

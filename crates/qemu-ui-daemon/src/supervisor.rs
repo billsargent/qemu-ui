@@ -287,6 +287,11 @@ impl Supervisor {
         (used, open)
     }
 
+    /// The daemon's data directory.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     fn vm_dir(&self, id: &str) -> PathBuf {
         self.data_dir.join("vms").join(id)
     }
