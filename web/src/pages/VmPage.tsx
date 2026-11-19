@@ -11,6 +11,7 @@ import { UsbShelf } from "../components/UsbShelf";
 import { VncConsole } from "../components/VncConsole";
 import { VmEditor } from "../components/VmEditor";
 import { Badge, Button, Card, Field, inputCls } from "../components/ui";
+import { ExportCard } from "../components/ImportExport";
 import { AccelBadge, StateBadge, VmActions, explainPause, useUptime } from "../components/vm";
 import { navigate } from "../router";
 
@@ -185,6 +186,7 @@ function Settings({ d }: { d: VmDetail }) {
         }}
       />
       <CloneCard d={d} stopped={stopped} />
+      <ExportCard id={d.summary.id} />
       <Card title="Danger zone">
         <div className="flex items-center gap-3">
           <Button
