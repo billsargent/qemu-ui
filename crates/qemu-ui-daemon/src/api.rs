@@ -91,6 +91,7 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
         .merge(crate::api_nics::routes())
         .merge(crate::api_hardware::routes())
         .merge(crate::consoles::routes())
+        .merge(crate::display::routes())
         .merge(crate::recording::routes())
         .merge(crate::screens::routes())
         .merge(crate::spice::routes())

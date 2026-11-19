@@ -302,6 +302,18 @@ impl Supervisor {
 
     // ---------------------------------------------------------------- events
 
+    /// A live-only event: sent to connected browsers, not stored or replayed
+    /// (e.g. console presence, which is stale a moment later).
+    pub fn notify(&self, vm_id: &str, kind: &str, data: Value) {
+        let _ = self.events.send(VmEvent {
+            seq: 0,
+            vm_id: vm_id.into(),
+            at_us: now_us(),
+            kind: kind.into(),
+            data,
+        });
+    }
+
     fn emit(&self, vm_id: &str, kind: &str, data: Value) {
         let at_us = now_us();
         match self
