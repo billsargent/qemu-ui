@@ -32,7 +32,7 @@ that maps 1:1 to GitHub issues. Changes from v2 are summarised in §0.
 | Windows NAT | "passt is the recommended Windows answer" | slirp on Windows; passt is Linux-only | passt does not run on Windows. |
 | Windows TPM | Win11 lane with swtpm on a WHPX host | TPM availability is *probed*; `impossible` on Windows hosts today | Verified: the QEMU 11.1 Windows build rejects `-tpmdev` as an invalid option, and swtpm has no mainstream Windows build. The probe decides, not the spec. |
 | Multiqueue NIC | `mq` with `-netdev user` | `mq` only with tap/vhost backends | slirp has no multiqueue. |
-| guacd / SPICE | committed for M5 on both OSes | Gated on a spike (M0-15) | SPICE support in guacamole-server and a native Windows guacd both need verification. |
+| guacd / SPICE | committed for M5 on both OSes | Deferred after spike M0-15 | No guacamole-server release supports SPICE (GUACAMOLE-261 unmerged) and guacd has no native Windows build; SPICE goes through `.vv` handoff (M5-05). See docs/spikes/m0-15-guacd.md. |
 | Recording | proxy tap → WebM | Record raw RFB stream, replay in noVNC; transcode only on export | Avoids an RFB decoder + video encoder in the daemon. |
 | Data model | `spec_json` *and* normalised `disk`/`nic` tables | spec is canonical; tables are derived indexes; adds `event` log | One source of truth; event replay needs storage. |
 | Privilege | "low-priv service account" that also does TAP/physical disks | Unprivileged daemon + narrow, audited privileged helper | The two goals contradict without a broker. |
@@ -171,7 +171,7 @@ scripts/             bootstrap.sh, env.sh, dev helpers
 | API types | Rust structs → OpenAPI (`utoipa`) → generated TS client | One source of truth; no hand-written Zod drift. |
 | Frontend | React 19 + TS + Vite, TanStack Router/Query, shadcn/ui | |
 | State | SQLite (WAL) + files for images, logs, run dirs | One DB file to back up. |
-| Display | noVNC via our WS proxy (v1); guacd engine gated on M0-15 | §8 |
+| Display | noVNC via our WS proxy (v1); guacd engine deferred (spike M0-15) | §8 |
 | Serial | xterm.js ↔ chardev socket | Non-negotiable fallback console. |
 
 ### 3.5 Project-local toolchain (new)
@@ -347,7 +347,7 @@ Console controls render from `EngineCaps`: absent, not broken.
 | Engine | Status |
 |---|---|
 | `vnc:novnc` — noVNC over our WS proxy | default, M1 |
-| `spice:guac` / `vnc:guac` — guacd | M5, **gated on spike M0-15** (SPICE support in guacamole-server; guacd has no native Windows build, so Windows needs WSL/container or is `degraded`) |
+| `spice:guac` / `vnc:guac` — guacd | **Deferred** by spike M0-15 (docs/spikes/m0-15-guacd.md): no released guacd speaks SPICE and guacd has no native Windows build. Revisit when a guacamole-server release ships GUACAMOLE-261 |
 | `spice:native` — `.vv` handoff to remote-viewer | M5; the honest answer for USB redirection and video |
 
 ### 8.2 VNC path (M1)
@@ -588,7 +588,7 @@ by the probe (probe wins), consumed by the UI (reasons) and by CI (assertions).
 | VFIO passthrough | `native` | `impossible` |
 | QMP + serial over AF_UNIX sockets | `native` | `native` (spike M0-14; Windows client bridges a blocking socket) |
 | VNC over unix socket | `native` | `degraded` — loopback TCP + per-run password |
-| guacd engine | `unverified` — spike M0-15 | `unverified` — spike M0-15 |
+| guacd engine | `needs-setup` — deferred (M0-15): VNC-only via a system guacd; no released SPICE | `needs-setup` — deferred (M0-15): no native guacd; WSL2/containers only |
 | Lifecycle, blockdev disks, snapshots, VNC console, serial, all target archs | `native` | `native` |
 
 ### 14.1 Spike M0-14 result: monitor and console transports on Windows
@@ -631,7 +631,7 @@ CI runs the golden corpus on **both** Windows and Linux; ledger claims are asser
 | # | Question | Decision |
 |---|---|---|
 | 6 | Process layout | One daemon + privileged helper (§3.1) |
-| 7 | guacd distribution | Detect-and-guide; gated on spike M0-15; bundling revisited after |
+| 7 | guacd distribution | Deferred by spike M0-15; if revived, detect a system guacd (Linux) and guide setup, no bundling |
 | 8 | QEMU distribution | Use installed QEMU *and* project/app-local managed copies side by side; Windows dev builds use `.tools/qemu` |
 | 9 | Default image location | First-run proposes app-data pool, user can choose another |
 | 10 | "VM as a link" | Plan now (blockdev + overlays from M1/M2); feature itself in backlog |
@@ -719,7 +719,7 @@ output is a decision recorded in this file.
 - **M5-01** `DisplayEngine` abstraction; `EngineCaps`-driven console controls
 - **M5-02** Dashboard thumbnails via `screendump`
 - **M5-03** Recording: RFB capture, noVNC replay, optional WebM export
-- **M5-04** guacd engine (SPICE/VNC, audio, multi-monitor) — gated on M0-15
+- **M5-04** guacd engine — **deferred** (M0-15): trigger is a guacamole-server release with SPICE (GUACAMOLE-261); until then SPICE is served by M5-05
 - **M5-05** Native client handoff (`.vv`)
 - **M5-06** Multi-viewer presence, take-control, read-only viewers
 
