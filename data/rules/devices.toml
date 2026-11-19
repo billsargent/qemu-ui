@@ -1,0 +1,55 @@
+# L2 curated rules: devices per machine (plan.md §6.2).
+
+[[rule]]
+id = "l2.display.s390x-no-graphics"
+verified_against = ["11.1"]
+applies_to = { arch = ["s390x"] }
+field = "display.device"
+message = "s390x guests have no graphical console worth using; Linux on s390x expects the serial (SCLP) console. Remove the display device and use the serial console."
+when = { path = "spec.display.device", exists = true }
+autofix = { description = "Remove the display device", set = [{ path = "display.device" }] }
+
+[[rule.test]]
+name = "s390x with a GPU"
+spec = { arch = "s390x", machine = { type = "s390-ccw-virtio-11.1" }, display = { device = "virtio-gpu-ccw" } }
+fires = true
+
+[[rule.test]]
+name = "x86 with a GPU"
+fires = false
+
+[[rule]]
+id = "l2.virtio.microvm-pci-device"
+verified_against = ["11.1"]
+applies_to = { machine = ["microvm"] }
+field = "nics[*].model"
+message = "The microvm machine has no PCI bus by default; its virtio devices use the virtio-mmio transport (the '-device' variants, such as virtio-net-device)."
+when = { path = "spec.nics[*].model", ends_with = "-pci" }
+autofix = { description = "Use virtio-net-device", set = [{ path = "nics[*].model", value = "virtio-net-device" }] }
+
+[[rule.test]]
+name = "microvm with virtio-net-pci"
+spec = { machine = { type = "microvm" } }
+fires = true
+
+[[rule.test]]
+name = "q35 with virtio-net-pci"
+fires = false
+
+[[rule]]
+id = "l2.virtio.pc-mmio-device"
+verified_against = ["11.1"]
+applies_to = { arch = ["x86_64", "i386"], machine = ["pc-"] }
+field = "nics[*].model"
+message = "PC machines (q35, i440fx) have no virtio-mmio bus; use the PCI variant of virtio devices."
+when = { path = "spec.nics[*].model", eq = "virtio-net-device" }
+autofix = { description = "Use virtio-net-pci", set = [{ path = "nics[*].model", value = "virtio-net-pci" }] }
+
+[[rule.test]]
+name = "q35 with virtio-net-device"
+spec = { nics = [{ backend = { kind = "user", forwards = [] }, model = "virtio-net-device", mac = "52:54:00:12:34:56" }] }
+fires = true
+
+[[rule.test]]
+name = "q35 with virtio-net-pci"
+fires = false

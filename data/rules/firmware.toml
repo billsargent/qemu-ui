@@ -1,0 +1,40 @@
+# L2 curated rules: firmware (plan.md §6.2).
+
+[[rule]]
+id = "l2.firmware.secure-boot-needs-q35"
+verified_against = ["11.1"]
+applies_to = { arch = ["x86_64", "i386"] }
+field = "machine.type"
+message = "Secure Boot firmware relies on SMM to protect its variable store, which needs the q35 machine; on i440fx the guest will not boot or will not enforce Secure Boot."
+docs = "https://github.com/tianocore/edk2/blob/master/OvmfPkg/README"
+when = { all = [{ path = "facts.firmware_secure_boot", eq = true }, { path = "spec.machine.type", starts_with = "pc-i440fx" }] }
+
+[[rule.test]]
+name = "Secure Boot on i440fx"
+spec = { machine = { type = "pc-i440fx-11.1" } }
+facts = { firmware_uefi = true, firmware_secure_boot = true }
+fires = true
+
+[[rule.test]]
+name = "Secure Boot on q35"
+facts = { firmware_uefi = true, firmware_secure_boot = true }
+fires = false
+
+[[rule]]
+id = "l2.firmware.uefi-low-memory"
+verified_against = ["11.1"]
+field = "memory.size_mib"
+message = "UEFI firmware needs more memory than BIOS to reach the boot loader; below 256 MiB guests often hang in the firmware."
+when = { all = [{ path = "facts.firmware_uefi", eq = true }, { path = "spec.memory.size_mib", lt = 256.0 }] }
+autofix = { description = "Give the VM 512 MiB", set = [{ path = "memory.size_mib", value = 512 }] }
+
+[[rule.test]]
+name = "UEFI with 128 MiB"
+spec = { memory = { size_mib = 128 } }
+facts = { firmware_uefi = true }
+fires = true
+
+[[rule.test]]
+name = "BIOS with 128 MiB"
+spec = { memory = { size_mib = 128 } }
+fires = false

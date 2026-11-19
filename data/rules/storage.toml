@@ -1,0 +1,19 @@
+# L2 curated rules: storage (plan.md §6.2).
+
+[[rule]]
+id = "l2.disk.unsafe-cache"
+verified_against = ["11.1"]
+covers = ["disk.cache-unsafe"]
+field = "disks[*].cache"
+message = "cache=unsafe ignores the guest's flushes: fast, but a host crash or power loss can corrupt the disk. Use it only for throwaway VMs."
+when = { path = "spec.disks[*].cache", eq = "unsafe" }
+autofix = { description = "Use cache=none", set = [{ path = "disks[*].cache", value = "none" }] }
+
+[[rule.test]]
+name = "unsafe cache"
+spec = { disks = [{ image = { pool = "default", name = "disk.qcow2" }, bus = "virtio", cache = "unsafe" }] }
+fires = true
+
+[[rule.test]]
+name = "cache=none"
+fires = false
