@@ -16,6 +16,7 @@ import type { ShareSpec } from "../api/generated/ShareSpec";
 import type { VmSpec } from "../api/generated/VmSpec";
 import { MacField, NicModelField, VirtioNetFields } from "./NicFields";
 import { Badge, Button, Card, Field, inputCls } from "./ui";
+import { ChangedChips, FixButton, FixError, useFixes } from "./FixChips";
 import { kindLabel } from "../pages/NetworksPage";
 
 // ---------------------------------------------------------------- helpers
@@ -69,6 +70,7 @@ function Diags({ list }: { list: Diagnostic[] }) {
         <li key={i} className={`text-xs ${d.severity === "error" ? "text-rose-600" : "text-amber-700 dark:text-amber-400"}`}>
           {d.severity === "error" ? "✕" : "!"} {d.message}{" "}
           <span className="font-mono text-zinc-400">[{d.rule}]</span>
+          <FixButton rule={d.rule} />
         </li>
       ))}
     </ul>
@@ -166,9 +168,12 @@ export function VmEditor({
   );
   const diagsFor = (prefix: string) => diags.filter((d) => d.field === prefix || d.field.startsWith(`${prefix}.`) || d.field.startsWith(`${prefix}[`));
   const hasErrors = diags.some((d) => d.severity === "error");
+  // Auto-fix (M4-04): fixed fields get "changed" chips until the next edit or save.
+  const fixes = useFixes(spec, setSpec);
 
   const set = (patch: Partial<VmSpec>) => {
     setSaveError(null);
+    fixes.clear();
     setSpec((s) => ({ ...s, ...patch }));
   };
 
@@ -187,6 +192,7 @@ export function VmEditor({
     setSaveError(null);
     try {
       await onSave(spec);
+      fixes.clear();
     } catch (e) {
       if (e instanceof ApiError) setSaveError({ message: e.message, diagnostics: e.diagnostics });
       else setSaveError({ message: (e as Error).message, diagnostics: [] });
@@ -200,9 +206,11 @@ export function VmEditor({
   const setForwards = (i: number, forwards: PortForward[]) =>
     updateNic(i, { backend: { ...spec.nics[i].backend, forwards } });
 
-  return (
+  return fixes.provide(
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,30rem)]">
       <div className="space-y-4">
+        <ChangedChips changed={fixes.changed} onDismiss={fixes.clear} />
+        <FixError />
         <Card title="General">
           <div className="grid grid-cols-2 gap-3">
             <Field label="Name">

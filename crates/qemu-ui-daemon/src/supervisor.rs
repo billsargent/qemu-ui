@@ -37,6 +37,7 @@ use crate::store::{NewRun, RunRow, Store};
 mod disks;
 mod forwards;
 mod nics;
+mod rules;
 mod snapshots;
 mod taps;
 
@@ -1021,9 +1022,13 @@ impl Supervisor {
                 let mut w = c.warnings.clone();
                 w.extend(self.forward_conflicts(id, &spec));
                 w.extend(self.shared_mac_warnings(id, &spec));
+                self.add_rule_diagnostics(&mut w, &spec, &caps).await;
                 Ok((c, w))
             }
-            Err(d) => Err(OpError::Invalid(d)),
+            Err(mut d) => {
+                self.add_rule_diagnostics(&mut d, &spec, &caps).await;
+                Err(OpError::Invalid(d))
+            }
         }
     }
 
@@ -1035,6 +1040,8 @@ impl Supervisor {
         let (spec, caps) = self.normalise(spec).await?;
         // Depends on other VMs, so it is never cached.
         let conflicts = self.forward_conflicts(id, &spec);
+        // Curated rules (L2) are cheap and may change with site overrides.
+        let facts = self.rule_facts(&spec, &caps).await;
         let lspec = lint::lint_spec(&spec);
         let key = {
             use sha2::{Digest, Sha256};
@@ -1046,6 +1053,7 @@ impl Supervisor {
         if let Some(mut hit) = self.lint_cache.lock().unwrap().get(&key).cloned() {
             hit.cached = true;
             hit.diagnostics.extend(conflicts);
+            self.rules().extend(&mut hit.diagnostics, &spec, &facts);
             return Ok(hit);
         }
 
@@ -1070,6 +1078,7 @@ impl Supervisor {
         cache.insert(key, res.clone());
         let mut res = res;
         res.diagnostics.extend(conflicts);
+        self.rules().extend(&mut res.diagnostics, &spec, &facts);
         Ok(res)
     }
 

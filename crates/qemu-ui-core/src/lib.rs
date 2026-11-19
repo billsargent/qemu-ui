@@ -22,6 +22,7 @@ pub mod lint;
 pub mod network;
 pub mod nic;
 pub mod parity;
+pub mod rules;
 pub mod snapshot;
 pub mod spec;
 pub mod storage;

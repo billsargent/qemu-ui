@@ -1,0 +1,44 @@
+# L2 curated rules: CPU (plan.md §6.2). Warn by default; format in
+# data/schema/rules.v1.json.
+
+[[rule]]
+id = "l2.cpu.host-without-hardware-accel"
+verified_against = ["11.1"]
+covers = ["cpu.host-needs-accel"]
+field = "cpu.model"
+message = "The 'host' CPU model passes the host's CPU through, so it only works with a hardware accelerator (KVM, HVF, WHPX). Under TCG use 'max'. On ARM 'virt' machines this is the usual reason 'host' fails."
+docs = "https://www.qemu.org/docs/master/system/qemu-cpu-models.html"
+when = { all = [{ path = "spec.cpu.model", eq = "host" }, { path = "facts.hardware_accel", eq = false }] }
+autofix = { description = "Use the 'max' CPU model", set = [{ path = "cpu.model", value = "max" }] }
+
+[[rule.test]]
+name = "host CPU under TCG"
+spec = { cpu = { model = "host" } }
+facts = { accel = "tcg", hardware_accel = false }
+fires = true
+
+[[rule.test]]
+name = "host CPU with KVM"
+spec = { cpu = { model = "host" } }
+facts = { accel = "kvm", hardware_accel = true }
+fires = false
+
+[[rule]]
+id = "l2.cpu.topology-over-max"
+verified_against = ["11.1"]
+covers = ["cpu.max-exceeded", "cpu.topology-mismatch"]
+field = "cpu.topology"
+message = "The topology (sockets × cores × threads) asks for more vCPUs than this machine type supports (its cpu-max)."
+when = { path = "facts.cpus_over_max", eq = true }
+
+[[rule.test]]
+name = "topology beyond cpu-max"
+spec = { cpu = { count = 512, topology = { sockets = 2, cores = 128, threads = 2 } } }
+facts = { max_cpus = 288 }
+fires = true
+
+[[rule.test]]
+name = "topology within cpu-max"
+spec = { cpu = { count = 4, topology = { sockets = 1, cores = 2, threads = 2 } } }
+facts = { max_cpus = 288 }
+fires = false
