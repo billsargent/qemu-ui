@@ -6,6 +6,7 @@ mod api_fetch;
 mod api_forwards;
 mod api_guest_net;
 mod api_nics;
+mod api_rules;
 mod api_snapshots;
 mod api_storage;
 mod api_upload;

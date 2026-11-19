@@ -1,0 +1,346 @@
+{
+  "$defs": {
+    "AppliesTo": {
+      "additionalProperties": false,
+      "description": "Shorthand filters, all optional; every given list must match.",
+      "properties": {
+        "accel": {
+          "default": [],
+          "description": "The resolved accelerator is one of these.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "arch": {
+          "default": [],
+          "description": "`spec.arch` is one of these.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "host_os": {
+          "default": [],
+          "description": "The host OS (`linux`, `windows`, `macos`) is one of these.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "machine": {
+          "default": [],
+          "description": "`spec.machine.type` starts with one of these.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Autofix": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "description": "What the fix does, shown on its button.",
+          "type": "string"
+        },
+        "set": {
+          "items": {
+            "$ref": "#/$defs/SetOp"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "description",
+        "set"
+      ],
+      "type": "object"
+    },
+    "Cond": {
+      "additionalProperties": false,
+      "description": "A condition: exactly one of `all`/`any`/`not`/`path`; with `path`,\nexactly one operator.",
+      "properties": {
+        "all": {
+          "items": {
+            "$ref": "#/$defs/Cond"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "any": {
+          "items": {
+            "$ref": "#/$defs/Cond"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "contains": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ends_with": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "eq": {
+          "default": null
+        },
+        "exists": {
+          "default": null,
+          "description": "With `true`: some non-null value is at `path`; `false`: none is.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ge": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "gt": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "in": {
+          "default": null,
+          "items": true,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "le": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "lt": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ne": {
+          "default": null
+        },
+        "not": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cond"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "not_in": {
+          "default": null,
+          "items": true,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "path": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "starts_with": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Rule": {
+      "additionalProperties": false,
+      "properties": {
+        "applies_to": {
+          "$ref": "#/$defs/AppliesTo"
+        },
+        "autofix": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Autofix"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "citation": {
+          "default": null,
+          "description": "Where the behaviour is documented (required for `error`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "covers": {
+          "default": [],
+          "description": "Built-in (L1) diagnostics this rule is the curated counterpart of:\nwhen one of them is reported this rule stays quiet, and its\nauto-fix is offered for that diagnostic instead.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "docs": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "Spec field the finding is pinned to (no `spec.` prefix).",
+          "type": "string"
+        },
+        "id": {
+          "description": "Stable id, `l2.<area>.<name>`.",
+          "type": "string"
+        },
+        "lint_reproduction": {
+          "default": null,
+          "description": "How to reproduce the failure with \"Check config\" (required for `error`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/RuleSeverity",
+          "default": "warn"
+        },
+        "test": {
+          "items": {
+            "$ref": "#/$defs/RuleTest"
+          },
+          "type": "array"
+        },
+        "verified_against": {
+          "description": "QEMU versions the rule was checked against, e.g. `[\"11.1\"]`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "when": {
+          "$ref": "#/$defs/Cond"
+        }
+      },
+      "required": [
+        "id",
+        "verified_against",
+        "when",
+        "field",
+        "message"
+      ],
+      "type": "object"
+    },
+    "RuleSeverity": {
+      "oneOf": [
+        {
+          "enum": [
+            "warn"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "Only with a `citation` and a `lint_reproduction`.",
+          "type": "string"
+        }
+      ]
+    },
+    "RuleTest": {
+      "additionalProperties": false,
+      "properties": {
+        "facts": {
+          "default": null,
+          "description": "Facts to override (the rest are derived from the patched spec)."
+        },
+        "fires": {
+          "description": "Should the rule fire?",
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "spec": {
+          "default": null,
+          "description": "JSON merge patch applied to the harness's base spec."
+        }
+      },
+      "required": [
+        "name",
+        "fires"
+      ],
+      "type": "object"
+    },
+    "SetOp": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Spec path (no `spec.` prefix); may use `[*]`.",
+          "type": "string"
+        },
+        "value": {
+          "default": null,
+          "description": "The new value; leave it out to clear an optional field (TOML has\nno null)."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One `data/rules/*.toml` file.",
+  "properties": {
+    "rule": {
+      "items": {
+        "$ref": "#/$defs/Rule"
+      },
+      "type": "array"
+    }
+  },
+  "title": "RuleFile",
+  "type": "object"
+}
