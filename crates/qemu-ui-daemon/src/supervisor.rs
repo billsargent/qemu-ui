@@ -36,6 +36,7 @@ use crate::store::{NewRun, RunRow, Store};
 
 mod disks;
 mod forwards;
+mod hardware;
 mod nics;
 mod rules;
 mod snapshots;

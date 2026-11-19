@@ -49,6 +49,7 @@ fn caps(monitor_objects: bool) -> BinaryCaps {
         "virtserialport",
         "virtio-9p-pci",
         "vhost-user-fs-pci",
+        "virtio-rng-pci",
     ]
     .into_iter()
     .map(|n| DeviceInfo {
@@ -190,6 +191,7 @@ fn base_spec() -> VmSpec {
         shares: vec![],
         input: InputSpec { usb_tablet: true },
         usb: vec![],
+        devices: vec![],
         passthrough: vec![],
     }
 }
@@ -1235,6 +1237,55 @@ fn tap_networks_are_checked_for_host_resolution_and_queues() {
     );
 }
 
+// ------------------------------------------------------------- M4-05
+
+#[test]
+fn linux_generic_devices() {
+    use qemu_ui_core::devices::DeviceSpec;
+    let caps = caps(true);
+    let mut s = base_spec();
+    let mut props = std::collections::BTreeMap::new();
+    props.insert("max-bytes".to_string(), serde_json::json!(1024));
+    props.insert("period".to_string(), serde_json::json!(1000));
+    s.devices.push(DeviceSpec {
+        driver: "virtio-rng-pci".into(),
+        bus: None,
+        props,
+    });
+    s.devices.push(DeviceSpec {
+        driver: "usb-tablet".into(),
+        bus: Some("qui-usb.0".into()),
+        props: Default::default(),
+    });
+    s.input.usb_tablet = true; // provides qui-usb
+    let images = images();
+    let ctx = Context {
+        taps: Default::default(),
+        networks: &[],
+        switch_sockets: &Default::default(),
+        shares: vec![],
+        caps: &caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
+        images: &images,
+        firmware: None,
+        machine: None,
+    };
+    let c = compile(&s, &ctx).unwrap();
+    golden("linux-generic-devices", &c);
+    let rng = c.args.iter().position(|a| a.contains("qui-xdev0")).unwrap();
+    let display = c.args.iter().position(|a| a == "-display").unwrap();
+    assert!(rng < display, "generic devices come after the curated ones");
+
+    s.devices[0].driver = "no-such-device".into();
+    let errs = compile(&s, &ctx).unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|d| d.rule == "device.missing" && d.field == "devices[0].driver"),
+        "{errs:?}"
+    );
+}
+
 // ------------------------------------------------------------------ M4-01
 
 fn all_rules(
@@ -1265,10 +1316,10 @@ fn all_rules(
 fn passthrough_devices_must_exist() {
     let caps = caps(true);
     let mut s = base_spec();
-    s.passthrough = vec!["-device".into(), "virtio-rng-pci,id=rng0".into()];
-    assert!(all_rules(&s, &caps, None).contains(&"device.unknown".to_string()));
+    s.passthrough = vec!["-device".into(), "no-such-device,id=x0".into()];
+    assert!(all_rules(&s, &caps, None).contains(&"device.missing".to_string()));
     s.passthrough = vec!["-device".into(), "virtio-serial-pci,id=s0".into()];
-    assert!(!all_rules(&s, &caps, None).contains(&"device.unknown".to_string()));
+    assert!(!all_rules(&s, &caps, None).contains(&"device.missing".to_string()));
 }
 
 #[test]
@@ -1281,7 +1332,7 @@ fn internal_only_devices_are_refused() {
         .no_user = true;
     let mut s = base_spec();
     s.nics[0].model = "e1000e".into();
-    assert!(all_rules(&s, &caps, None).contains(&"device.no-user".to_string()));
+    assert!(all_rules(&s, &caps, None).contains(&"device.not-user-creatable".to_string()));
 }
 
 #[test]
@@ -1301,16 +1352,10 @@ fn display_device_needs_a_bus_on_the_machine() {
         buses: vec![],
     };
     let rules = all_rules(&s, &caps, Some(&no_pci));
-    assert!(
-        rules.contains(&"device.bus-unavailable".to_string()),
-        "{rules:?}"
-    );
+    assert!(rules.contains(&"device.bus".to_string()), "{rules:?}");
     let q35 = machine_buses("qtree-x86_64-q35.txt", "pc-q35-11.1");
     let rules = all_rules(&s, &caps, Some(&q35));
-    assert!(
-        !rules.contains(&"device.bus-unavailable".to_string()),
-        "{rules:?}"
-    );
+    assert!(!rules.contains(&"device.bus".to_string()), "{rules:?}");
 }
 
 #[test]

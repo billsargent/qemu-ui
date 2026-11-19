@@ -84,7 +84,7 @@ jobs:
         shell: bash
         run: |
           scripts/bootstrap.sh qemu
-          echo "QEMU_UI_QEMU_DIR=$PWD/.tools/qemu" >> "$GITHUB_ENV"
+          echo "QEMU_UI_QEMU_DIR=$(cygpath -w "$PWD/.tools/qemu")" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

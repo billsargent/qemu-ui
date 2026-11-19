@@ -16,17 +16,17 @@ Layers (plan.md §6):
 
 ## L1 structural rules (M4-01)
 
-### `device.unknown`
+### `device.missing`
 A `-device` driver in passthrough that this QEMU binary does not have
 (`qemu-system-<arch> -device help` lists the ones it has). QEMU would refuse
 to start. Devices chosen in the editor have their own rules
 (`nic.model-missing`, `display.device-missing`, `disk.device-missing`).
 
-### `device.no-user`
+### `device.not-user-creatable`
 The device exists but QEMU only creates it internally; it cannot be added
 with `-device`. Pick another model, or turn off the feature that implies it.
 
-### `device.bus-unavailable`
+### `device.bus`
 The device plugs into a bus the machine does not have, e.g. a PCI display
 adapter on a machine without PCI. Applies to the display device, the USB
 controller implied by a USB tablet, USB disks or USB passthrough, the
@@ -42,6 +42,10 @@ Warning, under TCG only: QEMU reports features of this CPU model that TCG
 cannot emulate on this host. QEMU turns them off (or refuses with
 `enforce`), so the guest sees a different CPU than the name suggests. `max`
 or `qemu64` avoid this.
+
+Generic devices added in the hardware editor (`devices[]`, M4-05) are checked
+by `devices.rs` under the same ids, plus `device.bus-name`, `device.prop-name`,
+`device.prop-value` and `device.reserved-prop` for their bus and properties.
 
 ## Other structural checks
 

@@ -22,6 +22,42 @@ mod tests {
         "the default machine (mcf5208evb) only starts with -kernel; direct kernel boot is not supported yet",
     )];
 
+    /// QEMU system-emulation targets. Distributions add other names (Debian:
+    /// `arm64`, `armhf`, `x86_64-microvm`, …) that are wrappers or links to
+    /// these, so only real target names count.
+    const TARGETS: &[&str] = &[
+        "aarch64",
+        "alpha",
+        "arm",
+        "avr",
+        "hexagon",
+        "hppa",
+        "i386",
+        "loongarch64",
+        "m68k",
+        "microblaze",
+        "microblazeel",
+        "mips",
+        "mips64",
+        "mips64el",
+        "mipsel",
+        "or1k",
+        "ppc",
+        "ppc64",
+        "riscv32",
+        "riscv64",
+        "rx",
+        "s390x",
+        "sh4",
+        "sh4eb",
+        "sparc",
+        "sparc64",
+        "tricore",
+        "x86_64",
+        "xtensa",
+        "xtensaeb",
+    ];
+
     /// `qemu-system-<arch>` binaries, one per arch.
     fn binaries() -> Vec<(String, PathBuf)> {
         let dirs: Vec<PathBuf> = match std::env::var_os("QEMU_UI_QEMU_DIR") {
@@ -59,7 +95,7 @@ mod tests {
                 .collect();
             found.sort();
             for (arch, path) in found {
-                if out.iter().any(|(a, _)| a == &arch) {
+                if !TARGETS.contains(&arch.as_str()) || out.iter().any(|(a, _)| a == &arch) {
                     continue;
                 }
                 if only.as_ref().is_some_and(|o| !o.contains(&arch)) {

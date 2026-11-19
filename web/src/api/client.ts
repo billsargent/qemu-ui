@@ -70,6 +70,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+import type { HardwareTree } from "./generated/HardwareTree";
+import type { PaletteEntry } from "./generated/PaletteEntry";
+import type { PropField } from "./generated/PropField";
+
 const post = <T>(path: string, body?: unknown) =>
   request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
 
@@ -111,6 +115,14 @@ export const api = {
     request<DiskBusSupport[] | null>(
       `/host/buses?arch=${encodeURIComponent(arch)}&machine=${encodeURIComponent(machine)}`,
     ),
+  /** Devices addable to a machine (M4-05). */
+  devicePalette: (arch: string, machine: string) =>
+    request<PaletteEntry[]>(`/host/device-palette?arch=${encodeURIComponent(arch)}&machine=${encodeURIComponent(machine)}`),
+  /** Property editor fields for a device type (M4-02). */
+  deviceFields: (binaryId: string, device: string) =>
+    request<PropField[]>(`/host/binaries/${encodeURIComponent(binaryId)}/devices/${encodeURIComponent(device)}/fields`),
+  /** The VM's devices by bus, from the compiled argv (M4-05). */
+  hardwareTree: (spec: VmSpec, vmId?: string) => post<HardwareTree>("/vms/hardware", { spec, vm_id: vmId }),
   /** NIC models for a machine, recommended first (M3-07). */
   nicModels: (arch: string, machine: string) =>
     request<NicModel[]>(`/host/nic-models?arch=${encodeURIComponent(arch)}&machine=${encodeURIComponent(machine)}`),

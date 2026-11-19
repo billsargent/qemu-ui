@@ -63,6 +63,33 @@
       ],
       "type": "object"
     },
+    "DeviceSpec": {
+      "description": "A device added from the palette.",
+      "properties": {
+        "bus": {
+          "default": null,
+          "description": "Bus to attach to (a QEMU bus id, e.g. `qui-usb.0`); `None` lets QEMU\npick the machine's default bus for the device.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "driver": {
+          "description": "QEMU device type, e.g. `virtio-rng-pci`.",
+          "type": "string"
+        },
+        "props": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Properties the user set, typed as QEMU expects them (bool, number or\nstring). Unset properties keep QEMU's defaults.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "driver"
+      ],
+      "type": "object"
+    },
     "DiskBus": {
       "oneOf": [
         {
@@ -533,6 +560,14 @@
     },
     "cpu": {
       "$ref": "#/$defs/CpuSpec"
+    },
+    "devices": {
+      "default": [],
+      "description": "Devices added from the palette (M4-05); ids `qui-xdev<N>`.",
+      "items": {
+        "$ref": "#/$defs/DeviceSpec"
+      },
+      "type": "array"
     },
     "disks": {
       "default": [],

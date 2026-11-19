@@ -684,6 +684,7 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
 
     d.extend(validate_usb(spec, caps));
     d.extend(validate_passthrough(&spec.passthrough));
+    d.extend(crate::devices::validate_devices(spec, &caps.devices));
     d
 }
 
@@ -1081,6 +1082,11 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
     }
     if let Some(m) = ctx.machine {
         diags.extend(validate_buses(spec, caps, m));
+        diags.extend(crate::devices::validate_device_buses(
+            spec,
+            &caps.devices,
+            m,
+        ));
     }
     diags.extend(validate_networks(spec, ctx.networks));
     diags.extend(crate::structural::check(spec, ctx));
@@ -1402,6 +1408,15 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
             ),
         );
         push(&mut a, "-numa", "node,memdev=qui-mem".into());
+    }
+
+    // Devices added from the palette, after everything they may sit on.
+    for (i, dev) in spec.devices.iter().enumerate() {
+        push(
+            &mut a,
+            "-device",
+            json_arg(crate::devices::device_json(i, dev)),
+        );
     }
 
     // Never open a local window (Windows builds default to SDL/GTK).

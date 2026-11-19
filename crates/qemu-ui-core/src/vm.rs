@@ -295,6 +295,7 @@ pub fn default_spec_on(
         },
         usb: vec![],
         shares: vec![],
+        devices: vec![],
         passthrough: vec![],
     };
     let diags = crate::compile::validate(&spec, caps)

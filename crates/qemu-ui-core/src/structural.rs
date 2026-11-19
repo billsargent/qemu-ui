@@ -137,7 +137,7 @@ pub fn check(spec: &VmSpec, ctx: &Context) -> Vec<Diagnostic> {
             if !n.missing_reported && !caps.devices.is_empty() {
                 d.push(Diagnostic::error(
                     &n.field,
-                    "device.unknown",
+                    "device.missing",
                     format!(
                         "this QEMU ({}) has no device '{}'; `{} -device help` lists the ones it has",
                         caps.arch, n.driver, caps.binary.id
@@ -149,7 +149,7 @@ pub fn check(spec: &VmSpec, ctx: &Context) -> Vec<Diagnostic> {
         if dev.no_user {
             d.push(Diagnostic::error(
                 &n.field,
-                "device.no-user",
+                "device.not-user-creatable",
                 format!(
                     "'{}' exists but QEMU only creates it internally (it is not user-creatable); \
                      {}",
@@ -213,7 +213,7 @@ fn bus_check(d: &mut Vec<Diagnostic>, n: &Named, dev: &DeviceInfo, m: &MachineBu
     if let Err(why) = bus_fits(dev.bus.as_deref(), m) {
         d.push(Diagnostic::error(
             &n.field,
-            "device.bus-unavailable",
+            "device.bus",
             format!(
                 "'{}' plugs into a {} bus: {why}",
                 n.driver,
@@ -265,8 +265,8 @@ mod tests {
     #[test]
     fn docs_anchor() {
         assert_eq!(
-            docs_link("device.no-user"),
-            "docs/rules/README.md#deviceno-user"
+            docs_link("device.not-user-creatable"),
+            "docs/rules/README.md#devicenot-user-creatable"
         );
     }
 }
