@@ -164,6 +164,57 @@ daemon also records helper calls in its audit log (M6-04).
 - Guest addresses on tap-backed networks come from the host's neighbour table
   (`ip neigh` / `Get-NetNeighbor`), matched by the NIC's MAC.
 
-## Out of scope here
+## Per-VM cgroups (M6-05)
 
-- Per-VM users and cgroups (M6-05) reuse this transport.
+CPU and memory limits for a running VM are a cgroup v2 group per VM,
+`<mount>/<parent>/vm-<id>` (`parent` defaults to `qemu-ui`). Off unless the
+administrator enables it:
+
+```toml
+[isolation]
+cgroups = true
+# cgroup_parent = "qemu-ui"
+```
+
+- `apply_vm_limits { vm_id, pid, cpu_max_percent, cpu_weight, memory_max_mib }`
+  creates or updates the group and moves `pid` into it. The request never
+  names a file: the helper writes only `cpu.max`, `cpu.weight`,
+  `memory.max` and `memory.swap.max` (derived by
+  `qemu_ui_core::limits::cgroup_v2_settings`), plus `cgroup.subtree_control`
+  on the parents to enable the `cpu` and `memory` controllers.
+- The pid must be a `qemu-system-*` process (`/proc/<pid>/exe`) whose real
+  uid is the daemon user. A daemon that asks for any other process is
+  refused, so the request cannot be used to throttle or move arbitrary
+  processes.
+- `release_vm_limits { vm_id }` removes the group after QEMU exits.
+- Disk IO limits do not need the helper: QEMU throttle groups enforce them
+  on every platform.
+
+### Per-VM users (designed, not yet implemented)
+
+Running each VM's QEMU as its own uid needs the helper to allocate a uid
+from a configured range, chown the VM's run dir and hand the daemon file
+descriptors for the images (so images stay owned by the daemon user), and
+spawn QEMU through `systemd-run --scope --uid=` or an equivalent. That is a
+larger change to how disks are opened; it is tracked as a follow-up.
+
+### LSM profiles
+
+`data/apparmor/qemu-ui-vm` is an AppArmor profile template for QEMU
+processes started by qemu-ui (run dirs, pools, firmware). Loading it is a
+manual administrator step (`apparmor_parser -r`), documented in the
+template; the daemon only detects whether AppArmor or SELinux is active
+and reports it.
+
+## Windows (M6-06)
+
+QEMU is assigned to a named job object `qemu-ui-vm-<id>` when the VM has
+CPU or memory limits: `JobMemoryLimit` and a hard-capped CPU rate. The job
+is never kill-on-close, so VMs keep surviving daemon exit; it disappears
+when QEMU exits, and the daemon reopens it by name to change limits live.
+`qemu-ui-winsec` (the only crate allowed `unsafe`) wraps the Win32 calls.
+It can also run a process with a restricted token (privileges removed,
+Administrators deny-only); spawning QEMU that way needs the daemon's
+process code to move to `CreateProcessAsUserW` and is a follow-up.
+
+## Out of scope here

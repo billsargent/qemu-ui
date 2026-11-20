@@ -33,6 +33,9 @@ import type { ImportResult } from "./generated/ImportResult";
 import type { Network } from "./generated/Network";
 import type { NetworkConfig } from "./generated/NetworkConfig";
 import type { NetworkInfo } from "./generated/NetworkInfo";
+import type { LimitsChange } from "./generated/LimitsChange";
+import type { LimitsSupport } from "./generated/LimitsSupport";
+import type { ResourceLimits } from "./generated/ResourceLimits";
 import type { HostNetInfo } from "./generated/HostNetInfo";
 import type { SnapshotList } from "./generated/SnapshotList";
 import type { VmDetail } from "./generated/VmDetail";
@@ -173,6 +176,9 @@ export const api = {
     post<ConsolePresence>(`/vms/${id}/display/control`, { viewer_id: viewerId }),
   screenshotUrl: (id: string) => `/api/v1/vms/${id}/display/screenshot`,
 
+  limitsSupport: () => request<LimitsSupport>("/host/limits"),
+  setLimits: (id: string, limits: ResourceLimits) =>
+    request<LimitsChange>(`/vms/${id}/limits`, { method: "PUT", body: JSON.stringify({ limits }) }),
   networks: () => request<NetworkInfo[]>("/networks"),
   /** Host support for tap-backed networks: helper bridges (Linux), TAP adapters (Windows). */
   hostNet: () => request<HostNetInfo>("/host/net-adapters"),

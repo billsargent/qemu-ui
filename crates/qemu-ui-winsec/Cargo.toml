@@ -1,0 +1,17 @@
+[package]
+name = "qemu-ui-winsec"
+version = "0.1.0"
+edition = "2024"
+description = "Narrow Windows security wrappers (job objects, restricted tokens). The only crate in the workspace allowed `unsafe`."
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

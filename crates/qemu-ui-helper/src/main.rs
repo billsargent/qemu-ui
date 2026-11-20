@@ -4,6 +4,7 @@
 //! service) and accepts a closed set of requests from the unprivileged
 //! daemon over an authenticated AF_UNIX socket.
 
+mod cgroups;
 mod disks;
 mod exports;
 mod server;

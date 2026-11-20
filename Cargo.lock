@@ -1303,6 +1303,7 @@ dependencies = [
  "png",
  "qemu-ui-core",
  "qemu-ui-qmp",
+ "qemu-ui-winsec",
  "rand 0.10.3",
  "rusqlite",
  "serde",
@@ -1349,6 +1350,13 @@ dependencies = [
  "tokio",
  "tracing",
  "uds_windows",
+]
+
+[[package]]
+name = "qemu-ui-winsec"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
