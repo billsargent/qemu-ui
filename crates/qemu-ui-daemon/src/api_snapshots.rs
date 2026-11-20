@@ -1,7 +1,7 @@
 //! VM snapshot routes (M2-06).
 //!
 //! GET    /vms/{id}/snapshots
-//! POST   /vms/{id}/snapshots                    {name, description?, with_memory?}  → job
+//! POST   /vms/{id}/snapshots                    {name, description?, with_memory?, external?}  → job
 //! POST   /vms/{id}/snapshots/{sid}/revert       {safety_snapshot?}                  → job
 //! DELETE /vms/{id}/snapshots/{sid}                                                  → job
 
@@ -44,6 +44,9 @@ struct TakeBody {
     /// Include RAM and device state (VM must be running).
     #[serde(default)]
     with_memory: bool,
+    /// Disk-only snapshot by freezing the images behind new overlays.
+    #[serde(default)]
+    external: bool,
 }
 
 async fn take(
@@ -52,7 +55,7 @@ async fn take(
     Json(b): Json<TakeBody>,
 ) -> Result<(StatusCode, Json<Job>), OpErr> {
     app.supervisor
-        .take_snapshot(&id, &b.name, &b.description, b.with_memory)
+        .take_snapshot(&id, &b.name, &b.description, b.with_memory, b.external)
         .await
         .map(|j| (StatusCode::ACCEPTED, Json(j)))
         .map_err(op_err)

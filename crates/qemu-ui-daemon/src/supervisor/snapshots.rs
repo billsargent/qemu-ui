@@ -12,14 +12,19 @@
 //! reverting moves the head; deleting re-parents children. A revert can take
 //! an automatic safety snapshot first.
 //!
+//! External (disk-only, overlay-based) snapshots live in `external`.
+//!
 //! Every operation holds the supervisor's lifecycle lock, so it cannot race
 //! a start, stop or edit.
+
+mod external;
 
 use super::*;
 use crate::jobs::JobCtx;
 use crate::store::SnapshotRow;
 use qemu_ui_core::snapshot::{
-    SnapshotDisk, SnapshotInfo, SnapshotList, snapshot_disks, valid_snapshot_name,
+    SnapshotDisk, SnapshotInfo, SnapshotKind, SnapshotList, external_snapshot_disks, kind_of_tag,
+    snapshot_disks, valid_snapshot_name,
 };
 use qemu_ui_core::storage::Job;
 
@@ -33,6 +38,7 @@ fn info_of(r: &SnapshotRow) -> SnapshotInfo {
         description: r.description.clone(),
         tag: r.tag.clone(),
         parent_id: r.parent_id.clone(),
+        kind: kind_of_tag(&r.tag),
         with_memory: r.with_memory,
         auto: r.auto,
         disks: serde_json::from_str(&r.disks_json).unwrap_or_default(),
@@ -141,6 +147,7 @@ impl Supervisor {
                 pool: spec.disks[i].image.pool.clone(),
                 name: spec.disks[i].image.name.clone(),
                 node: qemu_ui_core::spec::disk_node(spec, i),
+                overlay: None,
             })
             .collect();
         if matches!(spec.firmware, FirmwareSpec::Descriptor { .. })
@@ -151,6 +158,7 @@ impl Supervisor {
                 pool: String::new(),
                 name: "VARS.qcow2".into(),
                 node: "qui-fw-vars".into(),
+                overlay: None,
             });
         }
         Ok(disks)
@@ -159,7 +167,7 @@ impl Supervisor {
     pub async fn list_snapshots(&self, id: &str) -> OpResult<SnapshotList> {
         let target = self.snapshot_target(id)?;
         let unsupported_reason = match self.plan_snapshot_disks(id, &target.spec).await {
-            Ok(_) => None,
+            Ok(_) => self.live_overlay_conflict(id),
             Err(OpError::Conflict(m)) => Some(m),
             Err(e) => return Err(e),
         };
@@ -167,6 +175,7 @@ impl Supervisor {
             snapshots: self.store.list_snapshots(id)?.iter().map(info_of).collect(),
             head: self.store.snapshot_head(id)?,
             unsupported_reason,
+            external_unsupported_reason: external_snapshot_disks(&target.spec).err(),
         })
     }
 
@@ -177,6 +186,7 @@ impl Supervisor {
         name: &str,
         description: &str,
         with_memory: bool,
+        external: bool,
     ) -> OpResult<Job> {
         if !valid_snapshot_name(name) {
             return Err(OpError::Conflict(
@@ -189,7 +199,22 @@ impl Supervisor {
                 "memory snapshots need the VM to be running".into(),
             ));
         }
-        self.plan_snapshot_disks(id, &target.spec).await?;
+        if external {
+            if with_memory {
+                return Err(OpError::Conflict(
+                    "external snapshots are disk-only; take an internal snapshot to keep memory"
+                        .into(),
+                ));
+            }
+            external_snapshot_disks(&target.spec).map_err(OpError::Conflict)?;
+        } else {
+            self.plan_snapshot_disks(id, &target.spec).await?;
+            if target.qmp.is_some()
+                && let Some(why) = self.live_overlay_conflict(id)
+            {
+                return Err(OpError::Conflict(why));
+            }
+        }
         let this = self.clone();
         let (vm, name, description) = (
             id.to_string(),
@@ -198,7 +223,13 @@ impl Supervisor {
         );
         let title = format!(
             "Snapshot '{name}'{}",
-            if with_memory { " with memory" } else { "" }
+            if with_memory {
+                " with memory"
+            } else if external {
+                " (external)"
+            } else {
+                ""
+            }
         );
         Ok(self.jobs.spawn(
             "vm.snapshot",
@@ -207,9 +238,13 @@ impl Supervisor {
             false,
             move |ctx| async move {
                 let _g = this.ops.lock().await;
-                let snap = this
-                    .take_locked(&vm, &name, &description, with_memory, false, &ctx)
-                    .await?;
+                let snap = if external {
+                    this.take_external_locked(&vm, &name, &description, false, &ctx)
+                        .await?
+                } else {
+                    this.take_locked(&vm, &name, &description, with_memory, false, &ctx)
+                        .await?
+                };
                 Ok(format!("Took snapshot '{}'", snap.name))
             },
         ))
@@ -312,6 +347,18 @@ impl Supervisor {
     ) -> OpResult<Job> {
         let snap = self.store.get_snapshot(id, sid)?.ok_or(OpError::NotFound)?;
         let target = self.snapshot_target(id)?;
+        let external = kind_of_tag(&snap.tag) == SnapshotKind::External;
+        if external && target.qmp.is_some() {
+            return Err(OpError::Conflict(
+                "stop the VM to revert to an external snapshot".into(),
+            ));
+        }
+        if !external
+            && target.qmp.is_some()
+            && let Some(why) = self.live_overlay_conflict(id)
+        {
+            return Err(OpError::Conflict(why));
+        }
         if target.qmp.is_some() {
             if !snap.with_memory {
                 return Err(OpError::Conflict(
@@ -333,10 +380,33 @@ impl Supervisor {
                 if safety {
                     let target = this.snapshot_target(&vm).map_err(op_to_anyhow)?;
                     let label = format!("Before reverting to '{}'", snap.name);
-                    this.take_locked(&vm, &label, "", target.qmp.is_some(), true, &ctx)
-                        .await?;
+                    // Internal when the disks allow it (keeps memory while
+                    // running), external otherwise (any format, stopped).
+                    // A revert to an external snapshot may delete the
+                    // current disks, so its safety snapshot must freeze them.
+                    let internal_ok = !external
+                        && this.plan_snapshot_disks(&vm, &target.spec).await.is_ok()
+                        && this.live_overlay_conflict(&vm).is_none();
+                    if internal_ok {
+                        this.take_locked(&vm, &label, "", target.qmp.is_some(), true, &ctx)
+                            .await?;
+                    } else {
+                        this.take_external_locked(&vm, &label, "", true, &ctx)
+                            .await?;
+                    }
+                    this.prune_auto(&vm, &ctx).await;
                 }
-                this.revert_locked(&vm, &snap, &ctx).await?;
+                if external {
+                    this.revert_external_locked(&vm, &snap, &ctx).await?;
+                    this.store.set_snapshot_head(&vm, Some(&snap.id))?;
+                    this.emit(
+                        &vm,
+                        "snapshot",
+                        json!({"action": "reverted", "snapshot": snap.id, "name": snap.name}),
+                    );
+                } else {
+                    this.revert_locked(&vm, &snap, &ctx).await?;
+                }
                 Ok(format!("Reverted to '{}'", snap.name))
             },
         ))
@@ -367,6 +437,19 @@ impl Supervisor {
                     .qemu_img()
                     .await
                     .ok_or_else(|| anyhow!("qemu-img is not installed"))?;
+                for d in &disks {
+                    let path = self.snapshot_file(id, d)?;
+                    if d.kind == "image"
+                        && !self.pools.dependents(&qemu_img, &path).await?.is_empty()
+                    {
+                        bail!(
+                            "{} has images built on it (an external snapshot froze it); reverting \
+                             its internal snapshot would corrupt them. Revert to the external \
+                             snapshot instead",
+                            d.name
+                        );
+                    }
+                }
                 for (i, d) in disks.iter().enumerate() {
                     ctx.progress(
                         Some(i as f64 / disks.len() as f64),
@@ -389,6 +472,16 @@ impl Supervisor {
     /// Delete a snapshot (its tags on every disk) as a job.
     pub async fn delete_snapshot(self: &Arc<Self>, id: &str, sid: &str) -> OpResult<Job> {
         let snap = self.store.get_snapshot(id, sid)?.ok_or(OpError::NotFound)?;
+        let external = kind_of_tag(&snap.tag) == SnapshotKind::External;
+        if external {
+            if let Some(why) = self.external_delete_check(id, &snap).await {
+                return Err(OpError::Conflict(why));
+            }
+        } else if self.snapshot_target(id)?.qmp.is_some()
+            && let Some(why) = self.live_overlay_conflict(id)
+        {
+            return Err(OpError::Conflict(why));
+        }
         let this = self.clone();
         let (vm, title) = (id.to_string(), format!("Delete snapshot '{}'", snap.name));
         Ok(self.jobs.spawn(
@@ -399,6 +492,16 @@ impl Supervisor {
             move |ctx| {
                 async move {
                     let _g = this.ops.lock().await;
+                    if external {
+                        this.delete_external_locked(&vm, &snap, &ctx).await?;
+                        this.store.delete_snapshot(&vm, &snap.id)?;
+                        this.emit(
+                            &vm,
+                            "snapshot",
+                            json!({"action": "deleted", "snapshot": snap.id, "name": snap.name}),
+                        );
+                        return Ok(format!("Deleted external snapshot '{}'", snap.name));
+                    }
                     let target = this.snapshot_target(&vm).map_err(op_to_anyhow)?;
                     let disks = info_of(&snap).disks;
                     // Files the running VM has open must go through QEMU.
@@ -569,6 +672,7 @@ mod tests {
             pool: "default".into(),
             name: name.into(),
             node: node.into(),
+            overlay: None,
         };
         assert!(
             check_disks_match(
@@ -584,6 +688,7 @@ mod tests {
             pool: String::new(),
             name: "VARS.qcow2".into(),
             node: "qui-fw-vars".into(),
+            overlay: None,
         };
         assert!(check_disks_match(&[nv], &spec).is_err(), "UEFI removed");
     }
@@ -683,9 +788,14 @@ mod real {
                 .unwrap();
 
             // ---- offline: s1, marker, s2, revert to s1 (with safety), delete s2
-            done(&sv, sv.take_snapshot(&id, "s1", "clean disk", false).await).await;
+            done(
+                &sv,
+                sv.take_snapshot(&id, "s1", "clean disk", false, false)
+                    .await,
+            )
+            .await;
             assert!(qemu_io(&disk, "write -P 0xab 0 4k"));
-            done(&sv, sv.take_snapshot(&id, "s2", "", false).await).await;
+            done(&sv, sv.take_snapshot(&id, "s2", "", false, false).await).await;
             let list = sv
                 .list_snapshots(&id)
                 .await
@@ -696,7 +806,7 @@ mod real {
             assert_eq!(list.head.as_deref(), Some(s2.id.as_str()));
             assert_eq!(tags(&img, &disk).len(), 2);
             assert!(
-                sv.take_snapshot(&id, "mem", "", true).await.is_err(),
+                sv.take_snapshot(&id, "mem", "", true, false).await.is_err(),
                 "memory needs a running VM"
             );
 
@@ -748,7 +858,8 @@ mod real {
             assert!(live_io(&qmp, "write -P 0x00 0 4k").await);
             done(
                 &sv,
-                sv.take_snapshot(&id, "live", "with memory", true).await,
+                sv.take_snapshot(&id, "live", "with memory", true, false)
+                    .await,
             )
             .await;
             assert_eq!(
@@ -780,7 +891,8 @@ mod real {
             // Disk-only snapshot while running; reverting it live is refused.
             done(
                 &sv,
-                sv.take_snapshot(&id, "crash-consistent", "", false).await,
+                sv.take_snapshot(&id, "crash-consistent", "", false, false)
+                    .await,
             )
             .await;
             let list = sv
@@ -829,7 +941,7 @@ mod real {
                 .await
                 .map_err(|e| format!("{e:?}"))
                 .unwrap();
-            match sv.take_snapshot(&id, "nope", "", false).await {
+            match sv.take_snapshot(&id, "nope", "", false, false).await {
                 Err(OpError::Conflict(m)) => {
                     assert!(m.contains("disk 1 (default/data.raw) is raw"), "{m}")
                 }
@@ -842,6 +954,252 @@ mod real {
                 .unwrap()
                 .unsupported_reason;
             assert!(reason.unwrap().contains("data.raw"));
+        });
+        drop(rt);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    fn backing(img: &Path, file: &Path) -> Option<String> {
+        let out = std::process::Command::new(img)
+            .args(["info", "-U", "--output=json"])
+            .arg(file)
+            .output()
+            .unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["backing-filename"].as_str().map(String::from)
+    }
+
+    fn disk_image(sv: &Supervisor, id: &str) -> ImageRef {
+        sv.detail(id).ok().unwrap().spec.disks[0].image.clone()
+    }
+
+    /// External snapshots end to end: offline overlay, live overlay through
+    /// QMP, refusals while running, revert, branch refusal and merge-delete.
+    #[test]
+    fn external_snapshots() {
+        let (Some(qemu), Some(img)) = (find("qemu-system-x86_64"), find("qemu-img")) else {
+            eprintln!("skipping: qemu not found");
+            return;
+        };
+        if find("qemu-io").is_none() {
+            eprintln!("skipping: qemu-io not found");
+            return;
+        }
+        let data = short_data_dir("snapx");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let caps = host_caps(&qemu, &img).await;
+            let sv = make(&data, &caps).await;
+            let id = small_vm(&sv, &caps, "extsnap").await;
+            let base = disk_image(&sv, &id);
+            let base_path = sv.pools.resolve(&base).unwrap();
+            assert!(qemu_io(&base_path, "write -P 0xaa 0 4k"));
+
+            // ---- stopped: e1 freezes the base behind an overlay
+            done(&sv, sv.take_snapshot(&id, "e1", "", false, true).await).await;
+            let o1 = disk_image(&sv, &id);
+            assert_ne!(o1, base);
+            assert!(o1.name.contains(".snap-"), "{}", o1.name);
+            let o1_path = sv.pools.resolve(&o1).unwrap();
+            assert!(backing(&img, &o1_path).is_some_and(|b| b.ends_with(&base.name)));
+            assert!(qemu_io(&o1_path, "write -P 0xbb 0 4k"));
+            let list = sv
+                .list_snapshots(&id)
+                .await
+                .map_err(|e| format!("{e:?}"))
+                .unwrap();
+            let e1 = list.snapshots[0].clone();
+            assert_eq!(e1.kind, SnapshotKind::External);
+            assert_eq!(e1.disks[0].name, base.name);
+            assert_eq!(e1.disks[0].overlay.as_deref(), Some(o1.name.as_str()));
+
+            // ---- running: e2 switches the live VM onto a new overlay
+            let result: Result<(), String> = async {
+                sv.start(&id).await.map_err(|e| format!("start: {e:?}"))?;
+                done(&sv, sv.take_snapshot(&id, "e2", "", false, true).await).await;
+                let o2 = disk_image(&sv, &id);
+                if o2 == o1 {
+                    return Err("spec not repointed".into());
+                }
+                let qmp = sv.live_qmp(&id).ok_or("no qmp")?;
+                let nodes = qmp
+                    .execute("query-named-block-nodes", None)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .to_string();
+                if !nodes.contains("qui-ext-") || !nodes.contains(&o2.name) {
+                    return Err(format!("overlay node missing: {nodes}"));
+                }
+                if sv.detail(&id).ok().unwrap().summary.state != VmState::Running {
+                    return Err("the guest stopped".into());
+                }
+                // Writes go to the active (top) node, the new overlay.
+                let blocks = qmp
+                    .execute("query-block", None)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let top = blocks
+                    .as_array()
+                    .and_then(|a| a.iter().find_map(|b| b["inserted"]["node-name"].as_str()))
+                    .ok_or("no inserted block node")?
+                    .to_string();
+                if !top.starts_with("qui-ext-") {
+                    return Err(format!("active node is {top}, not the overlay"));
+                }
+                for cmd in ["write -P 0xcc 4k 4k", "flush"] {
+                    let r = qmp
+                        .execute(
+                            "human-monitor-command",
+                            Some(json!({"command-line": format!("qemu-io -d /machine/peripheral/qui-dev0/virtio-backend \"{cmd}\"")})),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let out = r.as_str().unwrap_or_default();
+                    // HMP qemu-io prints results on QEMU's stdout; the monitor only
+                    // gets errors.
+                    if !out.trim().is_empty() {
+                        return Err(format!("qemu-io {cmd}: {out}"));
+                    }
+                }
+                // Mixed operations are refused while running.
+                if sv.take_snapshot(&id, "int", "", false, false).await.is_ok() {
+                    return Err("internal snapshot allowed on live overlays".into());
+                }
+                if sv.revert_snapshot(&id, &e1.id, false).await.is_ok() {
+                    return Err("external revert allowed while running".into());
+                }
+                if sv.remove_disk(&id, 0, true).await.is_ok() {
+                    return Err("hot-unplug allowed on a live overlay".into());
+                }
+                Ok(())
+            }
+            .await;
+            let _ = sv.force_stop(&id).await;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(30),
+                wait_state(&sv, &id, VmState::Stopped),
+            )
+            .await;
+            result.unwrap();
+            let o2 = disk_image(&sv, &id);
+            let o2_path = sv.pools.resolve(&o2).unwrap();
+            assert!(backing(&img, &o2_path).is_some_and(|b| b.ends_with(&o1.name)));
+            assert!(
+                qemu_io(&o2_path, "read -P 0xcc 4k 4k"),
+                "live write landed in the overlay"
+            );
+            let e2 = sv.list_snapshots(&id).await.ok().unwrap().snapshots[1].clone();
+
+            // ---- revert to e1 (with a safety snapshot): fresh overlay on base
+            done(&sv, sv.revert_snapshot(&id, &e1.id, true).await).await;
+            let r = disk_image(&sv, &id);
+            assert!(r.name.contains(".rev-"), "{}", r.name);
+            let r_path = sv.pools.resolve(&r).unwrap();
+            assert!(qemu_io(&r_path, "read -P 0xaa 0 4k"), "back to e1's data");
+            assert!(o2_path.exists(), "the safety snapshot froze the old disk");
+            let list = sv.list_snapshots(&id).await.ok().unwrap();
+            assert_eq!(list.head.as_deref(), Some(e1.id.as_str()));
+            assert!(
+                list.snapshots
+                    .iter()
+                    .any(|s| s.auto && s.kind == SnapshotKind::External)
+            );
+
+            // ---- delete e1: two images are built on the base → refused
+            match sv.delete_snapshot(&id, &e1.id).await {
+                Err(OpError::Conflict(m)) => assert!(m.contains("branches"), "{m}"),
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+
+            // ---- delete e2: o1 is merged into o2 (its only dependent)
+            done(&sv, sv.delete_snapshot(&id, &e2.id).await).await;
+            assert!(!o1_path.exists(), "frozen image merged away");
+            assert!(backing(&img, &o2_path).is_some_and(|b| b.ends_with(&base.name)));
+            assert!(
+                qemu_io(&o2_path, "read -P 0xbb 0 4k"),
+                "o1's data copied into o2"
+            );
+            assert!(
+                qemu_io(&o2_path, "read -P 0xcc 4k 4k"),
+                "o2's own data kept"
+            );
+        });
+        drop(rt);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Automatic snapshots before risky image operations keep a copy and
+    /// prune beyond the newest few.
+    #[test]
+    fn automatic_snapshots_before_image_operations() {
+        let (Some(qemu), Some(img)) = (find("qemu-system-x86_64"), find("qemu-img")) else {
+            eprintln!("skipping: qemu not found");
+            return;
+        };
+        let data = short_data_dir("snapa");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let caps = host_caps(&qemu, &img).await;
+            let sv = make(&data, &caps).await;
+            let id = small_vm(&sv, &caps, "autosnap").await;
+            let disk = disk_image(&sv, &id);
+            for n in 0..5 {
+                let (svc, r) = (sv.clone(), disk.clone());
+                let job = sv.jobs.spawn(
+                    "test",
+                    &format!("op {n}"),
+                    json!({}),
+                    false,
+                    move |ctx| async move {
+                        let copy = svc.auto_snapshot_image(&r, "shrink", &ctx).await?;
+                        Ok(copy.unwrap_or_default())
+                    },
+                );
+                let j = sv
+                    .jobs
+                    .wait(&job.id, Duration::from_secs(60))
+                    .await
+                    .unwrap();
+                assert_eq!(j.status, JobStatus::Succeeded, "{:?}", j.error);
+                assert!(j.message.unwrap_or_default().contains(".before-shrink-"));
+            }
+            let list = sv.list_snapshots(&id).await.ok().unwrap();
+            let autos: Vec<_> = list.snapshots.iter().filter(|s| s.auto).collect();
+            assert_eq!(autos.len(), 3, "pruned to the newest three");
+            for s in &autos {
+                assert_eq!(s.kind, SnapshotKind::External);
+                assert!(s.name.starts_with("Before shrink of"));
+                let copy = ImageRef {
+                    pool: s.disks[0].pool.clone(),
+                    name: s.disks[0].name.clone(),
+                };
+                assert!(sv.pools.resolve(&copy).is_ok_and(|p| p.exists()));
+            }
+            // Unused images get no automatic snapshot.
+            let other = ImageRef {
+                pool: "default".into(),
+                name: "loose.qcow2".into(),
+            };
+            let qi = PathBuf::from(&caps.qemu_img.as_ref().unwrap().path);
+            sv.pools
+                .create(&qi, &other, 1 << 20, "qcow2")
+                .await
+                .unwrap();
+            let svc = sv.clone();
+            let job = sv
+                .jobs
+                .spawn("test", "loose", json!({}), false, move |ctx| async move {
+                    Ok(format!(
+                        "{:?}",
+                        svc.auto_snapshot_image(&other, "compact", &ctx).await?
+                    ))
+                });
+            let j = sv
+                .jobs
+                .wait(&job.id, Duration::from_secs(60))
+                .await
+                .unwrap();
+            assert_eq!(j.message.as_deref(), Some("None"));
         });
         drop(rt);
         let _ = std::fs::remove_dir_all(&data);

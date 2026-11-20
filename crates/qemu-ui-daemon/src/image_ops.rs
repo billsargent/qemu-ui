@@ -142,6 +142,9 @@ struct ResizeBody {
     /// Allow making the image smaller. Data beyond the new end is lost.
     #[serde(default)]
     shrink: bool,
+    /// Before shrinking: keep a copy as an automatic snapshot of its VM.
+    #[serde(default = "yes")]
+    auto_snapshot: bool,
 }
 
 async fn resize(
@@ -237,6 +240,8 @@ async fn resize(
         r.name,
         b.size_bytes
     );
+    let sv = app.supervisor.clone();
+    let snap_ref = r.clone();
     let job = app.supervisor.jobs.spawn(
         "image.resize",
         &title,
@@ -244,6 +249,14 @@ async fn resize(
         false,
         move |ctx| async move {
             let _guard = guard;
+            if shrinking
+                && b.auto_snapshot
+                && let Some(copy) = sv.auto_snapshot_image(&snap_ref, "shrink", &ctx).await?
+            {
+                ctx.log_line(&format!(
+                    "kept the previous image as {copy} (automatic snapshot)"
+                ));
+            }
             let p = path.display().to_string();
             let size = b.size_bytes.to_string();
             let mut args = vec!["resize", "-f", format.as_str()];
@@ -280,6 +293,13 @@ struct CompactBody {
     /// qcow2 only: compress clusters (smaller, slower to read).
     #[serde(default)]
     compress: bool,
+    /// Keep a copy of the image as an automatic snapshot of its VM first.
+    #[serde(default = "yes")]
+    auto_snapshot: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 async fn compact(
@@ -356,6 +376,7 @@ async fn compact(
     );
     let target = json!({"pool": r.pool, "name": r.name});
     let sv = app.supervisor.clone();
+    let snap_ref = r.clone();
     let job = app.supervisor.jobs.spawn(
         "image.compact",
         &title,
@@ -363,6 +384,13 @@ async fn compact(
         true,
         move |ctx| async move {
             let _guard = guard;
+            if b.auto_snapshot
+                && let Some(copy) = sv.auto_snapshot_image(&snap_ref, "compact", &ctx).await?
+            {
+                ctx.log_line(&format!(
+                    "kept the previous image as {copy} (automatic snapshot)"
+                ));
+            }
             let (src, dst) = (path.display().to_string(), tmp.display().to_string());
             let opts = cluster.map(|c| format!("cluster_size={c}"));
             let mut args: Vec<&str> = vec!["convert", "-O", format.as_str()];

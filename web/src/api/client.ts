@@ -297,8 +297,8 @@ export const api = {
   },
 
   snapshots: (vmId: string) => request<SnapshotList>(`/vms/${vmId}/snapshots`),
-  takeSnapshot: (vmId: string, name: string, description: string, withMemory: boolean) =>
-    post<Job>(`/vms/${vmId}/snapshots`, { name, description, with_memory: withMemory }),
+  takeSnapshot: (vmId: string, name: string, description: string, withMemory: boolean, external = false) =>
+    post<Job>(`/vms/${vmId}/snapshots`, { name, description, with_memory: withMemory, external }),
   revertSnapshot: (vmId: string, snapshotId: string, safetySnapshot: boolean) =>
     post<Job>(`/vms/${vmId}/snapshots/${snapshotId}/revert`, { safety_snapshot: safetySnapshot }),
   deleteSnapshot: (vmId: string, snapshotId: string) =>

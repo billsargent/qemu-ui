@@ -7,6 +7,10 @@ export type SnapshotList = { snapshots: Array<SnapshotInfo>,
  */
 head: string | null, 
 /**
- * Why snapshots cannot be taken right now, if they cannot.
+ * Why internal snapshots cannot be taken right now, if they cannot.
  */
-unsupported_reason: string | null, };
+unsupported_reason: string | null, 
+/**
+ * Why external snapshots cannot be taken right now, if they cannot.
+ */
+external_unsupported_reason: string | null, };
