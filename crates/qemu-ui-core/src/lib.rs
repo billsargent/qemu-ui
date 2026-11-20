@@ -27,6 +27,7 @@ pub mod parity;
 pub mod recording;
 pub mod rfb;
 pub mod rules;
+pub mod security;
 pub mod snapshot;
 pub mod spec;
 pub mod storage;
