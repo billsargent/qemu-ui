@@ -6,7 +6,8 @@
 //! * Windows: own process group, no console, and break away from the
 //!   daemon's job object when the job allows it;
 //! * Unix: own process group, so a terminal Ctrl-C to the daemon does not
-//!   reach the VM. (systemd `KillMode`/per-VM scopes are deployment, M6-09.)
+//!   reach the VM. Under systemd the unit's `KillMode=process` keeps VMs
+//!   alive across `systemctl restart` (docs/process-survival.md).
 //!
 //! A pid alone is not an identity — pids are reused — so every run records
 //! the process start time and re-attach checks both.

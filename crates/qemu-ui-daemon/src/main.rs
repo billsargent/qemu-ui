@@ -37,6 +37,8 @@ mod spice;
 mod store;
 mod supervisor;
 mod usb;
+#[cfg(windows)]
+mod winservice;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -86,15 +88,54 @@ struct Args {
     /// Re-probe every binary at startup even if a cached snapshot exists.
     #[arg(long)]
     rescan: bool,
+
+    /// Run under the Windows service control manager (set by
+    /// `qemu-ui service install`; not for interactive use).
+    #[arg(long, hide = true)]
+    service: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     let args = Args::parse();
+    if args.service {
+        #[cfg(windows)]
+        return winservice::run(Box::new(move |stop| {
+            tokio::runtime::Runtime::new()?.block_on(serve(args, async {
+                let _ = stop.await;
+            }))
+        }));
+        #[cfg(not(windows))]
+        bail!("--service is for the Windows service manager; on Linux use the systemd unit");
+    }
+    tokio::runtime::Runtime::new()?.block_on(serve(args, shutdown_signal()))
+}
 
+/// Ctrl-C, and SIGTERM on Unix (what `systemctl stop`/`restart` sends; with
+/// `KillMode=process` only the daemon gets it and VMs keep running).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("installing the SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+    tracing::info!("shutting down; running VMs keep running and are reattached on the next start");
+}
+
+async fn serve(
+    args: Args,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     if !args.listen.ip().is_loopback() {
         bail!(
             "refusing to listen on {}: LAN exposure requires authentication and TLS, which arrive in \
@@ -145,9 +186,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("binding {}", args.listen))?;
     tracing::info!("listening on http://{}", args.listen);
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown)
         .await?;
     Ok(())
 }

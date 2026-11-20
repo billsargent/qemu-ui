@@ -36,8 +36,10 @@ path = "src/main.rs"
 workspace = true
 
 [dev-dependencies]
+ureq = { version = "3.5.1", default-features = false, features = ["json"] }
 tokio-tungstenite = "0.30.0"
 tower = { version = "0.5.3", features = ["util"] }
 
 [target."cfg(windows)".dependencies]
 uds_windows = "1.2.1"
+windows-service = "0.8.1"
