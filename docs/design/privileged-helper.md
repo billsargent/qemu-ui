@@ -215,6 +215,10 @@ when QEMU exits, and the daemon reopens it by name to change limits live.
 `qemu-ui-winsec` (the only crate allowed `unsafe`) wraps the Win32 calls.
 It can also run a process with a restricted token (privileges removed,
 Administrators deny-only); spawning QEMU that way needs the daemon's
-process code to move to `CreateProcessAsUserW` and is a follow-up.
+process code to move to `CreateProcessAsUserW` and is a follow-up. Under a
+service, a restricted child cannot open the service session's desktop (its
+ACL grants Administrators, which is deny-only) and fails with
+`STATUS_DLL_INIT_FAILED`, so that follow-up must give QEMU a desktop it can
+access (or a dedicated one) as well.
 
 ## Out of scope here
