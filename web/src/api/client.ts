@@ -36,6 +36,9 @@ import type { NetworkInfo } from "./generated/NetworkInfo";
 import type { LimitsChange } from "./generated/LimitsChange";
 import type { LimitsSupport } from "./generated/LimitsSupport";
 import type { ResourceLimits } from "./generated/ResourceLimits";
+import type { AuditPage } from "./generated/AuditPage";
+import type { AuditQuery } from "./generated/AuditQuery";
+import type { TlsInfo } from "./generated/TlsInfo";
 import type { HostNetInfo } from "./generated/HostNetInfo";
 import type { SnapshotList } from "./generated/SnapshotList";
 import type { VmDetail } from "./generated/VmDetail";
@@ -46,6 +49,15 @@ import type { FixResult } from "./generated/FixResult";
 import type { VmSummary } from "./generated/VmSummary";
 import type { ConsolePresence } from "./generated/ConsolePresence";
 import type { DisplayInfo } from "./generated/DisplayInfo";
+
+/** Query string for the audit endpoints (empty filters left out). */
+function auditParams(q: AuditQuery): string {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(q)) {
+    if (v !== null && v !== undefined && v !== "") p.set(k, String(v));
+  }
+  return p.toString();
+}
 
 export class ApiError extends Error {
   constructor(
@@ -179,6 +191,9 @@ export const api = {
   limitsSupport: () => request<LimitsSupport>("/host/limits"),
   setLimits: (id: string, limits: ResourceLimits) =>
     request<LimitsChange>(`/vms/${id}/limits`, { method: "PUT", body: JSON.stringify({ limits }) }),
+  audit: (q: AuditQuery) => request<AuditPage>(`/audit?${auditParams(q)}`),
+  auditExportUrl: (q: AuditQuery, format: "csv" | "json") => `/api/v1/audit/export?${auditParams(q)}&format=${format}`,
+  tls: () => request<TlsInfo>("/tls"),
   networks: () => request<NetworkInfo[]>("/networks"),
   /** Host support for tap-backed networks: helper bridges (Linux), TAP adapters (Windows). */
   hostNet: () => request<HostNetInfo>("/host/net-adapters"),
