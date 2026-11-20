@@ -156,6 +156,21 @@ const MIGRATIONS: &[&str] = &[
         created_at  INTEGER NOT NULL
     );
     "#,
+    // 9: audit log (M6-04); append-only, pruned by retention
+    r#"
+    CREATE TABLE audit (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        time         INTEGER NOT NULL,
+        actor        TEXT NOT NULL,
+        action       TEXT NOT NULL,
+        target       TEXT NOT NULL,
+        details_json TEXT NOT NULL,
+        outcome      TEXT NOT NULL,
+        ip           TEXT
+    );
+    CREATE INDEX audit_time ON audit(time);
+    CREATE INDEX audit_action ON audit(action);
+    "#,
 ];
 
 /// A resumable upload session row.
@@ -1034,6 +1049,104 @@ impl Store {
                 ))
             })?
             .collect()
+        })
+    }
+}
+
+// ------------------------------------------------------------------- audit
+
+impl Store {
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_audit(
+        &self,
+        time: u64,
+        actor: &str,
+        action: &str,
+        target: &str,
+        details_json: &str,
+        outcome: &str,
+        ip: Option<&str>,
+    ) -> Result<i64> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO audit (time, actor, action, target, details_json, outcome, ip)                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![time as i64, actor, action, target, details_json, outcome, ip],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+    }
+
+    /// Entries matching `q`, newest first.
+    pub fn query_audit(
+        &self,
+        q: &qemu_ui_core::security::AuditQuery,
+        limit: u32,
+    ) -> Result<Vec<qemu_ui_core::security::AuditEntry>> {
+        let mut sql = String::from(
+            "SELECT id, time, actor, action, target, details_json, outcome, ip FROM audit WHERE 1=1",
+        );
+        let mut args: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(a) = q.actor.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND actor = ?");
+            args.push(a.to_string().into());
+        }
+        if let Some(a) = q.action.as_deref().filter(|s| !s.is_empty()) {
+            if a.ends_with('.') {
+                sql.push_str(" AND substr(action, 1, ?) = ?");
+                args.push((a.len() as i64).into());
+                args.push(a.to_string().into());
+            } else {
+                sql.push_str(" AND action = ?");
+                args.push(a.to_string().into());
+            }
+        }
+        if let Some(t) = q.target.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND instr(target, ?) > 0");
+            args.push(t.to_string().into());
+        }
+        if let Some(t) = q.since {
+            sql.push_str(" AND time >= ?");
+            args.push((t as i64).into());
+        }
+        if let Some(t) = q.until {
+            sql.push_str(" AND time <= ?");
+            args.push((t as i64).into());
+        }
+        if let Some(b) = q.before {
+            sql.push_str(" AND id < ?");
+            args.push(b.into());
+        }
+        sql.push_str(" ORDER BY id DESC LIMIT ?");
+        args.push((limit as i64).into());
+        self.with(|c| {
+            let mut st = c.prepare(&sql)?;
+            st.query_map(rusqlite::params_from_iter(args), |r| {
+                let details: String = r.get(5)?;
+                Ok(qemu_ui_core::security::AuditEntry {
+                    id: r.get(0)?,
+                    time: r.get::<_, i64>(1)? as u64,
+                    actor: r.get(2)?,
+                    action: r.get(3)?,
+                    target: r.get(4)?,
+                    details: serde_json::from_str(&details).unwrap_or(serde_json::Value::Null),
+                    outcome: r.get(6)?,
+                    ip: r.get(7)?,
+                })
+            })?
+            .collect()
+        })
+    }
+
+    /// Drop entries older than `min_time` and all but the newest `keep`.
+    /// Returns how many were removed.
+    pub fn prune_audit(&self, min_time: u64, keep: u64) -> Result<usize> {
+        self.with(|c| {
+            let a = c.execute("DELETE FROM audit WHERE time < ?1", [min_time as i64])?;
+            let b = c.execute(
+                "DELETE FROM audit WHERE id <= (SELECT id FROM audit ORDER BY id DESC LIMIT 1 OFFSET ?1)",
+                [keep as i64],
+            )?;
+            Ok(a + b)
         })
     }
 }
