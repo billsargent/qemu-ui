@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { SecurityCard } from "../components/Auth";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { BinaryCaps } from "../api/generated/BinaryCaps";
@@ -24,6 +25,7 @@ export default function SystemPage() {
   const { caps, scan } = q.data;
   return (
     <div className="max-w-6xl space-y-5">
+      <SecurityCard />
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-semibold">System</h1>
         {caps && (

@@ -156,7 +156,47 @@ const MIGRATIONS: &[&str] = &[
         created_at  INTEGER NOT NULL
     );
     "#,
+    // 9: authentication (M6-01): the admin account, sessions, API tokens.
+    // Secrets are stored hashed (argon2id for the password, SHA-256 for
+    // random session and API tokens).
+    r#"
+    CREATE TABLE admin (
+        id         INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+        username   TEXT NOT NULL,
+        pw_hash    TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE TABLE session (
+        token_hash TEXT NOT NULL PRIMARY KEY,
+        csrf       TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_seen  INTEGER NOT NULL
+    );
+    CREATE TABLE api_token (
+        id         TEXT NOT NULL PRIMARY KEY,
+        name       TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        last_used  INTEGER
+    );
+    "#,
 ];
+
+/// The admin account row.
+#[derive(Debug, Clone)]
+pub struct AdminRow {
+    pub username: String,
+    pub pw_hash: String,
+}
+
+/// An API token row (the token itself is never stored).
+#[derive(Debug, Clone)]
+pub struct ApiTokenRow {
+    pub id: String,
+    pub name: String,
+    pub created_at: u64,
+    pub last_used: Option<u64>,
+}
 
 /// A resumable upload session row.
 #[derive(Debug, Clone)]
@@ -967,6 +1007,152 @@ impl Store {
         self.with(|c| {
             c.execute("DELETE FROM share_root WHERE name = ?1", [name])
                 .map(|_| ())
+        })
+    }
+
+    // ------------------------------------------------------------------ auth
+
+    pub fn admin(&self) -> Result<Option<AdminRow>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT username, pw_hash FROM admin WHERE id = 1",
+                [],
+                |r| {
+                    Ok(AdminRow {
+                        username: r.get(0)?,
+                        pw_hash: r.get(1)?,
+                    })
+                },
+            )
+            .optional()
+        })
+    }
+
+    /// Create the admin account; fails if one exists.
+    pub fn create_admin(&self, username: &str, pw_hash: &str, now: u64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO admin (id, username, pw_hash, created_at) VALUES (1, ?1, ?2, ?3)",
+                params![username, pw_hash, now as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn set_admin_password(&self, pw_hash: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("UPDATE admin SET pw_hash = ?1 WHERE id = 1", [pw_hash])
+                .map(|_| ())
+        })
+    }
+
+    pub fn insert_session(&self, token_hash: &str, csrf: &str, now: u64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO session (token_hash, csrf, created_at, last_seen) VALUES (?1, ?2, ?3, ?3)",
+                params![token_hash, csrf, now as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// (csrf, created_at, last_seen) of a session.
+    pub fn session(&self, token_hash: &str) -> Result<Option<(String, u64, u64)>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT csrf, created_at, last_seen FROM session WHERE token_hash = ?1",
+                [token_hash],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get::<_, i64>(1)? as u64,
+                        r.get::<_, i64>(2)? as u64,
+                    ))
+                },
+            )
+            .optional()
+        })
+    }
+
+    pub fn touch_session(&self, token_hash: &str, now: u64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE session SET last_seen = ?2 WHERE token_hash = ?1",
+                params![token_hash, now as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn delete_session(&self, token_hash: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM session WHERE token_hash = ?1", [token_hash])
+                .map(|_| ())
+        })
+    }
+
+    /// Drop every session (password change), or all but `keep`.
+    pub fn delete_sessions_except(&self, keep: Option<&str>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM session WHERE token_hash != ?1",
+                [keep.unwrap_or("")],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn insert_api_token(&self, id: &str, name: &str, token_hash: &str, now: u64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO api_token (id, name, token_hash, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![id, name, token_hash, now as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn list_api_tokens(&self) -> Result<Vec<ApiTokenRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id, name, created_at, last_used FROM api_token ORDER BY created_at",
+            )?;
+            st.query_map([], |r| {
+                Ok(ApiTokenRow {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    created_at: r.get::<_, i64>(2)? as u64,
+                    last_used: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                })
+            })?
+            .collect()
+        })
+    }
+
+    /// The id of the API token with this hash, marking it used.
+    pub fn use_api_token(&self, token_hash: &str, now: u64) -> Result<Option<String>> {
+        self.with(|c| {
+            let id: Option<String> = c
+                .query_row(
+                    "SELECT id FROM api_token WHERE token_hash = ?1",
+                    [token_hash],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(id) = &id {
+                c.execute(
+                    "UPDATE api_token SET last_used = ?2 WHERE id = ?1",
+                    params![id, now as i64],
+                )?;
+            }
+            Ok(id)
+        })
+    }
+
+    pub fn delete_api_token(&self, id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute("DELETE FROM api_token WHERE id = ?1", [id])
+                .map(|n| n > 0)
         })
     }
 

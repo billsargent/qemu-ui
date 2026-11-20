@@ -2,6 +2,7 @@
 
 mod api;
 mod api_disks;
+mod api_expert;
 mod api_fetch;
 mod api_forwards;
 mod api_guest_net;
@@ -13,6 +14,8 @@ mod api_snapshots;
 mod api_storage;
 mod api_upload;
 mod api_vms;
+mod audit;
+mod auth;
 mod consoles;
 mod discovery;
 mod display;
@@ -48,9 +51,15 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 #[command(name = "qemu-uid", version, about = "qemu-ui daemon")]
 struct Args {
-    /// Address to listen on. Loopback only until LAN hardening (M6) ships.
+    /// Address to listen on. Anything beyond loopback needs first-run setup
+    /// (the admin account) to be complete.
     #[arg(long, env = "QEMU_UI_LISTEN", default_value = "127.0.0.1:7480")]
     listen: SocketAddr,
+
+    /// The daemon is served over TLS (directly or by a reverse proxy):
+    /// session cookies are marked `Secure`.
+    #[arg(long, env = "QEMU_UI_TLS")]
+    tls: bool,
 
     /// Directory for the database, run directories and logs.
     #[arg(long, env = "QEMU_UI_DATA_DIR")]
@@ -95,14 +104,6 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
 
-    if !args.listen.ip().is_loopback() {
-        bail!(
-            "refusing to listen on {}: LAN exposure requires authentication and TLS, which arrive in \
-             milestone M6. Use a loopback address.",
-            args.listen
-        );
-    }
-
     let data_dir = match args.data_dir {
         Some(d) => d,
         None => dirs::data_local_dir()
@@ -112,6 +113,24 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating {}", data_dir.display()))?;
     let store = store::Store::open(&data_dir.join("qemu-ui.db"))?;
+    let lan = !args.listen.ip().is_loopback();
+    if lan {
+        if store.admin()?.is_none() {
+            bail!(
+                "refusing to listen on {}: complete first-run setup (create the admin account) \
+                 on a loopback address first, e.g. http://127.0.0.1:7480",
+                args.listen
+            );
+        }
+        if !args.tls {
+            tracing::warn!(
+                "listening on {} without TLS: passwords and session cookies cross the network \
+                 in clear text",
+                args.listen
+            );
+        }
+    }
+    let auth = auth::Auth::new(store.clone(), args.tls, lan);
 
     let project_dirs = project_qemu_dirs();
     let scanner = scan::Scanner::new(store.clone(), project_dirs, args.qemu_dirs);
@@ -138,17 +157,23 @@ async fn main() -> Result<()> {
     });
     api_fetch::set_allow_private(args.allow_private_fetch);
     let token = guard::load_or_create_token(&data_dir)?;
-    let app = api::router(api::App::new(scanner, supervisor, token), web_dir);
+    let app = api::router(
+        api::App::with_auth(scanner, supervisor, token, auth),
+        web_dir,
+    );
 
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("binding {}", args.listen))?;
     tracing::info!("listening on http://{}", args.listen);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await?;
     Ok(())
 }
 

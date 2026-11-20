@@ -334,6 +334,7 @@ struct TicketQuery {
 
 async fn ticket(
     State(app): State<Arc<App>>,
+    axum::Extension(actor): axum::Extension<crate::auth::Actor>,
     UrlPath((id, kind)): UrlPath<(String, String)>,
     Query(q): Query<TicketQuery>,
 ) -> Result<Json<TicketResponse>, ApiError> {
@@ -354,6 +355,12 @@ async fn ticket(
         }
     };
     let read_only = q.mode.as_deref() == Some("view");
+    crate::audit::record(
+        &actor,
+        "console.ticket",
+        &id,
+        serde_json::json!({"kind": format!("{kind:?}"), "read_only": read_only}),
+    );
     let (ticket, viewer) = app
         .consoles
         .issue(&id, kind, read_only)

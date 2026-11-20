@@ -19,6 +19,7 @@ import { Badge, Button, Card, Field, inputCls } from "./ui";
 import { HardwareCard } from "./HardwareTree";
 import { ChangedChips, FixButton, FixError, useFixes } from "./FixChips";
 import { kindLabel } from "../pages/NetworksPage";
+import { useAuthState } from "./Auth";
 
 // ---------------------------------------------------------------- helpers
 
@@ -138,6 +139,7 @@ export function VmEditor({
   const pool = useQuery({ queryKey: ["images", "all"], queryFn: api.allImages });
   const hostDisks = useQuery({ queryKey: ["host-disks"], queryFn: api.hostDisks, staleTime: 30_000 });
   const networks = useQuery({ queryKey: ["networks"], queryFn: api.networks });
+  const expertMode = useAuthState().data?.expert_mode ?? false;
   const bin: BinaryCaps | undefined = caps.data?.caps?.binaries.find((b) => b.arch === spec.arch);
   // Which disk buses this machine actually has (from QEMU introspection).
   const busSupport = useQuery({
@@ -690,9 +692,11 @@ export function VmEditor({
         <Card title="Extra QEMU options (passthrough)">
           <p className="mb-2 text-xs text-zinc-500">
             One argv token per line, appended verbatim after the generated options. Options the editor manages are refused.
+            {!expertMode && " Changing them needs expert mode (System → Security): they reach QEMU unchecked."}
           </p>
           <textarea
             className={`${inputCls} h-24 w-full font-mono text-xs`}
+            readOnly={!expertMode}
             value={spec.passthrough.join("\n")}
             onChange={(e) => set({ passthrough: e.target.value.split("\n").filter((t) => t.length > 0) })}
             placeholder={"-global\nICH9-LPC.disable_s3=1"}

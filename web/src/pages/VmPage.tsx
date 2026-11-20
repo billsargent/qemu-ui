@@ -14,6 +14,7 @@ import { VmEditor } from "../components/VmEditor";
 import { Badge, Button, Card, Field, inputCls } from "../components/ui";
 import { ExportCard } from "../components/ImportExport";
 import { DisplayCard } from "../components/Screens";
+import { QmpConsole } from "../components/QmpConsole";
 import { AccelBadge, StateBadge, VmActions, explainPause, useUptime } from "../components/vm";
 import { navigate } from "../router";
 
@@ -44,6 +45,7 @@ export default function VmPage({ id, tab }: { id: string; tab: string }) {
         ))}
       </nav>
       {current === "overview" && <Overview d={d} />}
+      {current === "overview" && <QmpConsole vmId={id} running={active} />}
       {current === "console" && (
         <div className="grid min-h-[36rem] flex-1 grid-cols-1 gap-4 2xl:grid-cols-[3fr_2fr]">
           <VncConsole vmId={id} running={active && d.spec.display.vnc} />

@@ -9,8 +9,9 @@ import NewVmPage from "./pages/NewVmPage";
 import SystemPage from "./pages/SystemPage";
 import VmPage from "./pages/VmPage";
 import { useRoute } from "./router";
+import { AuthGate, SetupBanner } from "./components/Auth";
 
-export default function App() {
+function Shell() {
   const route = useRoute();
   useLiveInvalidation();
   const live = useEventStreamConnected();
@@ -51,6 +52,7 @@ export default function App() {
         </div>
       </nav>
       <main className="min-w-0 flex-1 p-6">
+        <SetupBanner />
         {route.page === "dashboard" && <DashboardPage />}
         {route.page === "system" && <SystemPage />}
         {route.page === "storage" && <StoragePage pool={route.pool} image={route.image} />}
@@ -60,5 +62,14 @@ export default function App() {
         {route.page === "vm" && <VmPage key={route.id} id={route.id} tab={route.tab} />}
       </main>
     </div>
+  );
+}
+
+export default function App() {
+  const route = useRoute();
+  return (
+    <AuthGate setupRoute={route.page === "setup"}>
+      <Shell />
+    </AuthGate>
   );
 }

@@ -251,9 +251,16 @@ struct AttachQuery {
 
 async fn attach(
     State(app): State<Arc<App>>,
+    axum::Extension(actor): axum::Extension<crate::auth::Actor>,
     UrlPath((id, engine_id)): UrlPath<(String, String)>,
     Query(q): Query<AttachQuery>,
 ) -> Result<Json<Attachment>, ApiError> {
+    crate::audit::record(
+        &actor,
+        "console.attach",
+        &id,
+        serde_json::json!({"engine": engine_id, "read_only": q.mode.as_deref() == Some("view")}),
+    );
     let e = engine(&engine_id)
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "unknown display engine".into()))?;
     let spec = current_spec(&app.supervisor, &id)?;

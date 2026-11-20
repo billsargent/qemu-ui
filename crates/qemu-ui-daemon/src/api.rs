@@ -31,12 +31,26 @@ pub struct App {
     pub thumbnails: crate::screens::Thumbnails,
     /// Local API token for non-browser clients (see `guard`).
     pub token: String,
+    /// Accounts, sessions and API tokens (M6-01).
+    pub auth: Arc<crate::auth::Auth>,
     props: Mutex<HashMap<(String, String), Vec<DeviceProperty>>>,
 }
 
 impl App {
+    #[cfg(test)]
     pub fn new(scanner: Arc<Scanner>, supervisor: Arc<Supervisor>, token: String) -> Arc<Self> {
+        let auth = crate::auth::Auth::new(supervisor.store.clone(), false, false);
+        Self::with_auth(scanner, supervisor, token, auth)
+    }
+
+    pub fn with_auth(
+        scanner: Arc<Scanner>,
+        supervisor: Arc<Supervisor>,
+        token: String,
+        auth: Arc<crate::auth::Auth>,
+    ) -> Arc<Self> {
         Arc::new(App {
+            auth,
             scanner,
             uploads: crate::api_upload::Uploads::new(supervisor.clone()),
             recordings: crate::recording::Recordings::new(
@@ -64,6 +78,7 @@ impl IntoResponse for ApiError {
 pub type ApiResult<T> = Result<Json<T>, ApiError>;
 
 pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
+    let auth = app.auth.clone();
     let api = Router::new()
         .route("/health", get(health))
         .route("/host/capabilities", get(capabilities))
@@ -73,6 +88,8 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
             "/host/binaries/{id}/devices/{device}/properties",
             get(device_properties),
         )
+        .merge(crate::auth::routes())
+        .merge(crate::api_expert::routes())
         .merge(crate::api_vms::routes())
         .merge(crate::api_import::routes())
         .merge(crate::shares::routes())
@@ -116,7 +133,10 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
             )
         }),
     };
-    router.layer(axum::middleware::from_fn(crate::guard::host_guard))
+    router.layer(axum::middleware::from_fn_with_state(
+        auth,
+        crate::guard::host_guard,
+    ))
 }
 
 /// Physical disks the privileged helper can see (M2-11). Without a helper,
