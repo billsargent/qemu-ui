@@ -69,6 +69,53 @@ export class ApiError extends Error {
   }
 }
 
+// ------------------------------------------------------------------ auth (M6-01)
+
+/** The CSRF token of this browser session; sent on every unsafe API call. */
+let csrfToken: string | null = null;
+export function setCsrf(token: string | null) {
+  csrfToken = token;
+}
+
+/** Fired when the daemon wants a login (401 from the API). */
+export const AUTH_REQUIRED = "qui-auth-required";
+
+// Every API call (including uploads and raw fetches elsewhere) goes through
+// this: unsafe methods carry the CSRF token, and a 401 asks for a login.
+const nativeFetch = window.fetch.bind(window);
+window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
+  const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  const api = url.startsWith("/api/") || url.includes("//" + window.location.host + "/api/");
+  if (api && csrfToken && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    headers.set("x-csrf-token", csrfToken);
+    init = { ...init, headers };
+  }
+  const res = await nativeFetch(input, init);
+  if (api && res.status === 401 && !url.includes("/api/v1/auth/")) {
+    window.dispatchEvent(new Event(AUTH_REQUIRED));
+  }
+  return res;
+};
+
+export interface AuthState {
+  setup_complete: boolean;
+  authenticated: boolean;
+  actor: string;
+  username: string | null;
+  csrf: string | null;
+  expert_mode: boolean;
+  tls: boolean;
+}
+
+export interface ApiTokenInfo {
+  id: string;
+  name: string;
+  created_at: number;
+  last_used: number | null;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api/v1${path}`, {
     ...init,
@@ -121,6 +168,18 @@ export type DisplayAttachment =
   | { transport: "download"; url: string; filename: string };
 
 export const api = {
+  authState: () => request<AuthState>("/auth/state"),
+  setup: (username: string, password: string) => post<{ csrf: string }>("/auth/setup", { username, password }),
+  login: (username: string, password: string) => post<{ csrf: string }>("/auth/login", { username, password }),
+  logout: () => post<void>("/auth/logout"),
+  changePassword: (current: string, next: string) => post<void>("/auth/password", { current, new: next }),
+  apiTokens: () => request<ApiTokenInfo[]>("/auth/tokens"),
+  createApiToken: (name: string) => post<{ id: string; name: string; token: string }>("/auth/tokens", { name }),
+  revokeApiToken: (id: string) => request<void>(`/auth/tokens/${id}`, { method: "DELETE" }),
+  setExpertMode: (enabled: boolean) =>
+    request<{ expert_mode: boolean }>("/settings/expert", { method: "PUT", body: JSON.stringify({ enabled }) }),
+  qmp: (id: string, execute: string, args?: unknown) =>
+    post<{ return: unknown }>(`/vms/${id}/qmp`, { execute, arguments: args ?? null }),
   capabilities: () => request<CapabilitiesResponse>("/host/capabilities"),
   rescan: (force: boolean) => post<ScanStatus>(`/host/rescan?force=${force}`),
   deviceProperties: (binaryId: string, device: string) =>

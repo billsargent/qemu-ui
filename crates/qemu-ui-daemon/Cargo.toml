@@ -36,6 +36,7 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring", "s
 time = { version = "0.3.55", features = ["std"] }
 hyper = { version = "1.12.0", features = ["server", "http1", "http2"] }
 tower = { version = "0.5.3", features = ["util"] }
+argon2 = "0.5"
 
 [[bin]]
 name = "qemu-uid"
