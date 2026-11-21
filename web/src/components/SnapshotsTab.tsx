@@ -58,7 +58,13 @@ export function SnapshotsTab({ vm }: { vm: VmSummary }) {
           <p className="mt-3 text-xs text-zinc-500">The current state is not based on any snapshot.</p>
         )}
       </Card>
-      <TakeSnapshot vm={vm} running={running} blocked={list.data.unsupported_reason} busy={active.length > 0} />
+      <TakeSnapshot
+        vm={vm}
+        running={running}
+        blocked={list.data.unsupported_reason}
+        externalBlocked={list.data.external_unsupported_reason}
+        busy={active.length > 0}
+      />
     </div>
   );
 }
@@ -98,13 +104,24 @@ function Node({ s, isHead, vm, busy }: { s: SnapshotInfo; isHead: boolean; vm: V
   const running = vm.state === "running" || vm.state === "paused";
   const revert = useMutation({ mutationFn: () => api.revertSnapshot(vm.id, s.id, safety), onSuccess: () => setConfirm(null) });
   const del = useMutation({ mutationFn: () => api.deleteSnapshot(vm.id, s.id), onSuccess: () => setConfirm(null) });
-  const revertBlocked = running && !s.with_memory ? "Disk-only snapshot: stop the VM to revert to it" : null;
+  const external = s.kind === "external";
+  const revertBlocked =
+    running && external
+      ? "External snapshot: stop the VM to revert to it"
+      : running && !s.with_memory
+        ? "Disk-only snapshot: stop the VM to revert to it"
+        : null;
   return (
     <div className={`rounded px-2 py-1.5 ${isHead ? "bg-sky-50 dark:bg-sky-950/40" : ""}`}>
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <span className="font-medium">{s.name}</span>
         {isHead && <Badge tone="blue">you are here</Badge>}
         {s.with_memory && <Badge tone="green" title="Includes RAM and device state">memory</Badge>}
+        {external ? (
+          <Badge title="Disk images frozen behind overlay files (any disk format)">external</Badge>
+        ) : (
+          <Badge title="Stored inside the qcow2 images">internal</Badge>
+        )}
         {s.auto && <Badge title="Taken automatically before a risky operation">auto</Badge>}
         <span className="text-xs text-zinc-500">{new Date(s.created_at * 1000).toLocaleString()}</span>
         <div className="ml-auto flex gap-1">
@@ -122,9 +139,11 @@ function Node({ s, isHead, vm, busy }: { s: SnapshotInfo; isHead: boolean; vm: V
           <p>
             {running
               ? "The VM jumps back to this snapshot's memory and disk state."
-              : s.with_memory
-                ? "The disks go back to this snapshot; the VM boots from them next time (memory state is not restored for a stopped VM)."
-                : "The disks go back to this snapshot."}
+              : external
+                ? "The VM gets fresh overlays on this snapshot's frozen images. Its current disks are deleted unless something still needs them — keep the box below ticked to keep them as a snapshot."
+                : s.with_memory
+                  ? "The disks go back to this snapshot; the VM boots from them next time (memory state is not restored for a stopped VM)."
+                  : "The disks go back to this snapshot."}
           </p>
           <label className="mt-1 flex items-center gap-2">
             <input type="checkbox" checked={safety} onChange={(e) => setSafety(e.target.checked)} />
@@ -143,7 +162,11 @@ function Node({ s, isHead, vm, busy }: { s: SnapshotInfo; isHead: boolean; vm: V
       )}
       {confirm === "delete" && (
         <div className="mt-2 flex items-center gap-2 rounded border border-zinc-200 p-2 text-xs dark:border-zinc-800">
-          <span>Delete this snapshot? Its children stay, attached to its parent.</span>
+          <span>
+            {external
+              ? "Delete this snapshot? Its frozen images are merged into the images built on them (the VM must be stopped). Its children stay, attached to its parent."
+              : "Delete this snapshot? Its children stay, attached to its parent."}
+          </span>
           <Button variant="danger" onClick={() => del.mutate()} disabled={del.isPending}>
             Delete
           </Button>
@@ -161,18 +184,24 @@ function TakeSnapshot({
   vm,
   running,
   blocked,
+  externalBlocked,
   busy,
 }: {
   vm: VmSummary;
   running: boolean;
   blocked: string | null;
+  externalBlocked: string | null;
   busy: boolean;
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [memory, setMemory] = useState(true);
+  // External is the only option when internal snapshots aren't possible
+  // (e.g. raw disks).
+  const [externalPick, setExternal] = useState(false);
+  const external = (externalPick || !!blocked) && !externalBlocked;
   const take = useMutation({
-    mutationFn: () => api.takeSnapshot(vm.id, name, description, running && memory),
+    mutationFn: () => api.takeSnapshot(vm.id, name, description, running && memory && !external, external),
     onSuccess: () => {
       setName("");
       setDescription("");
@@ -180,7 +209,7 @@ function TakeSnapshot({
   });
   return (
     <Card title="Take a snapshot">
-      {blocked ? (
+      {blocked && externalBlocked ? (
         <p className="text-sm text-amber-700 dark:text-amber-400">{blocked}</p>
       ) : (
         <form
@@ -196,12 +225,29 @@ function TakeSnapshot({
           <Field label="Description (optional)">
             <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} />
           </Field>
-          <label className={`flex items-center gap-2 text-xs ${running ? "" : "opacity-50"}`}>
-            <input type="checkbox" disabled={!running} checked={running && memory} onChange={(e) => setMemory(e.target.checked)} />
+          <label className={`flex items-center gap-2 text-xs ${externalBlocked || blocked ? "opacity-50" : ""}`}>
+            <input
+              type="checkbox"
+              disabled={!!externalBlocked || !!blocked}
+              checked={external}
+              onChange={(e) => setExternal(e.target.checked)}
+            />
+            External (disk-only): freeze the disk images and continue on new overlay files
+          </label>
+          {blocked && !externalBlocked && (
+            <p className="text-xs text-zinc-500">Internal snapshots aren't possible here ({blocked}); this takes an external one.</p>
+          )}
+          <label className={`flex items-center gap-2 text-xs ${running && !external ? "" : "opacity-50"}`}>
+            <input
+              type="checkbox"
+              disabled={!running || external}
+              checked={running && memory && !external}
+              onChange={(e) => setMemory(e.target.checked)}
+            />
             Include memory (resume exactly where it was; VM must be running)
           </label>
           {!running && <p className="text-xs text-zinc-500">The VM is stopped: this snapshot covers its disks.</p>}
-          {running && !memory && (
+          {running && (!memory || external) && (
             <p className="text-xs text-zinc-500">Disk-only while running is crash-consistent, like pulling the plug.</p>
           )}
           <Button type="submit" disabled={!name.trim() || take.isPending || busy}>
