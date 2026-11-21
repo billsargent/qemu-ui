@@ -3,6 +3,7 @@ import { api } from "./api/client";
 import { useLiveInvalidation, useEventStreamConnected } from "./api/events";
 import JobsPage from "./pages/JobsPage";
 import NetworksPage from "./pages/NetworksPage";
+import AuditPage from "./pages/AuditPage";
 import StoragePage from "./pages/StoragePage";
 import DashboardPage from "./pages/DashboardPage";
 import NewVmPage from "./pages/NewVmPage";
@@ -21,6 +22,7 @@ export default function App() {
     { href: "#/dashboard", label: "Virtual machines", active: route.page === "dashboard" || route.page === "vm" || route.page === "new-vm" },
     { href: "#/storage", label: "Storage", active: route.page === "storage" },
     { href: "#/networks", label: "Networks", active: route.page === "networks" },
+    { href: "#/audit", label: "Audit log", active: route.page === "audit" },
     { href: "#/jobs", label: activeJobs ? `Jobs (${activeJobs})` : "Jobs", active: route.page === "jobs" },
     { href: "#/system", label: "System", active: route.page === "system" },
   ];
@@ -56,6 +58,7 @@ export default function App() {
         {route.page === "storage" && <StoragePage pool={route.pool} image={route.image} />}
         {route.page === "jobs" && <JobsPage />}
         {route.page === "networks" && <NetworksPage />}
+        {route.page === "audit" && <AuditPage />}
         {route.page === "new-vm" && <NewVmPage />}
         {route.page === "vm" && <VmPage key={route.id} id={route.id} tab={route.tab} />}
       </main>

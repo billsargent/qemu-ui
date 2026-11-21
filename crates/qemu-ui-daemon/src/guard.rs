@@ -107,7 +107,21 @@ pub fn check(headers: &HeaderMap, token: &str) -> Result<(), &'static str> {
 pub async fn api_guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Response {
     match check(req.headers(), &app.token) {
         Ok(()) => next.run(req).await,
-        Err(why) => ApiError(StatusCode::FORBIDDEN, why.into()).into_response(),
+        Err(why) => {
+            let ip = req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0.ip().to_string());
+            crate::audit::record_full(
+                "unknown",
+                "api.denied",
+                &format!("{} {}", req.method(), req.uri().path()),
+                serde_json::json!({ "reason": why }),
+                "denied",
+                ip.as_deref(),
+            );
+            ApiError(StatusCode::FORBIDDEN, why.into()).into_response()
+        }
     }
 }
 
