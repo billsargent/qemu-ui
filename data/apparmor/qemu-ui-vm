@@ -1,0 +1,42 @@
+# AppArmor profile template for QEMU processes started by qemu-ui (M6-05).
+#
+# Not loaded automatically. To use it:
+#   1. Adjust the paths below to your data dir, run dir, pools and firmware.
+#   2. sudo cp qemu-ui-vm /etc/apparmor.d/ && sudo apparmor_parser -r /etc/apparmor.d/qemu-ui-vm
+#   3. Restart your VMs.
+# Start in complain mode (`aa-complain qemu-ui-vm`) and check the logs before
+# enforcing: a missing rule stops a VM from starting.
+
+abi <abi/3.0>,
+include <tunables/global>
+
+profile qemu-ui-vm /usr/bin/qemu-system-* flags=(attach_disconnected) {
+  include <abstractions/base>
+  include <abstractions/nameservice>
+
+  # QEMU itself, its firmware and keymaps.
+  /usr/bin/qemu-system-* mrix,
+  /usr/share/qemu/** r,
+  /usr/share/OVMF/** r,
+  /usr/share/seabios/** r,
+
+  # qemu-ui data: per-VM state, NVRAM, logs. Adjust to your data dir.
+  owner /var/lib/qemu-ui/vms/** rwk,
+  # Storage pools. Add one line per pool path.
+  owner /var/lib/qemu-ui/pools/** rwk,
+  # Per-run sockets (QMP, VNC, serial). Adjust to your run dir.
+  owner /run/qemu-ui/** rw,
+
+  # KVM and virtio acceleration.
+  /dev/kvm rw,
+  /dev/vhost-net rw,
+  /dev/net/tun rw,
+
+  # Guest memory and threads.
+  owner /dev/shm/** rw,
+  @{PROC}/@{pid}/task/*/comm rw,
+  /sys/devices/system/** r,
+
+  deny /etc/shadow r,
+  deny @{HOME}/** rwx,
+}

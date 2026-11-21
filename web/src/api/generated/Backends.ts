@@ -7,4 +7,8 @@ export type Backends = { netdev: Array<string> | null, chardev: Array<string> | 
 /**
  * `-object` types (e.g. `monitor-qmp`, `memory-backend-file`, `secret`).
  */
-object: Array<string> | null, };
+object: Array<string> | null, 
+/**
+ * Built with seccomp: `-sandbox` is available (M6-05).
+ */
+sandbox: boolean, };

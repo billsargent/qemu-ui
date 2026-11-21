@@ -539,6 +539,7 @@ mod tests {
             slot: None,
         };
         let spec = VmSpec {
+            limits: Default::default(),
             spec_version: SPEC_VERSION,
             name: "t".into(),
             arch: "x86_64".into(),
