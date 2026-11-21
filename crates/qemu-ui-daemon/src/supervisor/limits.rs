@@ -47,7 +47,7 @@ fn set_job(vm_id: &str, pid: u32, l: &ResourceLimits) -> std::io::Result<()> {
     if let Some(j) = jobs.get(vm_id) {
         return j.set_limits(win_limits(l));
     }
-    let j = qemu_ui_winsec::Job::assign(&qemu_ui_winsec::job_name(vm_id), pid, win_limits(l))?;
+    let j = qemu_ui_winsec::Job::assign(pid, win_limits(l))?;
     jobs.insert(vm_id.to_string(), j);
     Ok(())
 }

@@ -7,9 +7,9 @@
 //! platforms every function returns `ErrorKind::Unsupported`.
 //!
 //! Job objects are never created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`:
-//! VMs must outlive the daemon (plan.md §3.2). A job lives as long as a
-//! process is in it, but its *name* goes away with the last handle, so the
-//! daemon keeps a [`Job`] per running VM to change limits live.
+//! VMs must outlive the daemon (plan.md §3.2). Jobs are unnamed (a
+//! predictable name could be squatted by another local process); the daemon
+//! keeps a [`Job`] per running VM to change its limits live.
 
 /// Limits for a job: `cpu_rate` is in hundredths of a percent of the whole
 /// machine (1–10000), as `JOBOBJECT_CPU_RATE_CONTROL_INFORMATION` wants.
@@ -17,11 +17,6 @@
 pub struct JobLimits {
     pub memory_bytes: Option<u64>,
     pub cpu_rate: Option<u32>,
-}
-
-/// The job name for a VM.
-pub fn job_name(vm_id: &str) -> String {
-    format!("qemu-ui-vm-{vm_id}")
 }
 
 #[cfg(windows)]
@@ -42,7 +37,7 @@ mod imp_other {
     pub struct Job(());
 
     impl Job {
-        pub fn assign(_name: &str, _pid: u32, _limits: JobLimits) -> io::Result<Job> {
+        pub fn assign(_pid: u32, _limits: JobLimits) -> io::Result<Job> {
             unsupported()
         }
         pub fn set_limits(&self, _limits: JobLimits) -> io::Result<()> {

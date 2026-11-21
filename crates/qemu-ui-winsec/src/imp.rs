@@ -59,12 +59,13 @@ fn ok(r: i32) -> io::Result<()> {
     }
 }
 
-/// Create (or open) the named job.
-fn create_job(name: &str) -> io::Result<Handle> {
-    let n = wide(name);
-    // SAFETY: `n` is a NUL-terminated UTF-16 string that outlives the call;
-    // a null security descriptor means the default one.
-    Handle::check(unsafe { CreateJobObjectW(null(), n.as_ptr()) })
+/// Create an anonymous job. Unnamed on purpose: a predictable name would let
+/// another local process pre-create it and keep control of its limits. The
+/// daemon holds the handle for as long as it needs the job.
+fn create_job() -> io::Result<Handle> {
+    // SAFETY: null security attributes mean the default descriptor; a null
+    // name creates an unnamed job, so no existing object can be opened.
+    Handle::check(unsafe { CreateJobObjectW(null(), null()) })
 }
 
 fn apply_limits(job: &Handle, limits: JobLimits) -> io::Result<()> {
@@ -117,10 +118,10 @@ unsafe impl Send for Job {}
 unsafe impl Sync for Job {}
 
 impl Job {
-    /// Create a job named `name` with `limits` and put process `pid` in it.
-    /// A process can be in several (nested) jobs; the strictest limit wins.
-    pub fn assign(name: &str, pid: u32, limits: JobLimits) -> io::Result<Job> {
-        let job = create_job(name)?;
+    /// Create a job with `limits` and put process `pid` in it. A process
+    /// can be in several (nested) jobs; the strictest limit wins.
+    pub fn assign(pid: u32, limits: JobLimits) -> io::Result<Job> {
+        let job = create_job()?;
         apply_limits(&job, limits)?;
         // SAFETY: plain call with constant access rights and a pid.
         let proc =
@@ -285,13 +286,12 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let name = format!("qemu-ui-test-{}", std::process::id());
         let limits = JobLimits {
             memory_bytes: Some(512 << 20),
             cpu_rate: Some(2500),
         };
         let mut check = || -> io::Result<()> {
-            let job = Job::assign(&name, child.id(), limits)?;
+            let job = Job::assign(child.id(), limits)?;
             assert_eq!(job.limits()?, limits);
             let lower = JobLimits {
                 memory_bytes: Some(256 << 20),
@@ -324,7 +324,7 @@ mod tests {
         let code = run_restricted("cmd /c exit 7").unwrap();
         if code == STATUS_DLL_INIT_FAILED {
             eprintln!(
-                "skipping: no desktop access for restricted tokens in this session                  (service/CI); spawning QEMU restricted will need its own desktop"
+                "skipping: restricted tokens have no desktop access in this (service) session"
             );
             return;
         }

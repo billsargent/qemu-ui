@@ -208,10 +208,11 @@ and reports it.
 
 ## Windows (M6-06)
 
-QEMU is assigned to a named job object `qemu-ui-vm-<id>` when the VM has
-CPU or memory limits: `JobMemoryLimit` and a hard-capped CPU rate. The job
-is never kill-on-close, so VMs keep surviving daemon exit; it disappears
-when QEMU exits, and the daemon reopens it by name to change limits live.
+QEMU is assigned to an unnamed job object when the VM has CPU or memory
+limits: `JobMemoryLimit` and a hard-capped CPU rate. Unnamed, so no other
+local process can pre-create the job and keep control of it. The job is
+never kill-on-close, so VMs keep surviving daemon exit; the daemon holds
+its handle to change limits live.
 `qemu-ui-winsec` (the only crate allowed `unsafe`) wraps the Win32 calls.
 It can also run a process with a restricted token (privileges removed,
 Administrators deny-only); spawning QEMU that way needs the daemon's
