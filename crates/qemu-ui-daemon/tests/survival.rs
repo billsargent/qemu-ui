@@ -195,18 +195,28 @@ fn vms_survive_the_daemon_being_stopped_and_are_reattached() {
     let port = free_port();
 
     let d = Daemon::start(&data, port);
-    let deadline = Instant::now() + Duration::from_secs(120);
-    // Binaries are probed one by one; wait for the one we boot.
-    while !d.get("/host/capabilities")["caps"]["binaries"]
-        .as_array()
-        .is_some_and(|b| b.iter().any(|b| b["arch"] == "x86_64"))
-    {
+    // Wait for the whole first scan: on a runner with every qemu-system-*
+    // installed this takes minutes. Later daemons reuse the cached snapshot.
+    let deadline = Instant::now() + Duration::from_secs(900);
+    loop {
+        let c = d.get("/host/capabilities");
+        let has_x86 = c["caps"]["binaries"]
+            .as_array()
+            .is_some_and(|b| b.iter().any(|b| b["arch"] == "x86_64"));
+        if c["scan"]["running"] == false && c["caps"].is_object() {
+            assert!(
+                has_x86,
+                "scan finished without qemu-system-x86_64: {}",
+                c["scan"]
+            );
+            break;
+        }
         assert!(
             Instant::now() < deadline,
-            "qemu-system-x86_64 never probed: {}",
-            d.get("/host/capabilities")
+            "first scan did not finish: {}",
+            c["scan"]
         );
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(500));
     }
     let mut spec = d.get("/vms/defaults?arch=x86_64&name=survivor")["spec"].clone();
     spec["accel"] = json!("tcg");
