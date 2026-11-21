@@ -198,11 +198,17 @@ fn vms_survive_the_daemon_being_stopped_and_are_reattached() {
     // Wait for the whole first scan: on a runner with every qemu-system-*
     // installed this takes minutes. Later daemons reuse the cached snapshot.
     let deadline = Instant::now() + Duration::from_secs(900);
-    loop {
+    let arch = loop {
         let c = d.get("/host/capabilities");
-        let has_x86 = c["caps"]["binaries"]
-            .as_array()
-            .is_some_and(|b| b.iter().any(|b| b["arch"] == "x86_64"));
+        // Debian/Ubuntu ship qemu-system-x86_64 as a link to
+        // qemu-system-amd64; the scan dedupes by hash and may keep either name.
+        let x86 = c["caps"]["binaries"].as_array().and_then(|b| {
+            b.iter()
+                .filter_map(|b| b["arch"].as_str())
+                .find(|a| *a == "x86_64" || *a == "amd64")
+                .map(str::to_string)
+        });
+        let has_x86 = x86.is_some();
         if c["scan"]["running"] == false && c["caps"].is_object() {
             let probed: Vec<String> = c["caps"]["binaries"]
                 .as_array()
@@ -217,7 +223,7 @@ fn vms_survive_the_daemon_being_stopped_and_are_reattached() {
                 "scan finished without qemu-system-x86_64: probed {probed:?}; failed {}; scan {}",
                 c["caps"]["failed"], c["scan"]
             );
-            break;
+            break x86.unwrap();
         }
         assert!(
             Instant::now() < deadline,
@@ -225,8 +231,8 @@ fn vms_survive_the_daemon_being_stopped_and_are_reattached() {
             c["scan"]
         );
         std::thread::sleep(Duration::from_millis(500));
-    }
-    let mut spec = d.get("/vms/defaults?arch=x86_64&name=survivor")["spec"].clone();
+    };
+    let mut spec = d.get(&format!("/vms/defaults?arch={arch}&name=survivor"))["spec"].clone();
     spec["accel"] = json!("tcg");
     spec["cpu"]["model"] = json!("qemu64");
     spec["memory"]["size_mib"] = json!(128);
