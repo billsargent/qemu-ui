@@ -118,6 +118,40 @@ impl HelperClient {
         }
     }
 
+    /// Linux: put a running QEMU in its own cgroup with these limits (M6-05).
+    pub async fn apply_vm_limits(
+        &self,
+        vm_id: &str,
+        pid: u32,
+        limits: &qemu_ui_core::limits::ResourceLimits,
+    ) -> Result<String> {
+        match self
+            .call(Request::ApplyVmLimits {
+                vm_id: vm_id.into(),
+                pid,
+                cpu_max_percent: limits.cpu_max_percent,
+                cpu_weight: limits.cpu_weight,
+                memory_max_mib: limits.memory_max_mib,
+            })
+            .await?
+        {
+            Response::LimitsApplied { cgroup } => Ok(cgroup),
+            other => bail!("unexpected helper reply: {other:?}"),
+        }
+    }
+
+    pub async fn release_vm_limits(&self, vm_id: &str) -> Result<()> {
+        match self
+            .call(Request::ReleaseVmLimits {
+                vm_id: vm_id.into(),
+            })
+            .await?
+        {
+            Response::LimitsReleased => Ok(()),
+            other => bail!("unexpected helper reply: {other:?}"),
+        }
+    }
+
     pub async fn unexport(&self, export_id: &str) -> Result<()> {
         match self
             .call(Request::Unexport {

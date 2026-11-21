@@ -48,6 +48,9 @@ pub struct VmSpec {
     /// Devices added from the palette (M4-05); ids `qui-xdev<N>`.
     #[serde(default)]
     pub devices: Vec<crate::devices::DeviceSpec>,
+    /// CPU, memory and disk IO limits (M6-07).
+    #[serde(default)]
+    pub limits: crate::limits::ResourceLimits,
     /// Raw argv tokens appended after generated options (§5.3).
     #[serde(default)]
     pub passthrough: Vec<String>,

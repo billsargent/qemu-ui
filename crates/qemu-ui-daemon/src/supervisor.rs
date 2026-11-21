@@ -37,6 +37,7 @@ use crate::store::{NewRun, RunRow, Store};
 mod disks;
 mod forwards;
 mod hardware;
+mod limits;
 mod nics;
 mod rules;
 mod snapshots;
@@ -1275,6 +1276,10 @@ impl Supervisor {
         for (kind, p) in &sidecars {
             let _ = self.store.insert_sidecar(run_id, kind, p.pid, p.start_time);
         }
+        // CPU/memory limits (job object or cgroup) before the guest runs.
+        if let Some(msg) = self.enforce_limits(id, proc_id.pid, &spec.limits).await {
+            self.emit(id, "limits", json!({"message": msg}));
+        }
         // The run is recorded: image operations now see this VM as a user.
         drop(start_locks);
 
@@ -1479,6 +1484,7 @@ impl Supervisor {
         self.release_host_disks(id);
         self.release_taps(id);
         self.switches.release(id);
+        self.release_limits(id);
         crate::spice::clear(&self.store, id);
         let expected = live
             .as_ref()

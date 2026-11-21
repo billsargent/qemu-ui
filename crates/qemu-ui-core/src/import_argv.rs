@@ -1329,6 +1329,7 @@ impl Importer {
             self.warn("no -m given; used QEMU's default of 128 MiB".into());
         }
         let spec = VmSpec {
+            limits: Default::default(),
             spec_version: SPEC_VERSION,
             name,
             arch: self.arch.clone(),

@@ -17,6 +17,8 @@ pub struct Helper {
     pub config: HelperConfig,
     pub exports: Exports,
     pub taps: Taps,
+    /// Per-VM cgroups (M6-05).
+    pub cgroups: crate::cgroups::Cgroups,
     /// Required in `hello` when set (Windows: no peer credentials).
     pub secret: Option<String>,
     /// Linux: the only uid allowed to connect.
@@ -48,6 +50,7 @@ impl Helper {
             config,
             exports,
             taps,
+            cgroups: crate::cgroups::Cgroups::new(Box::new(crate::cgroups::HostFs)),
             secret,
             allowed_uid,
             audit_log,
@@ -205,6 +208,36 @@ impl Helper {
                 bridges: self.config.network.bridges.clone(),
                 host_only: self.config.network.host_only.is_some(),
             }),
+            Request::ApplyVmLimits {
+                vm_id,
+                pid,
+                cpu_max_percent,
+                cpu_weight,
+                memory_max_mib,
+            } => {
+                let limits = qemu_ui_core::limits::ResourceLimits {
+                    cpu_max_percent,
+                    cpu_weight,
+                    memory_max_mib,
+                    ..Default::default()
+                };
+                self.cgroups
+                    .apply(
+                        &self.config.isolation,
+                        &vm_id,
+                        pid,
+                        // The QEMU must belong to the daemon user.
+                        self.allowed_uid.or(peer.uid),
+                        &limits,
+                    )
+                    .map(|cgroup| Response::LimitsApplied { cgroup })
+                    .map_err(|e| format!("{e:#}"))
+            }
+            Request::ReleaseVmLimits { vm_id } => self
+                .cgroups
+                .release(&self.config.isolation, &vm_id)
+                .map(|_| Response::LimitsReleased)
+                .map_err(|e| format!("{e:#}")),
         };
         let summary = outcome
             .as_ref()

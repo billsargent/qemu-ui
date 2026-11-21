@@ -8,6 +8,7 @@ import type { InputSpec } from "./InputSpec";
 import type { MachineSpec } from "./MachineSpec";
 import type { MemorySpec } from "./MemorySpec";
 import type { NicSpec } from "./NicSpec";
+import type { ResourceLimits } from "./ResourceLimits";
 import type { ShareSpec } from "./ShareSpec";
 import type { UsbPassthrough } from "./UsbPassthrough";
 
@@ -40,6 +41,10 @@ usb: Array<UsbPassthrough>,
  * Devices added from the palette (M4-05); ids `qui-xdev<N>`.
  */
 devices: Array<DeviceSpec>, 
+/**
+ * CPU, memory and disk IO limits (M6-07).
+ */
+limits: ResourceLimits, 
 /**
  * Raw argv tokens appended after generated options (§5.3).
  */

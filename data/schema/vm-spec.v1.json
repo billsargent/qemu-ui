@@ -264,6 +264,47 @@
       },
       "type": "object"
     },
+    "IoLimits": {
+      "properties": {
+        "read_bytes_per_sec": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "read_iops": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "write_bytes_per_sec": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "write_iops": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "MachineSpec": {
       "properties": {
         "props": {
@@ -425,6 +466,51 @@
         "host_port",
         "guest_port"
       ],
+      "type": "object"
+    },
+    "ResourceLimits": {
+      "properties": {
+        "cpu_max_percent": {
+          "default": null,
+          "description": "CPU cap in percent of one host core (200 = two full cores).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cpu_weight": {
+          "default": null,
+          "description": "Relative CPU share against other VMs, 1–10000 (cgroup `cpu.weight`;\n100 is the default share). Linux only.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "io": {
+          "$ref": "#/$defs/IoLimits",
+          "default": {
+            "read_bytes_per_sec": null,
+            "read_iops": null,
+            "write_bytes_per_sec": null,
+            "write_iops": null
+          },
+          "description": "Disk IO throttling shared by all of the VM's disks."
+        },
+        "memory_max_mib": {
+          "default": null,
+          "description": "Hard memory limit for the whole QEMU process in MiB: guest RAM plus\nQEMU's own overhead.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "ShareSpec": {
@@ -601,6 +687,21 @@
       "default": {
         "usb_tablet": true
       }
+    },
+    "limits": {
+      "$ref": "#/$defs/ResourceLimits",
+      "default": {
+        "cpu_max_percent": null,
+        "cpu_weight": null,
+        "io": {
+          "read_bytes_per_sec": null,
+          "read_iops": null,
+          "write_bytes_per_sec": null,
+          "write_iops": null
+        },
+        "memory_max_mib": null
+      },
+      "description": "CPU, memory and disk IO limits (M6-07)."
     },
     "machine": {
       "$ref": "#/$defs/MachineSpec",
