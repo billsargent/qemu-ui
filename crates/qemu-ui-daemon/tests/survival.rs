@@ -204,10 +204,18 @@ fn vms_survive_the_daemon_being_stopped_and_are_reattached() {
             .as_array()
             .is_some_and(|b| b.iter().any(|b| b["arch"] == "x86_64"));
         if c["scan"]["running"] == false && c["caps"].is_object() {
+            let probed: Vec<String> = c["caps"]["binaries"]
+                .as_array()
+                .map(|b| {
+                    b.iter()
+                        .map(|b| format!("{} {}", b["arch"], b["binary"]["path"]))
+                        .collect()
+                })
+                .unwrap_or_default();
             assert!(
                 has_x86,
-                "scan finished without qemu-system-x86_64: {}",
-                c["scan"]
+                "scan finished without qemu-system-x86_64: probed {probed:?}; failed {}; scan {}",
+                c["caps"]["failed"], c["scan"]
             );
             break;
         }
