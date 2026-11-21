@@ -26,6 +26,16 @@ fn find(exe: &str) -> Option<PathBuf> {
     dirs.into_iter().map(|d| d.join(&exe)).find(|p| p.is_file())
 }
 
+/// Point the daemon at the QEMU this test found, wherever it came from.
+fn qemu_dir_arg() -> Vec<String> {
+    find("qemu-system-x86_64")
+        .and_then(|p| {
+            p.parent()
+                .map(|d| vec!["--qemu-dir".into(), d.display().to_string()])
+        })
+        .unwrap_or_default()
+}
+
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -49,6 +59,7 @@ impl Daemon {
             .arg(data)
             .arg("--listen")
             .arg(format!("127.0.0.1:{port}"))
+            .args(qemu_dir_arg())
             .env("RUST_LOG", "warn")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -190,7 +201,11 @@ fn vms_survive_the_daemon_being_stopped_and_are_reattached() {
         .as_array()
         .is_some_and(|b| b.iter().any(|b| b["arch"] == "x86_64"))
     {
-        assert!(Instant::now() < deadline, "qemu-system-x86_64 never probed");
+        assert!(
+            Instant::now() < deadline,
+            "qemu-system-x86_64 never probed: {}",
+            d.get("/host/capabilities")
+        );
         std::thread::sleep(Duration::from_millis(250));
     }
     let mut spec = d.get("/vms/defaults?arch=x86_64&name=survivor")["spec"].clone();
