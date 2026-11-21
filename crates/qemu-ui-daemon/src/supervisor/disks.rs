@@ -278,7 +278,10 @@ impl Supervisor {
                 .map_err(|e| OpError::Failed(e.into()))?;
         }
 
-        let (file, fmt, mut dev) = disk_objects(n, &disk, &img, std::env::consts::OS);
+        let (file, mut fmt, mut dev) = disk_objects(n, &disk, &img, std::env::consts::OS);
+        // Join the VM's IO throttle group, as at start (M6-07).
+        let throttle = (live.limits.io.is_set() && disk.media == qemu_ui_core::spec::Media::Disk)
+            .then(|| qemu_ui_core::limits::throttle_disk(&mut fmt));
         if is_pci_disk(disk.bus)
             && let Some(slot) = self.pci_slot_for(&qmp, machine.as_ref()).await?
         {
@@ -288,12 +291,16 @@ impl Supervisor {
         let fmt_node = format!("qui-disk{n}");
         let attach = async {
             qmp.execute("blockdev-add", Some(file)).await?;
+            if let Some(t) = throttle {
+                qmp.execute("blockdev-add", Some(t)).await?;
+            }
             qmp.execute("blockdev-add", Some(fmt)).await?;
             qmp.execute("device_add", Some(dev)).await
         }
         .await;
         if let Err(e) = attach {
-            for node in [&fmt_node, &file_node] {
+            let throttle_node = format!("{fmt_node}-throttle");
+            for node in [&fmt_node, &throttle_node, &file_node] {
                 let _ = qmp
                     .execute("blockdev-del", Some(json!({"node-name": node})))
                     .await;
@@ -572,7 +579,11 @@ impl Supervisor {
     }
 
     async fn free_disk_nodes(&self, qmp: &Qmp, n: usize) {
-        for node in [format!("qui-disk{n}"), format!("qui-disk{n}-file")] {
+        for node in [
+            format!("qui-disk{n}"),
+            format!("qui-disk{n}-throttle"),
+            format!("qui-disk{n}-file"),
+        ] {
             let _ = qmp
                 .execute("blockdev-del", Some(json!({"node-name": node})))
                 .await;

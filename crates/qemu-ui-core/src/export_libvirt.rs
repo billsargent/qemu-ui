@@ -445,6 +445,7 @@ mod tests {
         cpu_props.insert("hv-relaxed".to_string(), "on".to_string());
         cpu_props.insert("invtsc".to_string(), "on".to_string());
         VmSpec {
+            limits: Default::default(),
             spec_version: SPEC_VERSION,
             name: "round-trip".into(),
             arch: "x86_64".into(),

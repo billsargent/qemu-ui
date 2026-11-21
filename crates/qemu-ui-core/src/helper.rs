@@ -42,6 +42,24 @@ pub enum Request {
     },
     /// What the configuration allows for tap networks.
     NetworkPolicy,
+    /// Linux (M6-05): put a running QEMU (`pid`, which must be a
+    /// `qemu-system-*` process of the daemon user) into its own cgroup v2
+    /// group with these limits, or update them. The helper derives the
+    /// cgroup files itself; the request never names files or paths.
+    ApplyVmLimits {
+        vm_id: String,
+        pid: u32,
+        #[serde(default)]
+        cpu_max_percent: Option<u32>,
+        #[serde(default)]
+        cpu_weight: Option<u32>,
+        #[serde(default)]
+        memory_max_mib: Option<u64>,
+    },
+    /// Remove a VM's cgroup once its QEMU has exited.
+    ReleaseVmLimits {
+        vm_id: String,
+    },
 }
 
 /// Where a tap goes.
@@ -90,6 +108,11 @@ pub enum Response {
         bridges: Vec<String>,
         host_only: bool,
     },
+    LimitsApplied {
+        /// The cgroup's path, for diagnostics.
+        cgroup: String,
+    },
+    LimitsReleased,
     Error {
         message: String,
     },
@@ -141,6 +164,25 @@ pub struct HelperConfig {
     pub disks: DiskPolicy,
     #[serde(default)]
     pub network: NetworkPolicy,
+    #[serde(default)]
+    pub isolation: IsolationPolicy,
+}
+
+/// `[isolation]` in helper.toml (M6-05).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IsolationPolicy {
+    /// Put each VM's QEMU in its own cgroup v2 group with its CPU and memory
+    /// limits. Off unless the admin enables it.
+    #[serde(default)]
+    pub cgroups: bool,
+    /// Parent group under the cgroup v2 mount (default `qemu-ui`).
+    #[serde(default)]
+    pub cgroup_parent: Option<String>,
+}
+
+/// VM ids the helper accepts in cgroup names: what the daemon generates.
+pub fn valid_vm_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// `[network]` in helper.toml (M3-05).

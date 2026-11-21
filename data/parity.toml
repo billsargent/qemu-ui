@@ -67,14 +67,20 @@ windows = { status = "impossible", note = "The Windows build of QEMU does not in
 [[row]]
 id = "sandbox"
 feature = "QEMU seccomp sandbox (-sandbox)"
-linux = { status = "native", note = "" }
-windows = { status = "impossible", note = "Compensated by a restricted token and job objects (weaker)." }
+linux = { status = "native", note = "Used when QEMU is built with seccomp: no obsolete syscalls, privilege changes, process spawning or scheduler changes." }
+windows = { status = "impossible", note = "Compensated by job objects with CPU/memory limits (weaker). Restricted-token spawning is implemented but not yet used for QEMU." }
 
 [[row]]
 id = "per-vm-uid"
 feature = "Per-VM user and cgroup isolation"
-linux = { status = "native", note = "" }
-windows = { status = "impossible", note = "Job objects are used instead." }
+linux = { status = "needs-setup", note = "Per-VM cgroup v2 groups with CPU/memory limits via the helper ([isolation] cgroups = true). Per-VM users are designed but not implemented yet." }
+windows = { status = "degraded", note = "A per-VM job object carries CPU/memory limits; there is no per-VM user." }
+
+[[row]]
+id = "io-throttle"
+feature = "Disk IO limits (live adjustable)"
+linux = { status = "native", note = "QEMU throttle groups." }
+windows = { status = "native", note = "QEMU throttle groups." }
 
 [[row]]
 id = "vfio"

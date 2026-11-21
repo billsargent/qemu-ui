@@ -9,6 +9,7 @@ async-stream = "0.3.6"
 axum = { version = "0.8.9", features = ["ws"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 des = "0.8"
+qemu-ui-winsec = { path = "../qemu-ui-winsec" }
 dirs = "7.0.0"
 futures = "0.3.34"
 hex = "0.4.3"

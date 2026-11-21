@@ -250,6 +250,7 @@ pub fn default_spec_on(
         None
     };
     let spec = VmSpec {
+        limits: Default::default(),
         spec_version: SPEC_VERSION,
         name: name.to_string(),
         arch: caps.arch.clone(),

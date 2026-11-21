@@ -222,6 +222,7 @@ mod tests {
 
     fn spec(disks: Vec<DiskSpec>) -> VmSpec {
         VmSpec {
+            limits: Default::default(),
             spec_version: SPEC_VERSION,
             name: "t".into(),
             arch: "x86_64".into(),
