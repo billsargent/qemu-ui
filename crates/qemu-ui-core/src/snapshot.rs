@@ -1,9 +1,15 @@
 //! VM snapshots (plan.md §9.3, M2-06): API types and the pure rules.
 //!
-//! Snapshots are internal qcow2 snapshots taken with the same tag on every
-//! writable disk of a VM (and its UEFI NVRAM file), optionally together with
-//! the VM's memory and device state. They form a tree: each snapshot's
-//! parent is the snapshot the VM was based on when it was taken.
+//! Two kinds, one tree:
+//! * internal: a qcow2 snapshot tag written into every writable disk of a VM
+//!   (and its UEFI NVRAM file), optionally with memory and device state;
+//! * external (disk-only): each writable disk image is frozen and a new qcow2
+//!   overlay on top of it becomes the VM's disk. The frozen image *is* the
+//!   snapshot; reverting puts a fresh overlay on it. Works for raw disks too.
+//!
+//! Each snapshot's parent is the snapshot the VM was based on when it was
+//! taken. The kind is recorded in the tag: `qui-<id>` internal, `ext-<id>`
+//! external.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -21,6 +27,29 @@ pub struct SnapshotDisk {
     pub name: String,
     /// QEMU block node name while the VM runs (`qui-diskN`, `qui-fw-vars`).
     pub node: String,
+    /// External snapshots: the overlay that became the VM's disk when the
+    /// snapshot was taken (`name` is the frozen image).
+    #[serde(default)]
+    pub overlay: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum SnapshotKind {
+    Internal,
+    External,
+}
+
+/// Tag prefix of external snapshots.
+pub const EXTERNAL_TAG_PREFIX: &str = "ext-";
+
+pub fn kind_of_tag(tag: &str) -> SnapshotKind {
+    if tag.starts_with(EXTERNAL_TAG_PREFIX) {
+        SnapshotKind::External
+    } else {
+        SnapshotKind::Internal
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -32,6 +61,7 @@ pub struct SnapshotInfo {
     /// Tag stored inside the qcow2 images.
     pub tag: String,
     pub parent_id: Option<String>,
+    pub kind: SnapshotKind,
     /// Includes RAM and device state (taken while the VM ran).
     pub with_memory: bool,
     /// Taken automatically (e.g. before a revert).
@@ -47,8 +77,10 @@ pub struct SnapshotList {
     pub snapshots: Vec<SnapshotInfo>,
     /// The snapshot the VM's current state descends from.
     pub head: Option<String>,
-    /// Why snapshots cannot be taken right now, if they cannot.
+    /// Why internal snapshots cannot be taken right now, if they cannot.
     pub unsupported_reason: Option<String>,
+    /// Why external snapshots cannot be taken right now, if they cannot.
+    pub external_unsupported_reason: Option<String>,
 }
 
 /// A writable disk of the spec with its on-disk format.
@@ -89,6 +121,74 @@ pub fn snapshot_disks(spec: &VmSpec, formats: &[Option<String>]) -> Result<Vec<u
         return Err("the VM has no writable disk to hold a snapshot".into());
     }
     Ok(out)
+}
+
+/// Indices of the disks an external snapshot covers: every writable disk.
+/// Any image format works (the overlay is qcow2); physical host disks can't
+/// be frozen behind an overlay file.
+pub fn external_snapshot_disks(spec: &VmSpec) -> Result<Vec<usize>, String> {
+    let mut out = Vec::new();
+    for (i, d) in spec.disks.iter().enumerate() {
+        if d.readonly || d.media == Media::Cdrom {
+            continue;
+        }
+        if crate::spec::is_host_disk(&d.image) {
+            return Err(format!(
+                "disk {i} is a physical host disk; external snapshots need image files.                  Mark it read-only or detach it to snapshot the other disks."
+            ));
+        }
+        out.push(i);
+    }
+    if out.is_empty() {
+        return Err("the VM has no writable disk to hold a snapshot".into());
+    }
+    Ok(out)
+}
+
+/// Name stem for the overlay put on `image` by snapshot `sid`:
+/// `sys.qcow2` → `sys.snap-<sid>` (the caller adds `.qcow2` and makes it
+/// unique). Repeated snapshots don't stack suffixes.
+pub fn overlay_stem(image: &str, sid: &str) -> String {
+    let stem = image.rsplit_once('.').map_or(image, |(s, _)| s);
+    let stem = stem.split(".snap-").next().unwrap_or(stem);
+    let stem = stem.split(".rev-").next().unwrap_or(stem);
+    format!("{stem}.snap-{sid}")
+}
+
+/// Name stem for the fresh overlay a revert puts on a frozen image.
+pub fn revert_stem(image: &str, sid: &str) -> String {
+    overlay_stem(image, sid).replacen(".snap-", ".rev-", 1)
+}
+
+/// Why an external snapshot's frozen image can't be merged away, if it
+/// can't. Deleting an external snapshot streams its frozen image into the
+/// single overlay on top of it; anything more needs a merge the UI can't
+/// make safely.
+pub fn external_delete_blocker(
+    frozen: &str,
+    dependents: usize,
+    other_users: &[String],
+    vm_running: bool,
+) -> Option<String> {
+    if vm_running {
+        return Some(
+            "stop the VM to delete an external snapshot: its frozen image is merged into the              overlay above it, which needs the files closed"
+                .into(),
+        );
+    }
+    if !other_users.is_empty() {
+        return Some(format!(
+            "{frozen} is also used by {}; it can't be merged away",
+            other_users.join(", ")
+        ));
+    }
+    match dependents {
+        0 => None,
+        1 => None,
+        n => Some(format!(
+            "{n} images are built on {frozen} (the tree branches here after a revert); merging it              into one would break the others. Delete the snapshots on the other branches first."
+        )),
+    }
 }
 
 /// Is `name` an acceptable snapshot name?
@@ -177,6 +277,60 @@ mod tests {
     fn needs_a_writable_disk() {
         let s = spec(vec![disk("iso", Media::Cdrom, true)]);
         assert!(snapshot_disks(&s, &[Some("raw".into())]).is_err());
+    }
+
+    #[test]
+    fn external_covers_any_format_but_not_host_disks() {
+        let s = spec(vec![
+            disk("iso", Media::Cdrom, true),
+            disk("sys.raw", Media::Disk, false),
+            disk("data.qcow2", Media::Disk, false),
+        ]);
+        assert_eq!(external_snapshot_disks(&s).unwrap(), vec![1, 2]);
+        let mut h = s.clone();
+        h.disks[1].image.pool = crate::spec::HOST_DISK_POOL.into();
+        assert!(
+            external_snapshot_disks(&h)
+                .unwrap_err()
+                .contains("physical host disk")
+        );
+        assert!(external_snapshot_disks(&spec(vec![disk("iso", Media::Cdrom, true)])).is_err());
+    }
+
+    #[test]
+    fn overlay_names_dont_stack() {
+        assert_eq!(overlay_stem("sys.qcow2", "ab"), "sys.snap-ab");
+        assert_eq!(overlay_stem("sys.snap-ab.qcow2", "cd"), "sys.snap-cd");
+        assert_eq!(overlay_stem("sys.rev-ab-1.qcow2", "cd"), "sys.snap-cd");
+        assert_eq!(revert_stem("sys.snap-ab.qcow2", "ef"), "sys.rev-ef");
+        assert_eq!(overlay_stem("noext", "x"), "noext.snap-x");
+    }
+
+    #[test]
+    fn kinds_from_tags() {
+        assert_eq!(kind_of_tag("qui-0123"), SnapshotKind::Internal);
+        assert_eq!(kind_of_tag("ext-0123"), SnapshotKind::External);
+    }
+
+    #[test]
+    fn external_delete_rules() {
+        assert!(
+            external_delete_blocker("a", 1, &[], true)
+                .unwrap()
+                .contains("stop the VM")
+        );
+        assert!(
+            external_delete_blocker("a", 1, &["other".into()], false)
+                .unwrap()
+                .contains("other")
+        );
+        assert!(
+            external_delete_blocker("a", 2, &[], false)
+                .unwrap()
+                .contains("branches")
+        );
+        assert!(external_delete_blocker("a", 1, &[], false).is_none());
+        assert!(external_delete_blocker("a", 0, &[], false).is_none());
     }
 
     #[test]

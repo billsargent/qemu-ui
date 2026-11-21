@@ -337,6 +337,12 @@ impl Supervisor {
     /// The image file is never deleted.
     pub async fn remove_disk(&self, id: &str, n: usize, force: bool) -> OpResult<DiskChange> {
         let _g = self.ops.lock().await;
+        if self.has_live_overlay(id, &format!("qui-disk{n}")) {
+            return Err(OpError::Conflict(
+                "this disk sits on an overlay from an external snapshot taken while the VM ran;                  stop and start the VM first"
+                    .into(),
+            ));
+        }
         let row = self.store.get_vm(id)?.ok_or(OpError::NotFound)?;
         let mut saved: VmSpec =
             serde_json::from_str(&row.spec_json).map_err(|e| OpError::Failed(e.into()))?;
@@ -461,6 +467,12 @@ impl Supervisor {
     /// Put another image into the CD-ROM whose ids use index `n`.
     pub async fn change_media(&self, id: &str, n: usize, image: ImageRef) -> OpResult<DiskChange> {
         let _g = self.ops.lock().await;
+        if self.has_live_overlay(id, &format!("qui-disk{n}")) {
+            return Err(OpError::Conflict(
+                "this disk sits on an overlay from an external snapshot taken while the VM ran;                  stop and start the VM first"
+                    .into(),
+            ));
+        }
         let row = self.store.get_vm(id)?.ok_or(OpError::NotFound)?;
         let mut saved: VmSpec =
             serde_json::from_str(&row.spec_json).map_err(|e| OpError::Failed(e.into()))?;

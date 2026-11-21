@@ -15,4 +15,9 @@ pool: string, name: string,
 /**
  * QEMU block node name while the VM runs (`qui-diskN`, `qui-fw-vars`).
  */
-node: string, };
+node: string, 
+/**
+ * External snapshots: the overlay that became the VM's disk when the
+ * snapshot was taken (`name` is the frozen image).
+ */
+overlay: string | null, };
