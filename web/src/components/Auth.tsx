@@ -266,7 +266,7 @@ export function SecurityCard() {
           <span className="text-xs text-zinc-500">
             {a.tls ? "over TLS" : "without TLS"}
           </span>
-          {a.actor === "admin (session)" && (
+          {a.actor === "admin" && (
             <span className="ml-auto">
               <Button variant="ghost" onClick={() => logout.mutate()}>
                 Log out

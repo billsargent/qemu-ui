@@ -5,6 +5,7 @@ import { api } from "../api/client";
 import type { BinaryCaps } from "../api/generated/BinaryCaps";
 import type { HostCaps } from "../api/generated/HostCaps";
 import { Badge, Button, Card, ParityBadge } from "../components/ui";
+import { TlsCard } from "../components/TlsCard";
 
 export default function SystemPage() {
   const qc = useQueryClient();
@@ -46,6 +47,7 @@ export default function SystemPage() {
         </div>
       </div>
 
+      <TlsCard />
       {!caps ? (
         <p className="text-sm text-zinc-500">First scan in progress…</p>
       ) : caps.binaries.length === 0 && caps.failed.length === 0 ? (

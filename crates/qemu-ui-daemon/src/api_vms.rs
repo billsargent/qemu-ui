@@ -93,7 +93,7 @@ fn gate_passthrough(
     }
     crate::auth::require_expert(app, actor)?;
     crate::audit::record(
-        actor,
+        &actor.label(),
         "expert.passthrough-changed",
         vm,
         json!({"before": old.len(), "after": new.len()}),

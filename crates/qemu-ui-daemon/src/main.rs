@@ -35,10 +35,12 @@ mod procs;
 mod recording;
 mod scan;
 mod screens;
+mod server_config;
 mod shares;
 mod spice;
 mod store;
 mod supervisor;
+mod tls;
 mod usb;
 
 use std::net::SocketAddr;
@@ -55,11 +57,6 @@ struct Args {
     /// (the admin account) to be complete.
     #[arg(long, env = "QEMU_UI_LISTEN", default_value = "127.0.0.1:7480")]
     listen: SocketAddr,
-
-    /// The daemon is served over TLS (directly or by a reverse proxy):
-    /// session cookies are marked `Secure`.
-    #[arg(long, env = "QEMU_UI_TLS")]
-    tls: bool,
 
     /// Directory for the database, run directories and logs.
     #[arg(long, env = "QEMU_UI_DATA_DIR")]
@@ -95,6 +92,20 @@ struct Args {
     /// Re-probe every binary at startup even if a cached snapshot exists.
     #[arg(long)]
     rescan: bool,
+
+    /// HTTPS policy: `auto` serves HTTPS beyond loopback and plain HTTP on
+    /// loopback; `on` always; `off` only on loopback.
+    #[arg(long, env = "QEMU_UI_TLS", value_enum, default_value = "auto")]
+    tls: server_config::TlsMode,
+
+    /// Your own certificate chain (PEM, server certificate first) instead
+    /// of the generated one. Needs --tls-key.
+    #[arg(long, env = "QEMU_UI_TLS_CERT", requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+
+    /// Private key (PEM) for --tls-cert.
+    #[arg(long, env = "QEMU_UI_TLS_KEY", requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -113,30 +124,24 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating {}", data_dir.display()))?;
     let store = store::Store::open(&data_dir.join("qemu-ui.db"))?;
+    audit::init(
+        store.clone(),
+        qemu_ui_core::security::AuditRetention::default(),
+    );
     let lan = !args.listen.ip().is_loopback();
-    if lan {
-        if store.admin()?.is_none() {
-            bail!(
-                "refusing to listen on {}: complete first-run setup (create the admin account) \
-                 on a loopback address first, e.g. http://127.0.0.1:7480",
-                args.listen
-            );
-        }
-        if !args.tls {
-            tracing::warn!(
-                "listening on {} without TLS: passwords and session cookies cross the network \
-                 in clear text",
-                args.listen
-            );
-        }
+    if lan && store.admin()?.is_none() {
+        bail!(
+            "refusing to listen on {}: complete first-run setup (create the admin account)              on a loopback address first, e.g. https://127.0.0.1:7480",
+            args.listen
+        );
     }
-    let auth = auth::Auth::new(store.clone(), args.tls, lan);
 
     let project_dirs = project_qemu_dirs();
     let scanner = scan::Scanner::new(store.clone(), project_dirs, args.qemu_dirs);
     scanner.start(args.rescan).await;
 
     let run_dir = args.run_dir.unwrap_or_else(|| data_dir.join("r"));
+    let store_for_auth = store.clone();
     let supervisor = supervisor::Supervisor::new(store, scanner.clone(), &data_dir, run_dir)?;
     if args.helper_socket.is_some() || args.helper_secret.is_some() {
         let mut h = helper_client::HelperClient::default_paths();
@@ -157,23 +162,58 @@ async fn main() -> Result<()> {
     });
     api_fetch::set_allow_private(args.allow_private_fetch);
     let token = guard::load_or_create_token(&data_dir)?;
-    let app = api::router(
+    let use_tls = server_config::want_tls(args.tls, args.listen).map_err(anyhow::Error::msg)?;
+    server_config::set(server_config::ServerConfig { tls: use_tls });
+    let tls = if use_tls {
+        let source = match (args.tls_cert, args.tls_key) {
+            (Some(cert), Some(key)) => tls::Source::Provided { cert, key },
+            _ => tls::Source::Generated {
+                dir: data_dir.join("tls"),
+            },
+        };
+        let t = tls::Tls::new(source, tls::default_names(args.listen))?;
+        t.install();
+        tls::reload_on_sighup(t.clone());
+        Some(t)
+    } else {
+        None
+    };
+    let auth = auth::Auth::new(store_for_auth, use_tls, lan);
+    let mut app = api::router(
         api::App::with_auth(scanner, supervisor, token, auth),
         web_dir,
     );
+    if tls.is_some() {
+        app = app.layer(axum::middleware::from_fn(tls::hsts));
+    }
 
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("binding {}", args.listen))?;
-    tracing::info!("listening on http://{}", args.listen);
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async {
+    audit::record(
+        "daemon",
+        "daemon.start",
+        "daemon",
+        serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "tls": use_tls }),
+    );
+    let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
-    })
-    .await?;
+    };
+    match tls {
+        Some(t) => {
+            tracing::info!("listening on https://{}", args.listen);
+            tls::serve(listener, app, t, shutdown).await?;
+        }
+        None => {
+            tracing::info!("listening on http://{}", args.listen);
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await?;
+        }
+    }
     Ok(())
 }
 

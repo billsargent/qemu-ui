@@ -26,7 +26,6 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::api::{ApiError, App};
-pub use crate::audit::Actor;
 use crate::store::Store;
 
 pub const SESSION_COOKIE: &str = "qui_session";
@@ -40,6 +39,34 @@ const MIN_PASSWORD: usize = 8;
 const FREE_ATTEMPTS: u32 = 5;
 const MAX_LOCKOUT: Duration = Duration::from_secs(300);
 const EXPERT_KEY: &str = "settings:expert-mode";
+
+/// Who is acting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Actor {
+    /// No credentials (public endpoints only).
+    Anonymous,
+    /// A local browser before first-run setup (loopback only).
+    LocalSetup,
+    /// The local bootstrap token from the data directory (loopback only).
+    Bootstrap,
+    /// A logged-in browser session.
+    Session,
+    /// An API token, by id.
+    Token(String),
+}
+
+impl Actor {
+    /// The name recorded in the audit log.
+    pub fn label(&self) -> String {
+        match self {
+            Actor::Anonymous => "anonymous".into(),
+            Actor::LocalSetup => "local (before setup)".into(),
+            Actor::Bootstrap => "api-token".into(),
+            Actor::Session => "admin".into(),
+            Actor::Token(id) => format!("token:{id}"),
+        }
+    }
+}
 
 /// What an actor wants to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +156,11 @@ impl Auth {
         })
     }
 
+    /// Served over HTTPS (main's TLS layer), or forced for tests.
+    pub fn is_tls(&self) -> bool {
+        self.tls || crate::server_config::tls()
+    }
+
     pub fn setup_complete(&self) -> bool {
         self.store.admin().ok().flatten().is_some()
     }
@@ -200,7 +232,7 @@ impl Auth {
     }
 
     fn session_cookie(&self, token: &str, max_age: u64) -> HeaderValue {
-        let secure = if self.tls { "; Secure" } else { "" };
+        let secure = if self.is_tls() { "; Secure" } else { "" };
         HeaderValue::from_str(&format!(
             "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"
         ))
@@ -297,7 +329,7 @@ async fn state(
             .map(|a| a.username),
         csrf: s.map(|s| s.csrf),
         expert_mode: app.auth.expert_mode(),
-        tls: app.auth.tls,
+        tls: app.auth.is_tls(),
     })
 }
 
@@ -351,7 +383,7 @@ async fn setup(
         .store
         .create_admin(username, &hash, now())
         .map_err(|_| deny(StatusCode::CONFLICT, "setup is already complete"))?;
-    crate::audit::record(&actor, "auth.setup", username, json!({}));
+    crate::audit::record(&actor.label(), "auth.setup", username, json!({}));
     let (token, csrf) = app
         .auth
         .start_session()
@@ -396,7 +428,7 @@ async fn login(
     if !ok {
         app.auth.login_failed(ip);
         crate::audit::record(
-            &who,
+            &who.label(),
             "auth.login-failed",
             c.username.trim(),
             json!({"ip": ip.map(|i| i.to_string())}),
@@ -408,7 +440,7 @@ async fn login(
     }
     app.auth.login_ok(ip);
     crate::audit::record(
-        &Actor::Session,
+        &Actor::Session.label(),
         "auth.login",
         &admin.username,
         json!({"ip": ip.map(|i| i.to_string())}),
@@ -423,7 +455,7 @@ async fn login(
 async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     if let Some(s) = app.auth.session(&headers) {
         let _ = app.supervisor.store.delete_session(&s.token_hash);
-        crate::audit::record(&Actor::Session, "auth.logout", "", json!({}));
+        crate::audit::record(&Actor::Session.label(), "auth.logout", "", json!({}));
     }
     let mut r = StatusCode::NO_CONTENT.into_response();
     r.headers_mut()
@@ -476,7 +508,12 @@ async fn change_password(
     // Other browsers are logged out; this one stays.
     let keep = app.auth.session(&headers).map(|s| s.token_hash);
     let _ = app.supervisor.store.delete_sessions_except(keep.as_deref());
-    crate::audit::record(&actor, "auth.password-changed", &admin.username, json!({}));
+    crate::audit::record(
+        &actor.label(),
+        "auth.password-changed",
+        &admin.username,
+        json!({}),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -534,7 +571,12 @@ async fn create_token(
         .store
         .insert_api_token(&id, name, &sha256_hex(&token), now())
         .map_err(|e| deny(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
-    crate::audit::record(&actor, "auth.token-created", &id, json!({"name": name}));
+    crate::audit::record(
+        &actor.label(),
+        "auth.token-created",
+        &id,
+        json!({"name": name}),
+    );
     // The only time the token is shown (200, not 201: the body matters).
     Ok((
         StatusCode::OK,
@@ -550,7 +592,7 @@ async fn revoke_token(
     require(&app, &actor, Action::Account)?;
     match app.supervisor.store.delete_api_token(&id) {
         Ok(true) => {
-            crate::audit::record(&actor, "auth.token-revoked", &id, json!({}));
+            crate::audit::record(&actor.label(), "auth.token-revoked", &id, json!({}));
             Ok(StatusCode::NO_CONTENT)
         }
         Ok(false) => Err(deny(StatusCode::NOT_FOUND, "no such token")),
@@ -573,7 +615,7 @@ async fn set_expert(
         .set_expert_mode(b.enabled)
         .map_err(|e| deny(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
     crate::audit::record(
-        &actor,
+        &actor.label(),
         if b.enabled {
             "expert.enabled"
         } else {

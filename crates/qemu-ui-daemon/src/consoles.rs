@@ -356,7 +356,7 @@ async fn ticket(
     };
     let read_only = q.mode.as_deref() == Some("view");
     crate::audit::record(
-        &actor,
+        &actor.label(),
         "console.ticket",
         &id,
         serde_json::json!({"kind": format!("{kind:?}"), "read_only": read_only}),

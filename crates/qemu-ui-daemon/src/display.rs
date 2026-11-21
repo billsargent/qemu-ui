@@ -256,7 +256,7 @@ async fn attach(
     Query(q): Query<AttachQuery>,
 ) -> Result<Json<Attachment>, ApiError> {
     crate::audit::record(
-        &actor,
+        &actor.label(),
         "console.attach",
         &id,
         serde_json::json!({"engine": engine_id, "read_only": q.mode.as_deref() == Some("view")}),

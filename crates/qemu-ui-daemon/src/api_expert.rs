@@ -43,7 +43,7 @@ async fn qmp(
         .map(|o| o.keys().cloned().collect())
         .unwrap_or_default();
     crate::audit::record(
-        &actor,
+        &actor.label(),
         "expert.qmp",
         &id,
         json!({"command": c.execute, "arguments": arg_names}),

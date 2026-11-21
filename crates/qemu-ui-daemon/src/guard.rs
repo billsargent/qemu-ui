@@ -180,12 +180,24 @@ pub async fn api_guard(State(app): State<Arc<App>>, mut req: Request, next: Next
     );
     match decision {
         Ok((actor, local)) => {
+            req.extensions_mut()
+                .insert(crate::audit::Actor(actor.label()));
             req.extensions_mut().insert(actor);
             req.extensions_mut().insert(Loopback(local));
             req.extensions_mut().insert(ClientIp(peer));
             next.run(req).await
         }
-        Err((code, why)) => ApiError(code, why.into()).into_response(),
+        Err((code, why)) => {
+            crate::audit::record_full(
+                "unknown",
+                "api.denied",
+                &format!("{} {}", req.method(), req.uri().path()),
+                serde_json::json!({ "reason": why }),
+                "denied",
+                peer.map(|p| p.to_string()).as_deref(),
+            );
+            ApiError(code, why.into()).into_response()
+        }
     }
 }
 
