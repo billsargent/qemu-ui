@@ -289,7 +289,15 @@ function EmulatorDetail({ b }: { b: BinaryCaps }) {
           {Object.entries(b.backends).map(([k, v]) => (
             <div key={k} className="contents">
               <dt className="font-medium">{k}</dt>
-              <dd className="font-mono">{v ? v.join(", ") : <Badge tone="red">not compiled in</Badge>}</dd>
+              <dd className="font-mono">
+                {typeof v === "boolean" ? (
+                  v ? "yes" : "no"
+                ) : v ? (
+                  v.join(", ")
+                ) : (
+                  <Badge tone="red">not compiled in</Badge>
+                )}
+              </dd>
             </div>
           ))}
         </dl>

@@ -188,6 +188,14 @@ pub async fn probe_binary(mut binary: Binary, host: &HostInfo) -> Result<BinaryC
             Vec::new()
         }
     };
+    // Built with seccomp? The option only exists then.
+    let sandbox = qmp
+        .execute(
+            "query-command-line-options",
+            Some(serde_json::json!({"option": "sandbox"})),
+        )
+        .await
+        .is_ok();
     let qmp_schema_hash = match qmp.execute("query-qmp-schema", None).await {
         Ok(v) => hex::encode(Sha256::digest(v.to_string().as_bytes())),
         Err(e) => {
@@ -224,6 +232,7 @@ pub async fn probe_binary(mut binary: Binary, host: &HostInfo) -> Result<BinaryC
         audiodev: list(aud, "audiodev"),
         tpmdev: list(tpm, "tpmdev"),
         object: list(obj, "object"),
+        sandbox,
     };
     let accel_names = list(acc, "accel").unwrap_or_else(|| vec!["tcg".into()]);
     let help_machines = match mh {
@@ -710,6 +719,7 @@ mod compile_smoke {
         );
 
         let mut spec = VmSpec {
+            limits: Default::default(),
             spec_version: SPEC_VERSION,
             name: "smoke".into(),
             arch: "x86_64".into(),

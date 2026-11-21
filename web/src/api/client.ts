@@ -33,6 +33,9 @@ import type { ImportResult } from "./generated/ImportResult";
 import type { Network } from "./generated/Network";
 import type { NetworkConfig } from "./generated/NetworkConfig";
 import type { NetworkInfo } from "./generated/NetworkInfo";
+import type { LimitsChange } from "./generated/LimitsChange";
+import type { LimitsSupport } from "./generated/LimitsSupport";
+import type { ResourceLimits } from "./generated/ResourceLimits";
 import type { AuditPage } from "./generated/AuditPage";
 import type { AuditQuery } from "./generated/AuditQuery";
 import type { TlsInfo } from "./generated/TlsInfo";
@@ -244,6 +247,9 @@ export const api = {
     post<ConsolePresence>(`/vms/${id}/display/control`, { viewer_id: viewerId }),
   screenshotUrl: (id: string) => `/api/v1/vms/${id}/display/screenshot`,
 
+  limitsSupport: () => request<LimitsSupport>("/host/limits"),
+  setLimits: (id: string, limits: ResourceLimits) =>
+    request<LimitsChange>(`/vms/${id}/limits`, { method: "PUT", body: JSON.stringify({ limits }) }),
   audit: (q: AuditQuery) => request<AuditPage>(`/audit?${auditParams(q)}`),
   auditExportUrl: (q: AuditQuery, format: "csv" | "json") => `/api/v1/audit/export?${auditParams(q)}&format=${format}`,
   tls: () => request<TlsInfo>("/tls"),

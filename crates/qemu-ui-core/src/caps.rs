@@ -113,6 +113,9 @@ pub struct Backends {
     /// `-object` types (e.g. `monitor-qmp`, `memory-backend-file`, `secret`).
     #[serde(default)]
     pub object: Option<Vec<String>>,
+    /// Built with seccomp: `-sandbox` is available (M6-05).
+    #[serde(default)]
+    pub sandbox: bool,
 }
 
 impl Backends {
@@ -133,7 +136,7 @@ impl Backends {
 
 /// Bump when the probe collects new data, so cached snapshots made by an
 /// older probe are re-probed instead of served without it.
-pub const PROBE_VERSION: u32 = 2;
+pub const PROBE_VERSION: u32 = 3;
 
 /// Result of probing one `qemu-system-*` binary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]

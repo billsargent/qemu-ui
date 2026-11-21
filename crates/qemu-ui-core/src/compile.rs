@@ -345,6 +345,9 @@ const OWNED_OPTIONS: &[&str] = &[
     "-sandbox",
 ];
 
+/// The `-sandbox` setting on Linux when QEMU has seccomp (M6-05).
+pub const SANDBOX: &str = "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny";
+
 /// Validate a spec against a capability snapshot. Paths/images are checked
 /// by `compile` (they need the context).
 pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
@@ -1092,6 +1095,11 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
         ));
     }
     diags.extend(validate_networks(spec, ctx.networks));
+    diags.extend(crate::limits::validate(
+        &spec.limits,
+        spec.cpu.count,
+        spec.memory.size_mib,
+    ));
     if spec.display.spice && !caps.backends.has_spice() {
         diags.push(Diagnostic::error(
             "display.spice",
@@ -1136,6 +1144,12 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
     }
     push(&mut a, "-name", name);
     push(&mut a, "-msg", "timestamp=on".into());
+    // seccomp (M6-05): no obsolete syscalls, no privilege changes, no new
+    // processes (taps use script=no; virtiofsd and passt are our own
+    // sidecars), no scheduler/affinity changes.
+    if ctx.os == "linux" && ctx.caps.backends.sandbox {
+        push(&mut a, "-sandbox", SANDBOX.into());
+    }
     a.push("-nodefaults".into());
     a.push("-no-user-config".into());
     push(&mut a, "-accel", accel.clone());
@@ -1250,18 +1264,29 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
         }
     }
 
-    // Disks
+    // Disks (behind the VM's IO throttle group when limits are set, M6-07)
+    let throttle = crate::limits::throttle_group_object(&spec.limits);
+    if let Some(o) = &throttle {
+        push(&mut a, "-object", o.to_string());
+    }
     let mut next_port = 0;
     for (i, disk) in spec.disks.iter().enumerate() {
         let img = &ctx.images[&disk.image];
-        let (file, format, mut dev) = disk_objects(disk.node_index(i), disk, img, ctx.os);
+        let (file, mut format, mut dev) = disk_objects(disk.node_index(i), disk, img, ctx.os);
         if ports > 0 && is_pci_disk(disk.bus) {
             dev["bus"] = format!("qui-rp{next_port}").into();
             next_port += 1;
         }
-        for (opt, v) in [("-blockdev", file), ("-blockdev", format), ("-device", dev)] {
-            push(&mut a, opt, v.to_string());
+        push(&mut a, "-blockdev", file.to_string());
+        if throttle.is_some() && disk.media == Media::Disk {
+            push(
+                &mut a,
+                "-blockdev",
+                crate::limits::throttle_disk(&mut format).to_string(),
+            );
         }
+        push(&mut a, "-blockdev", format.to_string());
+        push(&mut a, "-device", dev.to_string());
     }
 
     // NICs

@@ -120,6 +120,7 @@ fn caps(monitor_objects: bool) -> BinaryCaps {
             audiodev: None,
             tpmdev: None,
             object: Some(objects),
+            sandbox: false,
         },
         qmp_schema_hash: String::new(),
         warnings: vec![],
@@ -140,6 +141,7 @@ fn run_paths(vnc: VncListen) -> RunPaths {
 
 fn base_spec() -> VmSpec {
     VmSpec {
+        limits: Default::default(),
         spec_version: SPEC_VERSION,
         name: "debian".into(),
         arch: "x86_64".into(),
@@ -1478,4 +1480,81 @@ fn spice_without_a_spice_build_is_an_error() {
             .any(|d| d.rule == "display.spice-unsupported" && d.field == "display.spice"),
         "{errs:?}"
     );
+}
+
+#[test]
+fn io_limits_put_disks_behind_a_throttle_group() {
+    let mut s = base_spec();
+    s.limits.io.read_bytes_per_sec = Some(10 << 20);
+    s.limits.io.write_iops = Some(500);
+    let c = compile_with_networks(&s, &[]).unwrap();
+    let args = &c.args;
+    let pos = |needle: &str| args.iter().position(|a| a.contains(needle));
+    let group = pos("\"qom-type\":\"throttle-group\"").expect("throttle group");
+    let v: serde_json::Value = serde_json::from_str(&args[group]).unwrap();
+    assert_eq!(v["id"], "qui-throttle0");
+    assert_eq!(v["limits"]["bps-read"], 10 << 20);
+    assert_eq!(v["limits"]["iops-write"], 500);
+    // file → throttle filter → format; the device still names the format node.
+    let filter = pos("\"driver\":\"throttle\"").expect("filter node");
+    let f: serde_json::Value = serde_json::from_str(&args[filter]).unwrap();
+    assert_eq!(f["node-name"], "qui-disk0-throttle");
+    assert_eq!(f["file"], "qui-disk0-file");
+    assert_eq!(f["throttle-group"], "qui-throttle0");
+    let fmt: serde_json::Value = args
+        .iter()
+        .filter_map(|a| serde_json::from_str::<serde_json::Value>(a).ok())
+        .find(|v| v["node-name"] == "qui-disk0")
+        .unwrap();
+    assert_eq!(fmt["file"], "qui-disk0-throttle");
+    assert!(group < filter, "the group exists before its first member");
+
+    // Without IO limits nothing changes.
+    let plain = compile_with_networks(&base_spec(), &[]).unwrap();
+    assert!(!plain.args.iter().any(|a| a.contains("throttle")));
+}
+
+#[test]
+fn limit_validation_is_reported() {
+    let mut s = base_spec();
+    s.limits.memory_max_mib = Some(16);
+    let errs = compile_with_networks(&s, &[]).unwrap_err();
+    assert!(
+        errs.iter().any(|d| d.rule == "limits.memory-too-low"),
+        "{errs:?}"
+    );
+}
+
+#[test]
+fn sandbox_on_linux_when_qemu_has_seccomp() {
+    let mut caps = caps(true);
+    let images = images();
+    let s = base_spec();
+    let compile_on = |caps: &BinaryCaps, os: &str| {
+        let ctx = Context {
+            taps: Default::default(),
+            switch_sockets: &BTreeMap::new(),
+            networks: &[],
+            shares: vec![],
+            caps,
+            os,
+            run: run_paths(VncListen::Unix("/x".into())),
+            images: &images,
+            firmware: None,
+            machine: None,
+        };
+        compile(&s, &ctx).unwrap().args
+    };
+    assert!(
+        !compile_on(&caps, "linux").iter().any(|a| a == "-sandbox"),
+        "no seccomp, no sandbox"
+    );
+    caps.backends.sandbox = true;
+    let args = compile_on(&caps, "linux");
+    let i = args
+        .iter()
+        .position(|a| a == "-sandbox")
+        .expect("sandbox on Linux");
+    assert_eq!(args[i + 1], SANDBOX);
+    assert!(!compile_on(&caps, "windows").iter().any(|a| a == "-sandbox"));
 }

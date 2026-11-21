@@ -17,6 +17,7 @@ import type { VmSpec } from "../api/generated/VmSpec";
 import { MacField, NicModelField, VirtioNetFields } from "./NicFields";
 import { Badge, Button, Card, Field, inputCls } from "./ui";
 import { HardwareCard } from "./HardwareTree";
+import { LimitsCard } from "./LimitsCard";
 import { ChangedChips, FixButton, FixError, useFixes } from "./FixChips";
 import { kindLabel } from "../pages/NetworksPage";
 import { useAuthState } from "./Auth";
@@ -678,6 +679,13 @@ export function VmEditor({
           onChange={(shares) => set({ shares })}
           diagsFor={(i) => diagsFor(`shares[${i}]`)}
           other={diagsFor("shares").filter((d) => d.field === "shares")}
+        />
+
+        <LimitsCard
+          limits={spec.limits}
+          onChange={(limits) => set({ limits })}
+          vmId={vmId}
+          diags={diagsFor("limits")}
         />
 
         <HardwareCard
