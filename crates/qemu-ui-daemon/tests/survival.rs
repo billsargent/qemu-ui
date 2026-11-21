@@ -185,11 +185,12 @@ fn vms_survive_the_daemon_being_stopped_and_are_reattached() {
 
     let d = Daemon::start(&data, port);
     let deadline = Instant::now() + Duration::from_secs(120);
-    while d.get("/host/capabilities")["caps"]["binaries"]
+    // Binaries are probed one by one; wait for the one we boot.
+    while !d.get("/host/capabilities")["caps"]["binaries"]
         .as_array()
-        .is_none_or(|b| b.is_empty())
+        .is_some_and(|b| b.iter().any(|b| b["arch"] == "x86_64"))
     {
-        assert!(Instant::now() < deadline, "no QEMU binaries probed");
+        assert!(Instant::now() < deadline, "qemu-system-x86_64 never probed");
         std::thread::sleep(Duration::from_millis(250));
     }
     let mut spec = d.get("/vms/defaults?arch=x86_64&name=survivor")["spec"].clone();
