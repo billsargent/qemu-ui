@@ -2,14 +2,11 @@
 //! (e.g. session cookies get `Secure` only over TLS).
 
 // The accessors are for consumers such as session cookies (M6-01).
-#![allow(dead_code)]
-
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    pub listen: SocketAddr,
     /// Serving HTTPS.
     pub tls: bool,
 }
@@ -19,10 +16,6 @@ static CONFIG: OnceLock<ServerConfig> = OnceLock::new();
 /// Record the server configuration. Later calls are ignored.
 pub fn set(c: ServerConfig) {
     let _ = CONFIG.set(c);
-}
-
-pub fn get() -> Option<&'static ServerConfig> {
-    CONFIG.get()
 }
 
 /// Are responses going out over TLS? (False before start-up and in tests.)

@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use futures::Stream;
 use qemu_ui_core::compile::display_command;
 use qemu_ui_core::spec::VmSpec;
@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::api::{ApiError, ApiResult, App};
+use crate::auth::Actor;
 use crate::supervisor::OpError;
 
 pub fn routes() -> Router<Arc<App>> {
@@ -76,12 +77,42 @@ struct SpecBody {
     spec: VmSpec,
 }
 
-async fn create(State(app): State<Arc<App>>, Json(b): Json<SpecBody>) -> OpResponse<VmDetail> {
-    app.supervisor
-        .create(b.spec)
-        .await
-        .map(Json)
-        .map_err(op_err)
+/// Passthrough reaches QEMU unvalidated and can name any host path, so it is
+/// root-equivalent (plan.md §5.3, §13): changing it needs expert mode, and
+/// every change is audited. Unchanged passthrough (editing other fields of a
+/// VM that has some) is fine.
+fn gate_passthrough(
+    app: &App,
+    actor: &Actor,
+    vm: &str,
+    old: &[String],
+    new: &[String],
+) -> Result<(), ApiError> {
+    if old == new {
+        return Ok(());
+    }
+    crate::auth::require_expert(app, actor)?;
+    crate::audit::record(
+        &actor.label(),
+        "expert.passthrough-changed",
+        vm,
+        json!({"before": old.len(), "after": new.len()}),
+    );
+    Ok(())
+}
+
+async fn create(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Actor>,
+    Json(b): Json<SpecBody>,
+) -> Response {
+    if let Err(e) = gate_passthrough(&app, &actor, &b.spec.name, &[], &b.spec.passthrough) {
+        return e.into_response();
+    }
+    match app.supervisor.create(b.spec).await {
+        Ok(d) => Json(d).into_response(),
+        Err(e) => op_err(e).into_response(),
+    }
 }
 
 async fn detail(State(app): State<Arc<App>>, UrlPath(id): UrlPath<String>) -> OpResponse<VmDetail> {
@@ -90,14 +121,21 @@ async fn detail(State(app): State<Arc<App>>, UrlPath(id): UrlPath<String>) -> Op
 
 async fn update(
     State(app): State<Arc<App>>,
+    Extension(actor): Extension<Actor>,
     UrlPath(id): UrlPath<String>,
     Json(b): Json<SpecBody>,
-) -> OpResponse<VmDetail> {
-    app.supervisor
-        .update(&id, b.spec)
-        .await
-        .map(Json)
-        .map_err(op_err)
+) -> Response {
+    let old = match app.supervisor.detail(&id) {
+        Ok(d) => d.spec.passthrough,
+        Err(e) => return op_err(e).into_response(),
+    };
+    if let Err(e) = gate_passthrough(&app, &actor, &id, &old, &b.spec.passthrough) {
+        return e.into_response();
+    }
+    match app.supervisor.update(&id, b.spec).await {
+        Ok(d) => Json(d).into_response(),
+        Err(e) => op_err(e).into_response(),
+    }
 }
 
 async fn delete(

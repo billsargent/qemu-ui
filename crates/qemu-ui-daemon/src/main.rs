@@ -2,6 +2,7 @@
 
 mod api;
 mod api_disks;
+mod api_expert;
 mod api_fetch;
 mod api_forwards;
 mod api_guest_net;
@@ -15,6 +16,7 @@ mod api_storage;
 mod api_upload;
 mod api_vms;
 mod audit;
+mod auth;
 mod consoles;
 mod discovery;
 mod display;
@@ -52,7 +54,8 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 #[command(name = "qemu-uid", version, about = "qemu-ui daemon")]
 struct Args {
-    /// Address to listen on. Loopback only until LAN hardening (M6) ships.
+    /// Address to listen on. Anything beyond loopback needs first-run setup
+    /// (the admin account) to be complete.
     #[arg(long, env = "QEMU_UI_LISTEN", default_value = "127.0.0.1:7480")]
     listen: SocketAddr,
 
@@ -113,14 +116,6 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
 
-    if !args.listen.ip().is_loopback() {
-        bail!(
-            "refusing to listen on {}: LAN exposure requires authentication and TLS, which arrive in \
-             milestone M6. Use a loopback address.",
-            args.listen
-        );
-    }
-
     let data_dir = match args.data_dir {
         Some(d) => d,
         None => dirs::data_local_dir()
@@ -134,12 +129,20 @@ async fn main() -> Result<()> {
         store.clone(),
         qemu_ui_core::security::AuditRetention::default(),
     );
+    let lan = !args.listen.ip().is_loopback();
+    if lan && store.admin()?.is_none() {
+        bail!(
+            "refusing to listen on {}: complete first-run setup (create the admin account)              on a loopback address first, e.g. https://127.0.0.1:7480",
+            args.listen
+        );
+    }
 
     let project_dirs = project_qemu_dirs();
     let scanner = scan::Scanner::new(store.clone(), project_dirs, args.qemu_dirs);
     scanner.start(args.rescan).await;
 
     let run_dir = args.run_dir.unwrap_or_else(|| data_dir.join("r"));
+    let store_for_auth = store.clone();
     let supervisor = supervisor::Supervisor::new(store, scanner.clone(), &data_dir, run_dir)?;
     if args.helper_socket.is_some() || args.helper_secret.is_some() {
         let mut h = helper_client::HelperClient::default_paths();
@@ -161,10 +164,7 @@ async fn main() -> Result<()> {
     api_fetch::set_allow_private(args.allow_private_fetch);
     let token = guard::load_or_create_token(&data_dir)?;
     let use_tls = server_config::want_tls(args.tls, args.listen).map_err(anyhow::Error::msg)?;
-    server_config::set(server_config::ServerConfig {
-        listen: args.listen,
-        tls: use_tls,
-    });
+    server_config::set(server_config::ServerConfig { tls: use_tls });
     let tls = if use_tls {
         let source = match (args.tls_cert, args.tls_key) {
             (Some(cert), Some(key)) => tls::Source::Provided { cert, key },
@@ -179,7 +179,11 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let mut app = api::router(api::App::new(scanner, supervisor, token), web_dir);
+    let auth = auth::Auth::new(store_for_auth, use_tls, lan);
+    let mut app = api::router(
+        api::App::with_auth(scanner, supervisor, token, auth),
+        web_dir,
+    );
     if tls.is_some() {
         app = app.layer(axum::middleware::from_fn(tls::hsts));
     }
