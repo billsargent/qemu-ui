@@ -24,6 +24,7 @@ pub mod import_libvirt;
 pub mod iso9660;
 pub mod limits;
 pub mod lint;
+pub mod manifest;
 pub mod network;
 pub mod nic;
 pub mod parity;
