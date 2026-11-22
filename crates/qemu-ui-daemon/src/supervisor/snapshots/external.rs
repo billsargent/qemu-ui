@@ -224,12 +224,40 @@ impl Supervisor {
                 let top = live.tops.get(node).cloned().unwrap_or_else(|| node.clone());
                 actions.push(json!({"type": "blockdev-snapshot", "data": {"node": top, "overlay": new_node}}));
             }
+            // Quiesce through the guest agent when it answers (M7-02), so
+            // the frozen images hold consistent file systems. Best effort:
+            // without an agent the snapshot is crash-consistent.
+            let agent = if fail.is_none() {
+                crate::qga::socket(qmp).await
+            } else {
+                None
+            };
+            let mut frozen = false;
+            if let Some(sock) = &agent {
+                match crate::qga::freeze(sock).await {
+                    Ok(n) => {
+                        frozen = true;
+                        ctx.progress(None, Some(&format!("Froze {n} guest file systems")));
+                    }
+                    Err(e) => {
+                        tracing::info!(vm = %id, "snapshot not quiesced: {e:#}");
+                        // A freeze that timed out may still complete: undo it.
+                        let _ = crate::qga::thaw(sock).await;
+                    }
+                }
+            }
             if fail.is_none()
                 && let Err(e) = qmp
                     .execute("transaction", Some(json!({"actions": actions})))
                     .await
             {
                 fail = Some(anyhow!("QEMU refused the snapshot: {e}"));
+            }
+            if frozen
+                && let Some(sock) = &agent
+                && let Err(e) = crate::qga::thaw(sock).await
+            {
+                tracing::warn!(vm = %id, "thawing the guest file systems: {e:#}");
             }
             if let Some(e) = fail {
                 for n in &added {

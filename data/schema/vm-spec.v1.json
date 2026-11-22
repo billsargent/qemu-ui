@@ -22,6 +22,48 @@
         }
       ]
     },
+    "CloudInit": {
+      "description": "What the seed configures. Either fill in the fields, or give complete\n`user_data` (which then replaces the generated `#cloud-config`).",
+      "properties": {
+        "hostname": {
+          "description": "Guest host name; defaults to the VM name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "password": {
+          "description": "Login password as a crypt(3) hash (`$6$…`). A plain password sent\nto the API is hashed before the spec is stored.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ssh_keys": {
+          "default": [],
+          "description": "Authorized SSH public keys.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "user": {
+          "description": "Account to create; `None` configures the image's default user.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user_data": {
+          "description": "Raw user-data (`#cloud-config…` or a `#!` script), used verbatim.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "CpuSpec": {
       "properties": {
         "count": {
@@ -237,6 +279,28 @@
           "type": "object"
         }
       ]
+    },
+    "GuestSpec": {
+      "description": "Guest-side integration settings.",
+      "properties": {
+        "agent": {
+          "default": false,
+          "description": "Add a guest-agent channel (needs `qemu-guest-agent` in the guest).",
+          "type": "boolean"
+        },
+        "cloud_init": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CloudInit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Generate a cloud-init NoCloud seed and attach it as a CD-ROM."
+        }
+      },
+      "type": "object"
     },
     "ImageRef": {
       "properties": {
@@ -694,6 +758,13 @@
       "default": {
         "kind": "default"
       }
+    },
+    "guest": {
+      "$ref": "#/$defs/GuestSpec",
+      "default": {
+        "agent": false
+      },
+      "description": "Guest agent channel and cloud-init seed (M7-02/03)."
     },
     "input": {
       "$ref": "#/$defs/InputSpec",

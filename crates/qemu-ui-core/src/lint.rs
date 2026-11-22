@@ -180,6 +180,7 @@ mod tests {
     fn spec() -> VmSpec {
         VmSpec {
             limits: Default::default(),
+            guest: Default::default(),
             tpm: None,
             spec_version: SPEC_VERSION,
             name: "t".into(),

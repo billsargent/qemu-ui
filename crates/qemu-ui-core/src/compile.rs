@@ -92,6 +92,10 @@ pub struct RunPaths {
     /// Loopback TCP port for SPICE when `display.spice` is on; the
     /// supervisor sets a per-run password via QMP.
     pub spice_port: Option<u16>,
+    /// Guest-agent channel socket (used when `guest.agent` is on).
+    pub qga: String,
+    /// The cloud-init seed image the daemon wrote (when cloud-init is on).
+    pub seed: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -688,6 +692,14 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
         ));
     }
 
+    d.extend(crate::guest::validate(
+        spec,
+        |n| has_device(caps, n),
+        caps.backends
+            .chardev
+            .as_ref()
+            .is_none_or(|c| c.iter().any(|x| x == "socket")),
+    ));
     d.extend(validate_tpm(spec, caps));
     d.extend(validate_usb(spec, caps));
     d.extend(validate_passthrough(&spec.passthrough));
@@ -1441,12 +1453,56 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
     for i in 0..spec.usb.len() {
         push(&mut a, "-device", json_arg(usb_host_device(spec, i)));
     }
-    if spec.display.vdagent {
+    if spec.display.vdagent || spec.guest.agent {
         push(
             &mut a,
             "-device",
             json_arg(json!({"driver": "virtio-serial-pci", "id": "qui-vser0"})),
         );
+    }
+    if spec.guest.agent {
+        use crate::guest::{AGENT_CHARDEV, AGENT_PORT};
+        push(
+            &mut a,
+            "-chardev",
+            format!(
+                "socket,id={AGENT_CHARDEV},path={},server=on,wait=off",
+                kv(&ctx.run.qga)
+            ),
+        );
+        push(
+            &mut a,
+            "-device",
+            json_arg(
+                json!({"driver": "virtserialport", "chardev": AGENT_CHARDEV, "name": AGENT_PORT, "bus": "qui-vser0.0", "id": "qui-ga0-port"}),
+            ),
+        );
+    }
+    if let (Some(_), Some(seed)) = (&spec.guest.cloud_init, &ctx.run.seed) {
+        // The NoCloud seed: a read-only CD-ROM on its own controller, so it
+        // never takes a slot from the VM's own disks.
+        push(
+            &mut a,
+            "-blockdev",
+            json_arg(json!({
+                "driver": "raw", "node-name": "qui-seed", "read-only": true,
+                "file": {"driver": "file", "filename": seed, "read-only": true},
+            })),
+        );
+        push(
+            &mut a,
+            "-device",
+            json_arg(json!({"driver": "virtio-scsi-pci", "id": "qui-seed-scsi"})),
+        );
+        push(
+            &mut a,
+            "-device",
+            json_arg(
+                json!({"driver": "scsi-cd", "id": "qui-seed-cd", "drive": "qui-seed", "bus": "qui-seed-scsi.0"}),
+            ),
+        );
+    }
+    if spec.display.vdagent {
         push(
             &mut a,
             "-chardev",

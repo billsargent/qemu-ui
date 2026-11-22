@@ -51,6 +51,9 @@ pub struct VmSpec {
     /// CPU, memory and disk IO limits (M6-07).
     #[serde(default)]
     pub limits: crate::limits::ResourceLimits,
+    /// Guest agent channel and cloud-init seed (M7-02/03).
+    #[serde(default)]
+    pub guest: crate::guest::GuestSpec,
     /// An emulated TPM 2.0 backed by an `swtpm` sidecar (M7-07). Only
     /// available where the probe finds a TPM backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
