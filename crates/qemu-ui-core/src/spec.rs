@@ -51,6 +51,9 @@ pub struct VmSpec {
     /// CPU, memory and disk IO limits (M6-07).
     #[serde(default)]
     pub limits: crate::limits::ResourceLimits,
+    /// Guest agent channel and cloud-init seed (M7-02/03).
+    #[serde(default)]
+    pub guest: crate::guest::GuestSpec,
     /// Raw argv tokens appended after generated options (§5.3).
     #[serde(default)]
     pub passthrough: Vec<String>,

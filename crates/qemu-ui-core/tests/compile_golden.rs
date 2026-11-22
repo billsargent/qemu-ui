@@ -136,12 +136,15 @@ fn run_paths(vnc: VncListen) -> RunPaths {
         pidfile: "/run/qui/vm1/qemu.pid".into(),
         vnc,
         spice_port: None,
+        qga: "/run/qui/vm/ga.sock".into(),
+        seed: Some("/var/lib/qui/vm/seed.iso".into()),
     }
 }
 
 fn base_spec() -> VmSpec {
     VmSpec {
         limits: Default::default(),
+        guest: Default::default(),
         spec_version: SPEC_VERSION,
         name: "debian".into(),
         arch: "x86_64".into(),
@@ -321,6 +324,8 @@ fn windows_uefi_secure_boot_cdrom_with_comma() {
             pidfile: r"C:\qui\r\vm1\qemu.pid".into(),
             vnc: VncListen::Tcp { display: 7 },
             spice_port: None,
+            qga: String::new(),
+            seed: None,
         },
         images: &images,
         firmware: Some(ResolvedFirmware {
@@ -1557,4 +1562,45 @@ fn sandbox_on_linux_when_qemu_has_seccomp() {
         .expect("sandbox on Linux");
     assert_eq!(args[i + 1], SANDBOX);
     assert!(!compile_on(&caps, "windows").iter().any(|a| a == "-sandbox"));
+}
+
+/// M7-02/03: guest-agent channel and cloud-init seed CD-ROM.
+#[test]
+fn linux_guest_agent_and_cloud_init_seed() {
+    let caps = caps(true);
+    let images = images();
+    let ctx = Context {
+        taps: Default::default(),
+        networks: &[],
+        switch_sockets: &Default::default(),
+        shares: vec![],
+        caps: &caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
+        images: &images,
+        firmware: None,
+        machine: None,
+    };
+    let mut spec = base_spec();
+    spec.guest.agent = true;
+    spec.guest.cloud_init = Some(qemu_ui_core::guest::CloudInit {
+        ssh_keys: vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample".into()],
+        ..Default::default()
+    });
+    let c = compile(&spec, &ctx).unwrap();
+    let argv = c.args.join(" ");
+    assert_eq!(argv.matches("virtio-serial-pci").count(), 1);
+    golden("linux-guest-agent-cloud-init", &c);
+
+    // With the display agent too, both ports share one virtio-serial bus.
+    spec.display.vdagent = true;
+    let mut caps2 = caps.clone();
+    caps2.backends.chardev = Some(vec!["socket".into(), "qemu-vdagent".into()]);
+    let ctx2 = Context {
+        caps: &caps2,
+        ..ctx
+    };
+    let argv = compile(&spec, &ctx2).unwrap().args.join(" ");
+    assert_eq!(argv.matches("virtio-serial-pci").count(), 1, "{argv}");
+    assert!(argv.contains("org.qemu.guest_agent.0") && argv.contains("com.redhat.spice.0"));
 }

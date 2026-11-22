@@ -33,6 +33,7 @@ mod networks;
 mod passt;
 mod probe;
 mod procs;
+mod qga;
 mod recording;
 mod scan;
 mod screens;

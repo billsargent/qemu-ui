@@ -605,6 +605,8 @@ mod compile_smoke {
             pidfile: s("qemu.pid"),
             vnc,
             spice_port: None,
+            qga: s("ga.sock"),
+            seed: None,
         };
         let ctx = Context {
             taps: Default::default(),
@@ -720,6 +722,7 @@ mod compile_smoke {
 
         let mut spec = VmSpec {
             limits: Default::default(),
+            guest: Default::default(),
             spec_version: SPEC_VERSION,
             name: "smoke".into(),
             arch: "x86_64".into(),

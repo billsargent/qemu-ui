@@ -11,6 +11,7 @@ import type { PortForward } from "./generated/PortForward";
 import type { LintResult } from "./generated/LintResult";
 import type { Diagnostic } from "./generated/Diagnostic";
 import type { CheckResult } from "./generated/CheckResult";
+import type { GuestInfo } from "./generated/GuestInfo";
 import type { GuestNetInfo } from "./generated/GuestNetInfo";
 import type { HostDisk } from "./generated/HostDisk";
 import type { ImageDetail } from "./generated/ImageDetail";
@@ -386,6 +387,7 @@ export const api = {
 
   /** Guest addresses per NIC, best source first (M3-08). */
   guestNet: (vmId: string) => request<GuestNetInfo>(`/vms/${vmId}/guest-net`),
+  guestInfo: (vmId: string) => request<GuestInfo>(`/vms/${vmId}/guest`),
 };
 
 export function wsUrl(path: string): string {

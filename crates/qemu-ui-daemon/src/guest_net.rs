@@ -1,16 +1,13 @@
 //! Guest IP detection (M3-08): asks each source the running VM offers and
 //! ranks the answers per NIC (see `qemu_ui_core::guest_net`).
 //!
-//! * Guest agent: when the VM has a `qui-ga0` chardev (the device arrives
-//!   with M7-02), `guest-network-get-interfaces` over its socket.
+//! * Guest agent: when the VM has a `qui-ga0` chardev (`guest.agent`),
+//!   `guest-network-get-interfaces` over its socket (`crate::qga`).
 //! * slirp NAT: `info usernet` per `qui-net<i>` netdev.
 //! * Host neighbour table: for NICs on bridged, host-only and TAP networks
 //!   (`hostnet::neighbors`; parsing in core).
 
-use std::path::PathBuf;
-use std::time::Duration;
-
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::Result;
 use qemu_ui_core::guest_net::normalize_mac;
 use qemu_ui_core::guest_net::{
     GuestNetInfo, GuestNic, UsernetHub, agent_addr, parse_agent_interfaces, parse_usernet, rank,
@@ -19,14 +16,9 @@ use qemu_ui_core::network::NetworkConfig;
 use qemu_ui_core::spec::NicBackend;
 use qemu_ui_core::vm::VmState;
 use qemu_ui_qmp::Qmp;
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use serde_json::json;
 
 use crate::supervisor::{OpResult, Supervisor};
-
-/// The guest-agent chardev id the compiler reserves (M7-02).
-pub const AGENT_CHARDEV: &str = "qui-ga0";
-const AGENT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Everything known about a VM's guest addresses right now.
 pub async fn guest_net(sv: &Supervisor, id: &str) -> OpResult<GuestNetInfo> {
@@ -71,9 +63,17 @@ pub async fn guest_net(sv: &Supervisor, id: &str) -> OpResult<GuestNetInfo> {
         tracing::debug!(vm = %id, "info usernet: {e:#}");
         vec![]
     });
-    let agent_sock = agent_socket(&qmp).await;
+    let agent_sock = crate::qga::socket(&qmp).await;
     let (agent, agent_error) = match &agent_sock {
-        Some(p) => match agent_interfaces(p).await {
+        Some(p) => match crate::qga::call(
+            p,
+            "guest-network-get-interfaces",
+            None,
+            true,
+            crate::qga::TIMEOUT,
+        )
+        .await
+        {
             Ok(v) => (parse_agent_interfaces(&v), None),
             Err(e) => (vec![], Some(format!("{e:#}"))),
         },
@@ -183,53 +183,6 @@ async fn usernet(qmp: &Qmp) -> Result<Vec<UsernetHub>> {
         )
         .await?;
     Ok(parse_usernet(out.as_str().unwrap_or_default()))
-}
-
-/// The guest agent's socket, when the VM has a `qui-ga0` unix chardev.
-async fn agent_socket(qmp: &Qmp) -> Option<PathBuf> {
-    let v = qmp.execute("query-chardev", None).await.ok()?;
-    let dev = v.as_array()?.iter().find(|c| c["label"] == AGENT_CHARDEV)?;
-    // e.g. "unix:/run/qui/vm/ga.sock,server=on"
-    let f = dev["filename"].as_str()?.strip_prefix("unix:")?;
-    Some(PathBuf::from(f.split(",server").next().unwrap_or(f)))
-}
-
-/// `guest-network-get-interfaces` through the agent socket. The agent has
-/// no greeting; `guest-sync` first flushes any stale reply.
-async fn agent_interfaces(sock: &std::path::Path) -> Result<Value> {
-    let fut = async {
-        let stream = qemu_ui_qmp::transport::connect_unix(sock)
-            .await
-            .context("connecting to the guest agent channel")?;
-        let (r, mut w) = tokio::io::split(stream);
-        let mut lines = BufReader::new(r).lines();
-        let token: u32 = rand::random::<u32>() & 0x7fff_ffff;
-        let sync = json!({"execute": "guest-sync", "arguments": {"id": token}});
-        w.write_all(format!("{sync}\n").as_bytes()).await?;
-        loop {
-            let line = lines
-                .next_line()
-                .await?
-                .ok_or_else(|| anyhow!("the guest agent closed the channel"))?;
-            if serde_json::from_str::<Value>(&line).is_ok_and(|v| v["return"] == token) {
-                break;
-            }
-        }
-        let req = json!({"execute": "guest-network-get-interfaces"});
-        w.write_all(format!("{req}\n").as_bytes()).await?;
-        let line = lines
-            .next_line()
-            .await?
-            .ok_or_else(|| anyhow!("the guest agent closed the channel"))?;
-        let v: Value = serde_json::from_str(&line)?;
-        if let Some(e) = v.get("error") {
-            bail!("guest agent: {}", e["desc"].as_str().unwrap_or("error"));
-        }
-        Ok(v["return"].clone())
-    };
-    tokio::time::timeout(AGENT_TIMEOUT, fut)
-        .await
-        .map_err(|_| anyhow!("the guest agent did not answer (is it running in the guest?)"))?
 }
 
 #[cfg(test)]

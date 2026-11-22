@@ -176,6 +176,7 @@ mod tests {
     fn spec() -> VmSpec {
         VmSpec {
             limits: Default::default(),
+            guest: Default::default(),
             spec_version: SPEC_VERSION,
             name: "t".into(),
             arch: "x86_64".into(),
