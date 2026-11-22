@@ -10,6 +10,7 @@ import type { MemorySpec } from "./MemorySpec";
 import type { NicSpec } from "./NicSpec";
 import type { ResourceLimits } from "./ResourceLimits";
 import type { ShareSpec } from "./ShareSpec";
+import type { TpmSpec } from "./TpmSpec";
 import type { UsbPassthrough } from "./UsbPassthrough";
 
 export type VmSpec = { spec_version: number, 
@@ -45,6 +46,11 @@ devices: Array<DeviceSpec>,
  * CPU, memory and disk IO limits (M6-07).
  */
 limits: ResourceLimits, 
+/**
+ * An emulated TPM 2.0 backed by an `swtpm` sidecar (M7-07). Only
+ * available where the probe finds a TPM backend.
+ */
+tpm?: TpmSpec | null, 
 /**
  * Raw argv tokens appended after generated options (§5.3).
  */

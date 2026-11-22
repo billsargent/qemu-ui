@@ -688,10 +688,64 @@ pub fn validate(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
         ));
     }
 
+    d.extend(validate_tpm(spec, caps));
     d.extend(validate_usb(spec, caps));
     d.extend(validate_passthrough(&spec.passthrough));
     d.extend(crate::devices::validate_devices(spec, &caps.devices));
     d
+}
+
+/// Why this binary cannot attach an emulated TPM, if it cannot. The
+/// upstream Windows builds leave `-tpmdev` out entirely (plan.md §14).
+pub fn tpm_unsupported_reason(caps: &BinaryCaps) -> Option<String> {
+    match &caps.backends.tpmdev {
+        None => Some(
+            "this QEMU build has no TPM support (-tpmdev is not compiled in; the upstream Windows builds leave it out)"
+                .into(),
+        ),
+        Some(list) if !list.iter().any(|b| b == "emulator") => {
+            Some("this QEMU build has no 'emulator' TPM backend, which swtpm needs".into())
+        }
+        Some(_) => None,
+    }
+}
+
+/// TPM rules (M7-07).
+fn validate_tpm(spec: &VmSpec, caps: &BinaryCaps) -> Vec<Diagnostic> {
+    let Some(tpm) = &spec.tpm else {
+        return vec![];
+    };
+    let mut d = Vec::new();
+    if let Some(why) = tpm_unsupported_reason(caps) {
+        d.push(Diagnostic::error("tpm", "tpm.unsupported", why));
+    }
+    if !crate::spec::TPM_MODELS.contains(&tpm.model.as_str()) {
+        d.push(Diagnostic::error(
+            "tpm.model",
+            "tpm.model-unknown",
+            format!(
+                "unknown TPM model '{}'; use one of: {}",
+                tpm.model,
+                crate::spec::TPM_MODELS.join(", ")
+            ),
+        ));
+    } else if !has_device(caps, &tpm.model) {
+        d.push(Diagnostic::error(
+            "tpm.model",
+            "tpm.model-missing",
+            format!("this QEMU has no '{}' device", tpm.model),
+        ));
+    }
+    d
+}
+
+/// Where the VM's swtpm sidecar listens: in the run directory, next to the
+/// QMP socket.
+pub fn tpm_socket(qmp: &str) -> String {
+    match std::path::Path::new(qmp).parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join("swtpm.sock").display().to_string(),
+        _ => "swtpm.sock".into(),
+    }
 }
 
 /// USB passthrough rules (M2-12).
@@ -1231,6 +1285,25 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
                 ),
             );
         }
+    }
+
+    // TPM (M7-07): swtpm is started by the daemon before QEMU.
+    if let Some(tpm) = &spec.tpm {
+        push(
+            &mut a,
+            "-chardev",
+            format!("socket,id=qui-tpm,path={}", kv(&tpm_socket(&ctx.run.qmp))),
+        );
+        push(
+            &mut a,
+            "-tpmdev",
+            "emulator,id=qui-tpm0,chardev=qui-tpm".into(),
+        );
+        push(
+            &mut a,
+            "-device",
+            json_arg(json!({"driver": tpm.model, "id": "qui-tpm", "tpmdev": "qui-tpm0"})),
+        );
     }
 
     // Controllers needed by disks and input

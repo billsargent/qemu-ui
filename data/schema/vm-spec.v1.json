@@ -566,6 +566,19 @@
       ],
       "type": "object"
     },
+    "TpmSpec": {
+      "description": "An emulated TPM 2.0 (plan.md §5.1). State lives with the VM; the daemon\nruns `swtpm` for it on every start.",
+      "properties": {
+        "model": {
+          "description": "`tpm-crb` (UEFI guests, Windows 11) or `tpm-tis`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
     "UsbPassthrough": {
       "description": "A host USB device to pass through, matched the way QEMU's `usb-host`\nmatches: by vendor and product, optionally narrowed to a bus and port so\ntwo identical devices can be told apart. The guest sees the device\nwhenever it is plugged in; QEMU waits for it otherwise.",
       "properties": {
@@ -741,6 +754,17 @@
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
+    },
+    "tpm": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TpmSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "An emulated TPM 2.0 backed by an `swtpm` sidecar (M7-07). Only\navailable where the probe finds a TPM backend."
     },
     "usb": {
       "default": [],
