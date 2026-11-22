@@ -7,8 +7,10 @@ edition = "2024"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 dirs = "7.0.0"
+qemu-ui-core = { version = "0.1.0", path = "../qemu-ui-core" }
 serde_json = "1.0.154"
-ureq = { version = "3.5.1", default-features = false, features = ["json"] }
+toml = "1.2.0"
+ureq = { version = "3.5.1", default-features = false, features = ["json", "rustls"] }
 
 [target."cfg(windows)".dependencies]
 windows-service = "0.8.1"
