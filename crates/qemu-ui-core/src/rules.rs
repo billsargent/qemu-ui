@@ -208,6 +208,9 @@ pub struct Facts {
     pub firmware_secure_boot: bool,
     /// Hyper-V enlightenments are set: almost certainly a Windows guest.
     pub windows_guest: bool,
+    /// This QEMU can attach an emulated TPM (`-tpmdev emulator`, M7-07).
+    #[serde(default)]
+    pub tpm_backend: bool,
 }
 
 impl Facts {
@@ -251,6 +254,7 @@ impl Facts {
             firmware_uefi: fw.is_some_and(|f| f.interface_types.iter().any(|t| t == "uefi")),
             firmware_secure_boot: fw.is_some_and(Firmware::secure_boot),
             windows_guest: spec.cpu.props.keys().any(|k| k.starts_with("hv-")),
+            tpm_backend: caps.is_some_and(|c| crate::compile::tpm_unsupported_reason(c).is_none()),
         }
         .settled()
     }

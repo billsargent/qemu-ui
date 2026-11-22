@@ -723,6 +723,7 @@ mod compile_smoke {
         let mut spec = VmSpec {
             limits: Default::default(),
             guest: Default::default(),
+            tpm: None,
             spec_version: SPEC_VERSION,
             name: "smoke".into(),
             arch: "x86_64".into(),

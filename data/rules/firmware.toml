@@ -38,3 +38,22 @@ fires = true
 name = "BIOS with 128 MiB"
 spec = { memory = { size_mib = 128 } }
 fires = false
+
+[[rule]]
+id = "l2.firmware.tpm-crb-needs-uefi"
+verified_against = ["11.1"]
+field = "tpm.model"
+message = "The CRB TPM interface is only found by UEFI firmware; with BIOS (SeaBIOS) firmware the guest sees no TPM. Use the TIS model, or switch to UEFI."
+when = { all = [{ path = "spec.tpm.model", eq = "tpm-crb" }, { path = "facts.firmware_uefi", eq = false }] }
+autofix = { description = "Use the TIS TPM model", set = [{ path = "tpm.model", value = "tpm-tis" }] }
+
+[[rule.test]]
+name = "CRB TPM on BIOS"
+spec = { tpm = { model = "tpm-crb" } }
+fires = true
+
+[[rule.test]]
+name = "CRB TPM on UEFI"
+spec = { tpm = { model = "tpm-crb" } }
+facts = { firmware_uefi = true }
+fires = false

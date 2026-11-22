@@ -79,6 +79,8 @@ pub struct Supervisor {
     pub virtiofsd: Option<PathBuf>,
     /// `passt`, when installed (Linux): passt NAT networks need it (M3-03).
     pub passt: Option<PathBuf>,
+    /// `swtpm`, when installed: emulated TPMs need it (M7-07).
+    pub swtpm: Option<PathBuf>,
     data_dir: PathBuf,
     run_root: PathBuf,
     events: broadcast::Sender<VmEvent>,
@@ -179,6 +181,13 @@ impl Supervisor {
                 let p = crate::passt::find_passt();
                 if let Some(p) = &p {
                     tracing::info!("passt found at {}; passt networks available", p.display());
+                }
+                p
+            },
+            swtpm: {
+                let p = crate::swtpm::find_swtpm();
+                if let Some(p) = &p {
+                    tracing::info!("swtpm found at {}; emulated TPMs available", p.display());
                 }
                 p
             },
@@ -976,6 +985,7 @@ impl Supervisor {
     /// socket. Returned with their kind, for the `run_sidecar` table.
     async fn start_sidecars(
         &self,
+        id: &str,
         spec: &VmSpec,
         caps: &BinaryCaps,
         run_dir: &Path,
@@ -986,16 +996,42 @@ impl Supervisor {
         let plans = crate::passt::plan(&spec.nics, &networks, &qmp);
         let passt = crate::passt::start(self.passt.as_deref(), &plans, logs, now()).await?;
         let mut all: Vec<(&'static str, ProcId)> = passt.iter().map(|p| ("passt", *p)).collect();
+        let stop = |all: &[(&'static str, ProcId)]| {
+            for (_, p) in all {
+                procs::terminate(*p, true);
+            }
+        };
+        if spec.tpm.is_some() {
+            let socket = compile::tpm_socket(&qmp);
+            let log = logs.join(format!("run-{}.swtpm.log", now()));
+            match crate::swtpm::start(
+                self.swtpm.as_deref(),
+                &self.vm_dir(id).join("tpm"),
+                &socket,
+                &log,
+            )
+            .await
+            {
+                Ok(p) => all.push(("swtpm", p)),
+                Err(e) => {
+                    stop(&all);
+                    return Err(e);
+                }
+            }
+        }
         match self.start_virtiofsd(spec, caps, run_dir, logs).await {
             Ok(v) => all.extend(v.into_iter().map(|p| ("virtiofsd", p))),
             Err(e) => {
-                for p in &passt {
-                    procs::terminate(*p, true);
-                }
+                stop(&all);
                 return Err(e);
             }
         }
         Ok(all)
+    }
+
+    /// Why a VM on `caps` cannot have a TPM on this host, if it cannot.
+    pub fn tpm_unavailable(&self, caps: &BinaryCaps) -> Option<String> {
+        crate::swtpm::unavailable_reason(caps, self.swtpm.as_deref())
     }
 
     /// Start one `virtiofsd` per virtiofs share and wait for its socket.
@@ -1257,7 +1293,7 @@ impl Supervisor {
         self.set_state(id, VmState::Starting, None, None);
         tracing::info!(vm = %row.name, "starting: {}", compile::display_command(&compiled.program, &compiled.args));
 
-        let sidecars = match self.start_sidecars(&spec, &caps, &run_dir, &logs).await {
+        let sidecars = match self.start_sidecars(id, &spec, &caps, &run_dir, &logs).await {
             Ok(s) => s,
             Err(e) => {
                 self.set_state(id, VmState::Crashed, None, Some(&format!("{e:#}")));

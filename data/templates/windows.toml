@@ -1,0 +1,47 @@
+# Template gallery (plan.md §16 M7-04/M7-07): Windows guests. Windows has no
+# virtio drivers in the box: with the virtio-win ISO attached the VM uses
+# virtio devices, otherwise SATA and e1000e, which setup supports as-is.
+
+[[template]]
+id = "windows-11"
+name = "Windows 11"
+description = "Windows 11 with UEFI, Secure Boot and a TPM 2.0 where the host can provide one."
+os = "windows"
+arch = ["x86_64"]
+memory_mib = 4096
+cpus = 2
+disk_gib = 64
+firmware = "uefi-secure-boot"
+tpm = "required"
+drivers = "virtio-win"
+drivers_url = "https://github.com/virtio-win/virtio-win-pkg-scripts/blob/master/README.md"
+docs = "https://learn.microsoft.com/windows/whats-new/windows-11-requirements"
+notes = ["After setup, install the virtio-win guest tools from the drivers CD for the balloon driver, the QEMU guest agent and better display support."]
+
+[[template]]
+id = "windows-10"
+name = "Windows 10"
+description = "Windows 10 on UEFI firmware."
+os = "windows"
+arch = ["x86_64"]
+memory_mib = 4096
+cpus = 2
+disk_gib = 48
+firmware = "uefi"
+tpm = "preferred"
+drivers = "virtio-win"
+drivers_url = "https://github.com/virtio-win/virtio-win-pkg-scripts/blob/master/README.md"
+
+[[template]]
+id = "windows-server"
+name = "Windows Server 2022/2025"
+description = "Windows Server on Secure Boot UEFI firmware."
+os = "windows"
+arch = ["x86_64"]
+memory_mib = 4096
+cpus = 2
+disk_gib = 64
+firmware = "uefi-secure-boot"
+tpm = "preferred"
+drivers = "virtio-win"
+drivers_url = "https://github.com/virtio-win/virtio-win-pkg-scripts/blob/master/README.md"

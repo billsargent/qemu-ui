@@ -1,0 +1,44 @@
+# Template gallery (plan.md §16 M7-04): Linux guests. Sizing follows each
+# distribution's documented minimums with headroom for a usable install.
+
+[[template]]
+id = "linux-server"
+name = "Linux server"
+description = "A headless Linux server (Debian, Ubuntu Server, Rocky, …): virtio disk and network, serial console."
+os = "linux"
+memory_mib = 2048
+cpus = 2
+disk_gib = 20
+notes = ["Most installers offer a serial console; open the Serial tab if the display stays blank."]
+
+[[template]]
+id = "linux-desktop"
+name = "Linux desktop"
+description = "A desktop Linux (Ubuntu, Fedora Workstation, Mint, …) with UEFI firmware and room for a graphical session."
+os = "linux"
+memory_mib = 4096
+cpus = 2
+disk_gib = 40
+firmware = "uefi"
+notes = ["Install spice-vdagent in the guest for clipboard sharing and automatic resolution."]
+
+[[template]]
+id = "linux-secure-boot"
+name = "Linux with Secure Boot"
+description = "A Linux distribution with a signed boot chain (Fedora, Ubuntu, Debian) on Secure Boot UEFI firmware."
+os = "linux"
+arch = ["x86_64"]
+memory_mib = 4096
+cpus = 2
+disk_gib = 40
+firmware = "uefi-secure-boot"
+tpm = "preferred"
+
+[[template]]
+id = "alpine"
+name = "Alpine Linux"
+description = "A small Alpine Linux VM for containers, routers and tests."
+os = "linux"
+memory_mib = 512
+cpus = 1
+disk_gib = 4

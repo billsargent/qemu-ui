@@ -41,6 +41,9 @@ pub fn lint_spec(spec: &VmSpec) -> VmSpec {
     // Passing a real USB device through would take it away from the host
     // (or from the running VM); the check never touches host devices.
     s.usb.clear();
+    // The TPM needs a running swtpm sidecar; QEMU's own checks of it
+    // happen at start.
+    s.tpm = None;
     s
 }
 
@@ -73,6 +76,7 @@ pub fn field_for_id(id: &str, spec: &VmSpec) -> Option<String> {
             i if i.starts_with("qui-vdagent") || i.starts_with("qui-vser") => "display.vdagent",
             i if i.starts_with("qui-tablet") || i == "qui-usb" => "input.usb_tablet",
             i if i.starts_with("qui-fw") => "firmware",
+            i if i.starts_with("qui-tpm") => "tpm",
             i if i.starts_with("qui-scsi") => "disks",
             _ => return None,
         }
@@ -177,6 +181,7 @@ mod tests {
         VmSpec {
             limits: Default::default(),
             guest: Default::default(),
+            tpm: None,
             spec_version: SPEC_VERSION,
             name: "t".into(),
             arch: "x86_64".into(),

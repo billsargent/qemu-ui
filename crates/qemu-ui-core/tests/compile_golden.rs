@@ -145,6 +145,7 @@ fn base_spec() -> VmSpec {
     VmSpec {
         limits: Default::default(),
         guest: Default::default(),
+        tpm: None,
         spec_version: SPEC_VERSION,
         name: "debian".into(),
         arch: "x86_64".into(),
@@ -1603,4 +1604,73 @@ fn linux_guest_agent_and_cloud_init_seed() {
     let argv = compile(&spec, &ctx2).unwrap().args.join(" ");
     assert_eq!(argv.matches("virtio-serial-pci").count(), 1, "{argv}");
     assert!(argv.contains("org.qemu.guest_agent.0") && argv.contains("com.redhat.spice.0"));
+}
+
+/// M7-07: a TPM is an swtpm-backed emulator TPM, and only where the probe
+/// found a TPM backend.
+#[test]
+fn tpm_compiles_to_an_swtpm_emulator_and_needs_a_backend() {
+    let mut s = base_spec();
+    s.tpm = Some(qemu_ui_core::spec::TpmSpec {
+        model: "tpm-crb".into(),
+    });
+    let images = images();
+    let run = run_paths(VncListen::Unix("/x".into()));
+    let qmp = run.qmp.clone();
+    let compile_on = |s: &VmSpec, caps: &BinaryCaps| {
+        let ctx = Context {
+            taps: Default::default(),
+            switch_sockets: &Default::default(),
+            networks: &[],
+            shares: vec![],
+            caps,
+            os: "linux",
+            run: run.clone(),
+            images: &images,
+            firmware: None,
+            machine: None,
+        };
+        compile(s, &ctx)
+    };
+
+    // The Windows builds: no -tpmdev at all.
+    let errs = compile_on(&s, &caps(true)).unwrap_err();
+    let e = errs.iter().find(|d| d.rule == "tpm.unsupported").unwrap();
+    assert_eq!(e.field, "tpm");
+    assert!(e.message.contains("Windows"), "{}", e.message);
+
+    let mut with_tpm = caps(true);
+    with_tpm.backends.tpmdev = Some(vec!["passthrough".into(), "emulator".into()]);
+    for m in ["tpm-crb", "tpm-tis"] {
+        with_tpm.devices.push(DeviceInfo {
+            name: m.into(),
+            category: String::new(),
+            bus: None,
+            alias: None,
+            description: None,
+            no_user: false,
+        });
+    }
+    let c = compile_on(&s, &with_tpm).unwrap();
+    let pos = |flag: &str, needle: &str| {
+        c.args
+            .windows(2)
+            .position(|w| w[0] == flag && w[1].contains(needle))
+            .unwrap_or_else(|| panic!("{flag} {needle} in {:?}", c.args))
+    };
+    let chardev = pos("-chardev", "id=qui-tpm,");
+    assert!(c.args[chardev + 1].ends_with(&qemu_ui_core::compile::tpm_socket(&qmp)));
+    pos("-tpmdev", "emulator,id=qui-tpm0,chardev=qui-tpm");
+    let dev = pos("-device", "\"tpmdev\":\"qui-tpm0\"");
+    assert!(c.args[dev + 1].contains("\"driver\":\"tpm-crb\""));
+
+    // Unknown models are refused.
+    s.tpm = Some(qemu_ui_core::spec::TpmSpec {
+        model: "tpm-spapr".into(),
+    });
+    let errs = compile_on(&s, &with_tpm).unwrap_err();
+    assert!(
+        errs.iter().any(|d| d.rule == "tpm.model-unknown"),
+        "{errs:?}"
+    );
 }

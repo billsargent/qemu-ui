@@ -1331,6 +1331,7 @@ impl Importer {
         let spec = VmSpec {
             limits: Default::default(),
             guest: Default::default(),
+            tpm: None,
             spec_version: SPEC_VERSION,
             name,
             arch: self.arch.clone(),
