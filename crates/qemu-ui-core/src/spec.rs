@@ -51,6 +51,10 @@ pub struct VmSpec {
     /// CPU, memory and disk IO limits (M6-07).
     #[serde(default)]
     pub limits: crate::limits::ResourceLimits,
+    /// An emulated TPM 2.0 backed by an `swtpm` sidecar (M7-07). Only
+    /// available where the probe finds a TPM backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpm: Option<TpmSpec>,
     /// Raw argv tokens appended after generated options (§5.3).
     #[serde(default)]
     pub passthrough: Vec<String>,
@@ -99,6 +103,18 @@ pub struct MemorySpec {
     #[ts(type = "number")]
     pub size_mib: u64,
 }
+
+/// An emulated TPM 2.0 (plan.md §5.1). State lives with the VM; the daemon
+/// runs `swtpm` for it on every start.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
+#[ts(export)]
+pub struct TpmSpec {
+    /// `tpm-crb` (UEFI guests, Windows 11) or `tpm-tis`.
+    pub model: String,
+}
+
+/// TPM device models the compiler accepts.
+pub const TPM_MODELS: &[&str] = &["tpm-crb", "tpm-tis"];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]

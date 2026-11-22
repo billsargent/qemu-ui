@@ -162,6 +162,7 @@ impl Lv {
         }
         let spec = VmSpec {
             limits: Default::default(),
+            tpm: None,
             spec_version: SPEC_VERSION,
             name,
             arch,
