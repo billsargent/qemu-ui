@@ -53,3 +53,68 @@ fires = true
 name = "Windows with a tablet"
 spec = { cpu = { props = { "hv-relaxed" = "on" } } }
 fires = false
+
+# Windows 11 lane (M7-07): Windows 11 setup checks for UEFI with Secure Boot
+# and a TPM 2.0. A Windows guest on Secure Boot firmware is taken to be one.
+
+[[rule]]
+id = "l2.guest.windows11-tpm"
+verified_against = ["11.1"]
+applies_to = { arch = ["x86_64"] }
+field = "tpm"
+message = "Windows 11 setup refuses to install without a TPM 2.0. This QEMU can emulate one (with swtpm installed on the host)."
+docs = "https://learn.microsoft.com/windows/whats-new/windows-11-requirements"
+when = { all = [{ path = "facts.windows_guest", eq = true }, { path = "facts.firmware_secure_boot", eq = true }, { path = "spec.tpm", exists = false }, { path = "facts.tpm_backend", eq = true }] }
+autofix = { description = "Add a TPM 2.0 (tpm-crb)", set = [{ path = "tpm", value = { model = "tpm-crb" } }] }
+
+[[rule.test]]
+name = "Windows on Secure Boot without a TPM, TPM possible"
+spec = { cpu = { props = { "hv-relaxed" = "on" } } }
+facts = { firmware_uefi = true, firmware_secure_boot = true, tpm_backend = true }
+fires = true
+
+[[rule.test]]
+name = "Windows on Secure Boot with a TPM"
+spec = { cpu = { props = { "hv-relaxed" = "on" } }, tpm = { model = "tpm-crb" } }
+facts = { firmware_uefi = true, firmware_secure_boot = true, tpm_backend = true }
+fires = false
+
+[[rule]]
+id = "l2.guest.windows11-no-tpm-backend"
+verified_against = ["11.1"]
+applies_to = { arch = ["x86_64"] }
+field = "tpm"
+message = '''Windows 11 setup refuses to install without a TPM 2.0, and this host's QEMU cannot emulate one (the upstream Windows builds have no TPM support). Microsoft documents a registry setting that lets setup continue without it (HKLM\SYSTEM\Setup\LabConfig, BypassTPMCheck = 1, set from Shift+F10 during setup); using it is your choice and leaves the guest unsupported.'''
+docs = "https://learn.microsoft.com/windows/whats-new/windows-11-requirements"
+when = { all = [{ path = "facts.windows_guest", eq = true }, { path = "facts.firmware_secure_boot", eq = true }, { path = "spec.tpm", exists = false }, { path = "facts.tpm_backend", eq = false }] }
+
+[[rule.test]]
+name = "Windows on Secure Boot, no TPM backend"
+spec = { cpu = { props = { "hv-relaxed" = "on" } } }
+facts = { firmware_uefi = true, firmware_secure_boot = true, tpm_backend = false }
+fires = true
+
+[[rule.test]]
+name = "Linux on Secure Boot, no TPM backend"
+facts = { firmware_uefi = true, firmware_secure_boot = true, tpm_backend = false }
+fires = false
+
+[[rule]]
+id = "l2.guest.windows11-secure-boot"
+verified_against = ["11.1"]
+applies_to = { arch = ["x86_64"] }
+field = "firmware"
+message = "Windows 11 setup also requires UEFI firmware with Secure Boot; on this firmware it stops with 'This PC can't run Windows 11'. Pick a Secure Boot firmware (on Linux hosts usually the edk2/OVMF '-secure' descriptor)."
+docs = "https://learn.microsoft.com/windows/whats-new/windows-11-requirements"
+when = { all = [{ path = "facts.windows_guest", eq = true }, { path = "spec.tpm", exists = true }, { path = "facts.firmware_secure_boot", eq = false }] }
+
+[[rule.test]]
+name = "Windows with a TPM on BIOS"
+spec = { cpu = { props = { "hv-relaxed" = "on" } }, tpm = { model = "tpm-tis" } }
+fires = true
+
+[[rule.test]]
+name = "Windows with a TPM on Secure Boot"
+spec = { cpu = { props = { "hv-relaxed" = "on" } }, tpm = { model = "tpm-crb" } }
+facts = { firmware_uefi = true, firmware_secure_boot = true }
+fires = false

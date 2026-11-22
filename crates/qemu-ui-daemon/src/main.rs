@@ -13,6 +13,7 @@ mod api_nics;
 mod api_rules;
 mod api_snapshots;
 mod api_storage;
+mod api_templates;
 mod api_upload;
 mod api_vms;
 mod audit;
@@ -41,6 +42,7 @@ mod shares;
 mod spice;
 mod store;
 mod supervisor;
+mod swtpm;
 mod tls;
 mod usb;
 #[cfg(windows)]

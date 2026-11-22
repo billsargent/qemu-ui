@@ -81,7 +81,7 @@ struct SpecBody {
 /// root-equivalent (plan.md §5.3, §13): changing it needs expert mode, and
 /// every change is audited. Unchanged passthrough (editing other fields of a
 /// VM that has some) is fine.
-fn gate_passthrough(
+pub(crate) fn gate_passthrough(
     app: &App,
     actor: &Actor,
     vm: &str,
