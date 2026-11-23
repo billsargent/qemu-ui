@@ -43,9 +43,7 @@ impl AutostartPolicy {
     /// Delay before restart attempt `n` (1-based).
     pub fn delay(&self, n: usize) -> Duration {
         let shift = n.saturating_sub(1).min(20) as u32;
-        self.base
-            .saturating_mul(1u32 << shift)
-            .min(self.max_delay)
+        self.base.saturating_mul(1u32 << shift).min(self.max_delay)
     }
 }
 
@@ -68,6 +66,7 @@ enum Next {
 }
 
 impl Supervisor {
+    #[cfg(test)]
     pub fn set_autostart_policy(&self, p: AutostartPolicy) {
         *self.autostart_policy.lock().unwrap() = p;
     }

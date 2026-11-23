@@ -1323,7 +1323,9 @@ impl Supervisor {
             .await
             .map_err(OpError::Invalid)?;
         if resume.is_some() {
-            compiled.args.extend(["-incoming".to_string(), "defer".to_string()]);
+            compiled
+                .args
+                .extend(["-incoming".to_string(), "defer".to_string()]);
         }
 
         let run_dir = self.run_dir(id);
@@ -1471,7 +1473,11 @@ impl Supervisor {
             connect_with_retry(&run_dir.join("qmp.sock"), proc_id, QMP_CONNECT_TIMEOUT).await?;
         let st = qmp.execute("query-status", None).await?;
         let status = st["status"].as_str().unwrap_or_default();
-        let want = if resume.is_some() { "inmigrate" } else { "prelaunch" };
+        let want = if resume.is_some() {
+            "inmigrate"
+        } else {
+            "prelaunch"
+        };
         if status != want {
             bail!("unexpected initial state '{status}'");
         }

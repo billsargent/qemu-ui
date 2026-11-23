@@ -45,7 +45,6 @@ pub(super) struct SuspendMeta {
     pub at: u64,
 }
 
-
 /// `file:` URI for a path. QEMU takes everything after the scheme as the
 /// file name (an optional `,offset=` suffix aside), Windows drive letters
 /// included.
@@ -130,9 +129,10 @@ impl Supervisor {
                 qmp.execute("migrate", Some(json!({"uri": file_uri(&file)})))
                     .await
                     .context("starting the migration to the state file")?;
-                return wait_migration(&qmp).await;
+                wait_migration(&qmp).await?;
+                return Ok(None);
             }
-            let receiving = relay::receive(&sock, &file)?;
+            let (receiving, progress) = relay::receive(&sock, &file)?;
             let started = qmp
                 .execute("migrate", Some(json!({"uri": unix_uri(&sock)})))
                 .await
@@ -141,35 +141,37 @@ impl Supervisor {
                 Ok(_) => wait_migration(&qmp).await,
                 Err(e) => Err(e),
             };
-            if migrated.is_err() {
+            if let Err(e) = migrated {
                 relay::wake(&sock);
+                let _ = join_relay(receiving).await;
+                let _ = std::fs::remove_file(&sock);
+                return Err(e);
             }
-            let copied = tokio::task::spawn_blocking(move || receiving.join())
-                .await
-                .map_err(|e| anyhow!("{e}"))?
-                .map_err(|_| anyhow!("the state relay panicked"))?;
-            let _ = std::fs::remove_file(&sock);
-            migrated?;
-            copied.context("writing the state file")?;
-            Ok(())
+            // QEMU keeps the connection open until it exits: let the relay
+            // drain it, then the `quit` below ends it.
+            relay::settle(&progress).await;
+            Ok(Some(receiving))
         }
         .await;
-        if let Err(e) = saved {
-            self.remove_suspend_state(id);
-            if mapped_ram {
-                let _ = qmp
+        let receiving = match saved {
+            Ok(r) => r,
+            Err(e) => {
+                self.remove_suspend_state(id);
+                if mapped_ram {
+                    let _ = qmp
                     .execute(
                         "migrate-set-capabilities",
                         Some(json!({"capabilities": [{"capability": "mapped-ram", "state": false}]})),
                     )
                     .await;
+                }
+                if !was_paused {
+                    let _ = qmp.execute("cont", None).await;
+                }
+                self.refresh_status(id, &qmp).await;
+                return Err(OpError::Failed(e.context("suspending to disk")));
             }
-            if !was_paused {
-                let _ = qmp.execute("cont", None).await;
-            }
-            self.refresh_status(id, &qmp).await;
-            return Err(OpError::Failed(e.context("suspending to disk")));
-        }
+        };
 
         let meta = SuspendMeta {
             spec_json: run.spec_json.clone(),
@@ -212,6 +214,17 @@ impl Supervisor {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if let Some(h) = receiving {
+            let copied = join_relay(h).await;
+            let _ = std::fs::remove_file(&sock);
+            if let Err(e) = copied {
+                // QEMU is gone and the state file is incomplete.
+                self.remove_suspend_state(id);
+                let msg = format!("suspending to disk failed while writing the state file: {e:#}");
+                self.set_state(id, VmState::Stopped, None, Some(&msg));
+                return Err(OpError::Failed(anyhow!(msg)));
+            }
         }
         let bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
         self.emit(
@@ -278,12 +291,27 @@ fn unix_uri(p: &Path) -> String {
     format!("unix:{}", p.display())
 }
 
+/// Wait for a `relay::receive` thread.
+async fn join_relay(h: std::thread::JoinHandle<std::io::Result<u64>>) -> Result<u64> {
+    let joined = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || h.join()),
+    )
+    .await
+    .map_err(|_| anyhow!("the state relay did not finish"))?
+    .map_err(|e| anyhow!("{e}"))?
+    .map_err(|_| anyhow!("the state relay panicked"))?;
+    Ok(joined?)
+}
+
 /// Copy a migration stream between an AF_UNIX socket and the state file.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod relay {
     use std::fs::File;
-    use std::io::{self, BufReader, BufWriter, Write};
+    use std::io::{self, BufReader, BufWriter, Read, Write};
     use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
@@ -293,18 +321,70 @@ mod relay {
     use uds_windows::{UnixListener, UnixStream};
 
     /// Listen on `sock`; the thread takes one connection (QEMU's outgoing
-    /// migration) and writes everything it sends to `file`.
-    pub fn receive(sock: &Path, file: &Path) -> io::Result<JoinHandle<io::Result<u64>>> {
+    /// migration) and writes everything it sends to `file`. `progress`
+    /// counts the bytes received so far.
+    ///
+    /// QEMU keeps the connection open after the migration completes and
+    /// Windows resets it when QEMU exits, so a reset after the data is read
+    /// counts as the end of the stream.
+    pub fn receive(
+        sock: &Path,
+        file: &Path,
+    ) -> io::Result<(JoinHandle<io::Result<u64>>, Arc<AtomicU64>)> {
         let _ = std::fs::remove_file(sock);
         let listener = UnixListener::bind(sock)?;
         let mut out = BufWriter::new(File::create(file)?);
-        Ok(std::thread::spawn(move || {
-            let (conn, _) = listener.accept()?;
-            let n = io::copy(&mut BufReader::new(conn), &mut out)?;
+        let progress = Arc::new(AtomicU64::new(0));
+        let seen = progress.clone();
+        let h = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept()?;
+            let mut buf = vec![0u8; 256 * 1024];
+            let mut n = 0u64;
+            loop {
+                match conn.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(k) => {
+                        out.write_all(&buf[..k])?;
+                        n += k as u64;
+                        seen.store(n, Ordering::SeqCst);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
             let f = out.into_inner().map_err(|e| e.into_error())?;
             f.sync_all()?;
             Ok(n)
-        }))
+        });
+        Ok((h, progress))
+    }
+
+    /// Wait until no more bytes arrive for a moment: QEMU has sent the
+    /// whole stream (its migration completed) and we have read it.
+    pub async fn settle(progress: &AtomicU64) {
+        let mut last = progress.load(Ordering::SeqCst);
+        let mut quiet = 0;
+        for _ in 0..600 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let now = progress.load(Ordering::SeqCst);
+            if now == last && now > 0 {
+                quiet += 1;
+                if quiet >= 5 {
+                    return;
+                }
+            } else {
+                quiet = 0;
+                last = now;
+            }
+        }
     }
 
     /// Unblock a `receive` whose migration never connected.
@@ -355,7 +435,10 @@ async fn wait_migration(qmp: &Qmp) -> Result<()> {
             "completed" => return Ok(()),
             "failed" | "cancelled" => {
                 let why = m["error-desc"].as_str().unwrap_or("no reason given");
-                bail!("migration {}: {why}", m["status"].as_str().unwrap_or("failed"));
+                bail!(
+                    "migration {}: {why}",
+                    m["status"].as_str().unwrap_or("failed")
+                );
             }
             _ => {}
         }
@@ -436,7 +519,8 @@ mod real {
             assert_eq!(s.state, VmState::Paused, "{s:?}");
             let args = sv.detail(&id).ok().unwrap().last_run_args.unwrap();
             assert!(
-                args.windows(2).any(|w| w[0] == "-incoming" && w[1] == "defer"),
+                args.windows(2)
+                    .any(|w| w[0] == "-incoming" && w[1] == "defer"),
                 "{args:?}"
             );
             let after = pmemsave(&sv.live_qmp(&id).unwrap(), &data.join("b.bin")).await;
