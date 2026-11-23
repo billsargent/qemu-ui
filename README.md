@@ -4,11 +4,11 @@ A browser-based control plane for QEMU: every architecture, every machine type, 
 command-line option, real disk/network/display management, and VM sessions that survive
 closing the browser.
 
-> **Status: early development (milestone M1).** Create, configure, run and use VMs from
-> the browser: a spec editor that shows the exact QEMU command line, "Check with QEMU"
-> validation, browser graphics and serial consoles, and VMs that keep running when the
-> daemon or browser goes away. Storage, networking and hardening follow in M2–M6. See
-> [plan.md](plan.md) for the full specification and roadmap.
+> **Status: pre-release.** Milestones M0–M7 of [plan.md](plan.md) have landed: the spec
+> editor and compiler, storage, networking, the compatibility engine, rich display,
+> LAN hardening (accounts, TLS, audit log, isolation) and power features (templates,
+> cloud-init, suspend, autostart, config-as-code). The documentation lives in
+> [docs/](docs/index.md) and builds into a static site (`docs/site`).
 
 ## Quick start
 
@@ -55,8 +55,9 @@ looks in `.tools/qemu`, then any `--qemu-dir`, then `PATH`.
 ## Security
 
 qemu-ui can start processes with access to host disks and devices, so it is
-**root-equivalent**. Until authentication and TLS land (milestone M6), the daemon refuses to
-listen on anything but loopback. See plan.md §13.
+**root-equivalent**. The daemon refuses to listen on anything but loopback until first-run
+setup has created the admin account, and then serves HTTPS. See
+[docs/security.md](docs/security.md) and plan.md §13.
 
 ## Contributing
 

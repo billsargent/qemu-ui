@@ -116,6 +116,7 @@ pub fn router(app: Arc<App>, web_dir: Option<PathBuf>) -> Router {
         .merge(crate::recording::routes())
         .merge(crate::screens::routes())
         .merge(crate::spice::routes())
+        .merge(crate::openapi::routes())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "no such endpoint".into()) })
         // Inside the guard: records what authorised callers did.
         .layer(axum::middleware::from_fn(crate::audit::middleware))
