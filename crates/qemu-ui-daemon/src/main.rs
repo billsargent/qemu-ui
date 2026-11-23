@@ -196,7 +196,10 @@ async fn serve(
         supervisor.set_helper(h);
     }
     // VMs kept running while the daemon was down: find them again.
+    supervisor.enable_restarts();
     supervisor.reattach_all().await;
+    // Then start the autostart VMs that are not running (M7-08).
+    tokio::spawn(supervisor.clone().autostart_all());
 
     let web_dir = args.web_dir.or_else(|| {
         let d = std::env::current_dir().ok()?.join("web").join("dist");

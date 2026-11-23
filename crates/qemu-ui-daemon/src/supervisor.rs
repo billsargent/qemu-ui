@@ -34,6 +34,7 @@ use crate::procs::{self, ProcId};
 use crate::scan::Scanner;
 use crate::store::{NewRun, RunRow, Store};
 
+mod autostart;
 mod disks;
 mod forwards;
 mod hardware;
@@ -41,7 +42,10 @@ mod limits;
 mod nics;
 mod rules;
 mod snapshots;
+mod suspend;
 mod taps;
+
+pub use autostart::AutostartPolicy;
 
 const QMP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const EXIT_WAIT: Duration = Duration::from_secs(10);
@@ -62,6 +66,8 @@ struct Live {
     stop_requested: bool,
     /// QEMU reported SHUTDOWN (guest powered off): exit is expected.
     shutdown_seen: bool,
+    /// The state was saved to disk: the exit ends in `suspended` (M7-01).
+    suspending: bool,
 }
 
 pub struct Supervisor {
@@ -91,6 +97,13 @@ pub struct Supervisor {
     helper: std::sync::RwLock<crate::helper_client::HelperClient>,
     /// Machine buses by (binary sha256, machine), probed lazily (M2-09).
     bus_cache: Mutex<HashMap<(String, String), Option<MachineBuses>>>,
+    /// Restart backoff and crash-loop breaker settings (M7-08).
+    autostart_policy: Mutex<AutostartPolicy>,
+    /// Crash history and scheduled restarts per VM.
+    restarts: Mutex<HashMap<String, autostart::Restarts>>,
+    /// Ourselves, for spawning restarts from `finish`; set by
+    /// `start_background`.
+    me: std::sync::OnceLock<std::sync::Weak<Supervisor>>,
 }
 
 /// How `clone_vm` copies writable disks.
@@ -203,6 +216,9 @@ impl Supervisor {
             lint_cache: Mutex::default(),
             helper: std::sync::RwLock::new(crate::helper_client::HelperClient::default_paths()),
             bus_cache: Mutex::default(),
+            autostart_policy: Mutex::default(),
+            restarts: Mutex::default(),
+            me: std::sync::OnceLock::new(),
         }))
     }
 
@@ -271,8 +287,14 @@ impl Supervisor {
                 .ok()
                 .flatten()
                 .filter(|r| r.ended_at.is_none());
-            if let Some(run) = run
-                && let Ok(spec) = serde_json::from_str::<VmSpec>(&run.spec_json)
+            // A suspended VM's disks belong to its saved state.
+            let held = run.map(|r| r.spec_json).or_else(|| {
+                (VmState::parse(&row.state) == VmState::Suspended)
+                    .then(|| self.suspend_meta(&row.id).map(|m| m.spec_json))
+                    .flatten()
+            });
+            if let Some(json) = held
+                && let Ok(spec) = serde_json::from_str::<VmSpec>(&json)
             {
                 for d in &spec.disks {
                     open.entry(d.image.clone())
@@ -379,7 +401,11 @@ impl Supervisor {
             serde_json::from_str::<Value>(&r.spec_json).ok()
                 != serde_json::from_str::<Value>(&row.spec_json).ok()
         });
+        let (restart_at, crash_loop) = self.restart_info(&row.id);
         VmSummary {
+            autostart: row.autostart,
+            restart_at,
+            crash_loop,
             id: row.id.clone(),
             name: row.name.clone(),
             arch: spec.as_ref().map(|s| s.arch.clone()).unwrap_or_default(),
@@ -521,7 +547,7 @@ impl Supervisor {
 
     pub async fn update(&self, id: &str, spec: VmSpec) -> OpResult<VmDetail> {
         let _g = self.ops.lock().await;
-        self.store.get_vm(id)?.ok_or(OpError::NotFound)?;
+        self.refuse_if_suspended(id)?;
         let (spec, caps) = self.normalise(spec).await?;
         Self::check(&spec, &caps)?;
         self.check_buses(&spec, &caps).await?;
@@ -1189,14 +1215,35 @@ impl Supervisor {
 
     // ------------------------------------------------------------ lifecycle
 
+    /// Start the VM (or resume it, if it is suspended to disk). A start by
+    /// hand clears the crash-loop breaker (M7-08).
     pub async fn start(self: &Arc<Self>, id: &str) -> OpResult<VmSummary> {
+        self.reset_restarts(id);
+        self.start_inner(id).await
+    }
+
+    async fn start_inner(self: &Arc<Self>, id: &str) -> OpResult<VmSummary> {
         let _g = self.ops.lock().await;
         let row = self.store.get_vm(id)?.ok_or(OpError::NotFound)?;
         if VmState::parse(&row.state).is_active() || self.live.lock().unwrap().contains_key(id) {
             return Err(OpError::Conflict("the VM is already running".into()));
         }
+        // Resuming builds the machine the process had when it was suspended.
+        let resume = if VmState::parse(&row.state) == VmState::Suspended {
+            Some(self.suspend_meta(id).ok_or_else(|| {
+                OpError::Conflict(
+                    "the saved state of this suspended VM is missing or incomplete; discard it"
+                        .into(),
+                )
+            })?)
+        } else {
+            None
+        };
+        let spec_json = resume
+            .as_ref()
+            .map_or(row.spec_json.clone(), |m| m.spec_json.clone());
         let spec: VmSpec =
-            serde_json::from_str(&row.spec_json).map_err(|e| OpError::Failed(e.into()))?;
+            serde_json::from_str(&spec_json).map_err(|e| OpError::Failed(e.into()))?;
         let caps = self.caps_for(&spec.arch).await?;
         // Gives back what `build` sets up on the host (helper disk exports,
         // taps, isolated-network switches) on every path where no run gets
@@ -1206,10 +1253,13 @@ impl Supervisor {
             vm: id,
             keep: false,
         };
-        let (compiled, vnc) = self
+        let (mut compiled, vnc) = self
             .build(id, &spec, &caps, &BuildMode::Run)
             .await
             .map_err(OpError::Invalid)?;
+        if resume.is_some() {
+            compiled.args.extend(["-incoming".to_string(), "defer".to_string()]);
+        }
 
         let run_dir = self.run_dir(id);
         let _ = std::fs::remove_dir_all(&run_dir); // stale sockets from a crashed run
@@ -1253,7 +1303,7 @@ impl Supervisor {
         let run_id = self.store.insert_run(&NewRun {
             vm_id: id,
             args_json: &args_json,
-            spec_json: &row.spec_json,
+            spec_json: &spec_json,
             accel: &compiled.accel,
             pid: proc_id.pid,
             proc_start: proc_id.start_time,
@@ -1270,6 +1320,7 @@ impl Supervisor {
                 proc_id,
                 stop_requested: false,
                 shutdown_seen: false,
+                suspending: false,
             },
         );
         lease.keep = true;
@@ -1294,12 +1345,23 @@ impl Supervisor {
             let _ = exit_tx.send(status);
         });
 
-        match self.bring_up(id, &run_dir, proc_id, vnc.as_ref()).await {
+        match self
+            .bring_up(id, &run_dir, proc_id, vnc.as_ref(), resume.as_ref())
+            .await
+        {
             Ok(qmp) => {
                 if let Some(l) = self.live.lock().unwrap().get_mut(id) {
                     l.qmp = Some(qmp.clone());
                 }
-                self.set_state(id, VmState::Running, None, None);
+                if let Some(meta) = &resume {
+                    self.resumed(id);
+                    self.emit(id, "resumed", json!({"suspended_at": meta.at}));
+                }
+                if resume.as_ref().is_some_and(|m| m.was_paused) {
+                    self.set_state(id, VmState::Paused, Some("user"), None);
+                } else {
+                    self.set_state(id, VmState::Running, None, None);
+                }
                 self.emit(
                     id,
                     "started",
@@ -1318,6 +1380,12 @@ impl Supervisor {
                     format!("{e:#}\n{tail}")
                 };
                 self.finish(id, run_id, "failed to start", Some(&msg));
+                if resume.is_some() {
+                    // The saved state is still there: stay suspended.
+                    let msg = format!("resuming failed: {msg}");
+                    self.set_state(id, VmState::Suspended, None, Some(&msg));
+                    return Err(OpError::Failed(anyhow!(msg)));
+                }
                 return Err(OpError::Failed(anyhow!(msg)));
             }
         }
@@ -1332,12 +1400,14 @@ impl Supervisor {
         run_dir: &Path,
         proc_id: ProcId,
         vnc: Option<&VncInfo>,
+        resume: Option<&suspend::SuspendMeta>,
     ) -> Result<Qmp> {
         let qmp =
             connect_with_retry(&run_dir.join("qmp.sock"), proc_id, QMP_CONNECT_TIMEOUT).await?;
         let st = qmp.execute("query-status", None).await?;
         let status = st["status"].as_str().unwrap_or_default();
-        if status != "prelaunch" {
+        let want = if resume.is_some() { "inmigrate" } else { "prelaunch" };
+        if status != want {
             bail!("unexpected initial state '{status}'");
         }
         let blocks = qmp.execute("query-block", None).await?;
@@ -1362,6 +1432,12 @@ impl Supervisor {
             )
             .await
             .context("setting the SPICE password")?;
+        }
+        if let Some(meta) = resume {
+            self.load_state(id, &qmp, meta).await?;
+            if meta.was_paused {
+                return Ok(qmp);
+            }
         }
         qmp.execute("cont", None).await?;
         Ok(qmp)
@@ -1489,6 +1565,7 @@ impl Supervisor {
         let expected = live
             .as_ref()
             .is_some_and(|l| l.stop_requested || l.shutdown_seen);
+        let suspended = live.as_ref().is_some_and(|l| l.suspending);
         let _ = self.store.end_run(run_id, now(), exit_status);
         // Helpers (virtiofsd) normally exit with QEMU; make sure.
         for (_, pid, start) in self.store.sidecars(run_id).unwrap_or_default() {
@@ -1501,7 +1578,9 @@ impl Supervisor {
             }
         }
         let _ = std::fs::remove_dir_all(self.run_dir(id));
-        if expected && error.is_none() {
+        if suspended && error.is_none() && self.suspend_meta(id).is_some() {
+            self.set_state(id, VmState::Suspended, None, None);
+        } else if expected && error.is_none() {
             self.set_state(id, VmState::Stopped, None, None);
         } else {
             let msg = error.map(String::from).unwrap_or_else(|| {
@@ -1517,6 +1596,7 @@ impl Supervisor {
                     .to_string()
             });
             self.set_state(id, VmState::Crashed, None, Some(&msg));
+            self.crashed(id);
         }
         self.emit(id, "exited", json!({"status": exit_status}));
     }
@@ -1560,6 +1640,7 @@ impl Supervisor {
         pool: String,
     ) -> OpResult<CloneOutcome> {
         let row = self.store.get_vm(id)?.ok_or(OpError::NotFound)?;
+        self.refuse_if_suspended(id)?;
         if VmState::parse(&row.state).is_active() || self.live.lock().unwrap().contains_key(id) {
             return Err(OpError::Conflict(
                 "stop the VM before cloning it: the disks of a running VM are not consistent"
@@ -1856,6 +1937,7 @@ impl Supervisor {
                 proc_id,
                 stop_requested: was_stopping,
                 shutdown_seen: false,
+                suspending: false,
             },
         );
         if !procs::alive(proc_id) {

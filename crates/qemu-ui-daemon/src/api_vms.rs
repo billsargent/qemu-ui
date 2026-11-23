@@ -9,7 +9,7 @@ use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
 use futures::Stream;
 use qemu_ui_core::compile::display_command;
@@ -31,6 +31,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/vms/{id}", get(detail).put(update).delete(delete))
         .route("/vms/{id}/actions/{action}", post(action))
         .route("/vms/{id}/clone", post(clone))
+        .route("/vms/{id}/autostart", put(set_autostart))
         .route("/vms/{id}/serial-log", get(serial_log))
         .route("/vms/{id}/events", get(vm_events))
         .route("/events", get(events))
@@ -158,9 +159,29 @@ async fn action(
         "start" => sv.start(&id).await,
         "stop" => sv.stop(&id).await,
         "force-stop" => sv.force_stop(&id).await,
+        "suspend" => sv.suspend(&id).await,
+        "discard-suspend" => sv.discard_suspend(&id).await,
         other => sv.qmp_action(&id, other).await,
     };
     r.map(Json).map_err(op_err)
+}
+
+#[derive(Deserialize)]
+struct AutostartBody {
+    enabled: bool,
+}
+
+/// Turn autostart (start with the daemon, restart after crashes) on or off.
+async fn set_autostart(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<String>,
+    Json(b): Json<AutostartBody>,
+) -> OpResponse<VmSummary> {
+    app.supervisor
+        .set_autostart(&id, b.enabled)
+        .await
+        .map(Json)
+        .map_err(op_err)
 }
 
 #[derive(Deserialize)]

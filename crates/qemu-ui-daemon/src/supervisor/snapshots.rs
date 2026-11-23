@@ -188,6 +188,7 @@ impl Supervisor {
         with_memory: bool,
         external: bool,
     ) -> OpResult<Job> {
+        self.refuse_if_suspended(id)?;
         if !valid_snapshot_name(name) {
             return Err(OpError::Conflict(
                 "snapshot names are 1–80 printable characters".into(),
@@ -345,6 +346,7 @@ impl Supervisor {
         sid: &str,
         safety: bool,
     ) -> OpResult<Job> {
+        self.refuse_if_suspended(id)?;
         let snap = self.store.get_snapshot(id, sid)?.ok_or(OpError::NotFound)?;
         let target = self.snapshot_target(id)?;
         let external = kind_of_tag(&snap.tag) == SnapshotKind::External;
@@ -471,6 +473,7 @@ impl Supervisor {
 
     /// Delete a snapshot (its tags on every disk) as a job.
     pub async fn delete_snapshot(self: &Arc<Self>, id: &str, sid: &str) -> OpResult<Job> {
+        self.refuse_if_suspended(id)?;
         let snap = self.store.get_snapshot(id, sid)?.ok_or(OpError::NotFound)?;
         let external = kind_of_tag(&snap.tag) == SnapshotKind::External;
         if external {

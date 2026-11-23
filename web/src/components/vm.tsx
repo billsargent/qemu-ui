@@ -12,6 +12,7 @@ const STATE_TONE: Record<VmState, "green" | "amber" | "red" | "zinc" | "blue"> =
   paused: "amber",
   stopped: "zinc",
   crashed: "red",
+  suspended: "blue",
 };
 
 // Mirrors qemu_ui_core::vm::explain_pause.
@@ -87,6 +88,26 @@ export function VmActions({ vm, compact }: { vm: VmSummary; compact?: boolean })
           {busy ? "Starting…" : "Start"}
         </Button>
       )}
+      {s === "suspended" && (
+        <>
+          <Button onClick={act("start")} disabled={busy} title="Start from the saved memory state">
+            {busy ? "Resuming…" : "Resume"}
+          </Button>
+          {!compact && (
+            <Button
+              variant="ghost"
+              onClick={() => {
+                if (confirm("Discard the saved state? The VM then starts from a cold boot, like after pulling the power cord.")) {
+                  m.mutate("discard-suspend");
+                }
+              }}
+              disabled={busy}
+            >
+              Discard saved state
+            </Button>
+          )}
+        </>
+      )}
       {s === "running" && (
         <>
           <Button variant="ghost" onClick={act("stop")} disabled={busy} title="ACPI power button: the guest shuts down">
@@ -105,6 +126,16 @@ export function VmActions({ vm, compact }: { vm: VmSummary; compact?: boolean })
       {s === "paused" && (
         <Button onClick={act("resume")} disabled={busy}>
           Resume
+        </Button>
+      )}
+      {(s === "running" || s === "paused") && !compact && (
+        <Button
+          variant="ghost"
+          onClick={act("suspend")}
+          disabled={busy}
+          title="Save the VM's memory to disk and stop it; Resume continues where it left off"
+        >
+          {busy ? "Working…" : "Suspend to disk"}
         </Button>
       )}
       {(s === "running" || s === "paused" || s === "stopping" || s === "starting") && (

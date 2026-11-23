@@ -145,7 +145,15 @@ import type { PropField } from "./generated/PropField";
 const post = <T>(path: string, body?: unknown) =>
   request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
 
-export type VmAction = "start" | "stop" | "force-stop" | "pause" | "resume" | "reset";
+export type VmAction =
+  | "start"
+  | "stop"
+  | "force-stop"
+  | "pause"
+  | "resume"
+  | "reset"
+  | "suspend"
+  | "discard-suspend";
 
 export interface ConsoleTicket {
   ticket: string;
@@ -197,6 +205,8 @@ export const api = {
     request<VmDetail>(`/vms/${id}`, { method: "PUT", body: JSON.stringify({ spec }) }),
   deleteVm: (id: string) => request<void>(`/vms/${id}`, { method: "DELETE" }),
   action: (id: string, action: VmAction) => post<VmSummary>(`/vms/${id}/actions/${action}`),
+  setAutostart: (id: string, enabled: boolean) =>
+    request<VmSummary>(`/vms/${id}/autostart`, { method: "PUT", body: JSON.stringify({ enabled }) }),
   defaults: (arch: string, name: string) =>
     request<{ spec: VmSpec; diagnostics: Diagnostic[] }>(
       `/vms/defaults?arch=${encodeURIComponent(arch)}&name=${encodeURIComponent(name)}`,

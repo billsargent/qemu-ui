@@ -24,6 +24,9 @@ pub enum VmState {
     Stopping,
     /// Exited unexpectedly or failed to start.
     Crashed,
+    /// Suspended to disk: no process; RAM and device state are in a state
+    /// file and the next start resumes from it (M7-01).
+    Suspended,
 }
 
 impl VmState {
@@ -35,6 +38,7 @@ impl VmState {
             VmState::Paused => "paused",
             VmState::Stopping => "stopping",
             VmState::Crashed => "crashed",
+            VmState::Suspended => "suspended",
         }
     }
 
@@ -45,6 +49,7 @@ impl VmState {
             "paused" => VmState::Paused,
             "stopping" => VmState::Stopping,
             "crashed" => VmState::Crashed,
+            "suspended" => VmState::Suspended,
             _ => VmState::Stopped,
         }
     }
@@ -104,6 +109,18 @@ pub struct VmSummary {
     /// The saved spec differs from what the running process was started with.
     pub restart_pending: bool,
     pub has_vnc: bool,
+    /// Started when the daemon starts, and restarted after a crash (M7-08).
+    #[serde(default)]
+    pub autostart: bool,
+    /// When the next automatic restart after a crash is due (seconds since
+    /// epoch), while one is scheduled.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub restart_at: Option<u64>,
+    /// Autostart gave up: the VM crashed too often in a short time. A manual
+    /// start clears it.
+    #[serde(default)]
+    pub crash_loop: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
