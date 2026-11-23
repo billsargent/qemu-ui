@@ -1,16 +1,23 @@
 //! qemu-ui: command-line client. Speaks the same HTTP API as the browser
-//! (plan.md §3); full parity with the UI is M7-06.
+//! (plan.md §3, M7-06).
 //!
-//! Authenticates with the local API token the daemon writes to its data
-//! directory (`api-token`), or `QEMU_UI_TOKEN`.
+//! Authenticates with an API token: `--token` / `QEMU_UI_TOKEN` (create one
+//! with `qemu-ui tokens create`, or on the System page), else the local
+//! bootstrap token in the daemon's data directory (this machine only).
+//! For `https://` URLs it trusts the daemon's CA from `--ca-cert`, or
+//! `<data-dir>/tls/ca.pem` when present, else the platform's roots.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use serde_json::{Value, json};
 
+mod apply;
+mod client;
 mod service;
-use serde_json::Value;
+
+use client::{Client, Trust};
 
 #[derive(Parser)]
 #[command(name = "qemu-ui", version, about = "qemu-ui command-line client")]
@@ -18,12 +25,18 @@ struct Cli {
     /// Daemon base URL.
     #[arg(long, env = "QEMU_UI_URL", default_value = "http://127.0.0.1:7480")]
     url: String,
-    /// Daemon data directory, to find the API token.
+    /// Daemon data directory, to find the local token and CA.
     #[arg(long, env = "QEMU_UI_DATA_DIR")]
     data_dir: Option<PathBuf>,
     /// API token (overrides the token file).
     #[arg(long, env = "QEMU_UI_TOKEN", hide_env_values = true)]
     token: Option<String>,
+    /// CA certificate (PEM) to trust for https URLs.
+    #[arg(long, env = "QEMU_UI_CA_CERT")]
+    ca_cert: Option<PathBuf>,
+    /// Print raw JSON instead of tables.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -31,15 +44,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Show what this host's QEMU installation can do.
-    Host {
-        /// Print the raw JSON instead of a summary.
-        #[arg(long)]
-        json: bool,
-    },
+    Host,
     /// Re-probe every QEMU binary.
     Rescan,
     /// List VMs.
     Vms,
+    /// Work with one VM.
+    Vm {
+        #[command(subcommand)]
+        action: VmAction,
+    },
     /// Start a VM (by name or id).
     Start { vm: String },
     /// Ask a VM to shut down (ACPI power button).
@@ -50,11 +64,136 @@ enum Cmd {
     Pause { vm: String },
     /// Resume a paused VM.
     Resume { vm: String },
+    /// Reset a VM (hard reboot).
+    Reset { vm: String },
+    /// Networks.
+    Networks {
+        #[command(subcommand)]
+        action: Option<NetAction>,
+    },
+    /// Snapshots of a VM.
+    Snapshots {
+        #[command(subcommand)]
+        action: SnapAction,
+    },
+    /// Storage pools.
+    Pools,
+    /// Background jobs.
+    Jobs {
+        #[command(subcommand)]
+        action: Option<JobAction>,
+    },
+    /// API tokens.
+    Tokens {
+        #[command(subcommand)]
+        action: Option<TokenAction>,
+    },
+    /// Recent audit log entries.
+    Audit {
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Write networks and VMs as a manifest (config-as-code).
+    Export {
+        /// Output file (default: stdout). A `.toml` name writes TOML.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Write TOML to stdout.
+        #[arg(long)]
+        toml: bool,
+    },
+    /// Make the daemon match a manifest (JSON or `.toml`).
+    Apply {
+        file: PathBuf,
+        /// Show the plan without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Also delete networks and VMs the manifest doesn't list.
+        #[arg(long)]
+        prune: bool,
+    },
     /// Install the daemon as a system service (systemd / Windows service).
     Service {
         #[command(subcommand)]
         action: ServiceAction,
     },
+}
+
+#[derive(Subcommand)]
+enum VmAction {
+    /// Show a VM's state and spec.
+    Show { vm: String },
+    /// Create a VM from a spec file (JSON).
+    Create { file: PathBuf },
+    /// Replace a VM's spec from a file (JSON).
+    Update { vm: String, file: PathBuf },
+    /// Delete a VM.
+    Delete { vm: String },
+    /// Clone a VM.
+    Clone {
+        vm: String,
+        name: String,
+        /// Full copies instead of linked overlays.
+        #[arg(long)]
+        full: bool,
+    },
+    /// Print the QEMU command line the VM would start with.
+    Argv { vm: String },
+    /// Print the serial log.
+    SerialLog { vm: String },
+}
+
+#[derive(Subcommand)]
+enum NetAction {
+    /// List networks (default).
+    List,
+    /// Delete a network (by name or id).
+    Delete { network: String },
+}
+
+#[derive(Subcommand)]
+enum SnapAction {
+    /// List a VM's snapshots.
+    List { vm: String },
+    /// Take a snapshot.
+    Take {
+        vm: String,
+        name: String,
+        /// Include RAM (the VM must be running).
+        #[arg(long)]
+        memory: bool,
+        /// External (overlay) snapshot.
+        #[arg(long)]
+        external: bool,
+    },
+    /// Revert to a snapshot (by name or id).
+    Revert {
+        vm: String,
+        snapshot: String,
+        /// Skip the safety snapshot of the current state.
+        #[arg(long)]
+        no_safety: bool,
+    },
+    /// Delete a snapshot (by name or id).
+    Delete { vm: String, snapshot: String },
+}
+
+#[derive(Subcommand)]
+enum JobAction {
+    /// List jobs (default).
+    List,
+    /// Cancel a job.
+    Cancel { id: String },
+}
+
+#[derive(Subcommand)]
+enum TokenAction {
+    /// List tokens (default).
+    List,
+    /// Create a token; it is printed once.
+    Create { name: String },
+    /// Revoke a token.
+    Revoke { id: String },
 }
 
 #[derive(Subcommand)]
@@ -99,96 +238,48 @@ struct InstallArgs {
     no_helper: bool,
 }
 
-struct Client {
-    base: String,
-    token: String,
-}
-
-impl Client {
-    fn get(&self, path: &str) -> Result<Value> {
-        let url = format!("{}{path}", self.base);
-        let mut res = ureq::get(&url)
-            .header("Authorization", &format!("Bearer {}", self.token))
-            .config()
-            .http_status_as_error(false)
-            .build()
-            .call()
-            .with_context(|| format!("contacting the daemon at {url}; is qemu-uid running?"))?;
-        check(res.status().as_u16(), res.body_mut().read_json()?)
-    }
-
-    fn post(&self, path: &str) -> Result<Value> {
-        let url = format!("{}{path}", self.base);
-        let mut res = ureq::post(&url)
-            .header("Authorization", &format!("Bearer {}", self.token))
-            .config()
-            .http_status_as_error(false)
-            .build()
-            .send_empty()
-            .with_context(|| format!("contacting the daemon at {url}; is qemu-uid running?"))?;
-        check(
-            res.status().as_u16(),
-            res.body_mut().read_json().unwrap_or(Value::Null),
-        )
-    }
-
-    /// Resolve a VM name to its id (ids pass through).
-    fn vm_id(&self, vm: &str) -> Result<String> {
-        let vms = self.get("/vms")?;
-        let list = vms.as_array().cloned().unwrap_or_default();
-        list.iter()
-            .find(|v| v["id"] == vm || v["name"] == vm)
-            .and_then(|v| v["id"].as_str().map(String::from))
-            .with_context(|| format!("no VM named '{vm}'"))
-    }
-}
-
-fn check(status: u16, body: Value) -> Result<Value> {
-    if status >= 400 {
-        let msg = body["error"]
-            .as_str()
-            .unwrap_or("request failed")
-            .to_string();
-        let diags: Vec<String> = body["diagnostics"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|d| {
-                format!(
-                    "  {}: {}",
-                    d["field"].as_str().unwrap_or(""),
-                    d["message"].as_str().unwrap_or("")
-                )
-            })
-            .collect();
-        bail!(
-            "{msg} (HTTP {status}){}{}",
-            if diags.is_empty() { "" } else { "\n" },
-            diags.join("\n")
-        );
-    }
-    Ok(body)
+fn data_dir(cli: &Cli) -> Option<PathBuf> {
+    cli.data_dir
+        .clone()
+        .or_else(|| dirs::data_local_dir().map(|d| d.join("qemu-ui")))
 }
 
 fn token(cli: &Cli) -> Result<String> {
     if let Some(t) = &cli.token {
         return Ok(t.clone());
     }
-    let dir = match &cli.data_dir {
-        Some(d) => d.clone(),
-        None => dirs::data_local_dir()
-            .context("no local data directory")?
-            .join("qemu-ui"),
-    };
-    let path = dir.join("api-token");
+    let path = data_dir(cli)
+        .context("no local data directory; pass --token")?
+        .join("api-token");
     let t = std::fs::read_to_string(&path).with_context(|| {
         format!(
-            "reading the API token from {}; pass --data-dir (or QEMU_UI_DATA_DIR) if the daemon uses another \
-             data directory",
+            "reading the API token from {}; pass --token (or QEMU_UI_TOKEN), or --data-dir if the daemon \
+             uses another data directory",
             path.display()
         )
     })?;
     Ok(t.trim().to_string())
+}
+
+fn ca_path(cli: &Cli) -> Option<PathBuf> {
+    if let Some(p) = &cli.ca_cert {
+        return Some(p.clone());
+    }
+    if !cli.url.starts_with("https://") {
+        return None;
+    }
+    data_dir(cli)
+        .map(|d| d.join("tls").join("ca.pem"))
+        .filter(|p| p.is_file())
+}
+
+fn print_json(v: &Value) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(v)?);
+    Ok(())
+}
+
+fn s(v: &Value) -> &str {
+    v.as_str().unwrap_or("-")
 }
 
 fn main() -> Result<()> {
@@ -196,62 +287,379 @@ fn main() -> Result<()> {
     if let Cmd::Service { action } = &cli.cmd {
         return service_cmd(action);
     }
-    let client = Client {
-        base: format!("{}/api/v1", cli.url.trim_end_matches('/')),
-        token: token(&cli)?,
-    };
+    let ca = ca_path(&cli);
+    let trust = ca.as_deref().map_or(Trust::Default, Trust::Ca);
+    let c = Client::new(&cli.url, token(&cli)?, trust)?;
+    run(&cli, &c)
+}
+
+fn run(cli: &Cli, c: &Client) -> Result<()> {
+    let json = cli.json;
     match &cli.cmd {
         Cmd::Service { .. } => unreachable!("handled before connecting"),
-        Cmd::Host { json } => {
-            let v = client.get("/host/capabilities")?;
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
+        Cmd::Host => {
+            let v = c.get("/host/capabilities")?;
+            if json {
+                print_json(&v)?;
             } else {
                 print_summary(&v);
             }
         }
         Cmd::Rescan => {
-            let v = client.post("/host/rescan?force=true")?;
+            let v = c.post("/host/rescan?force=true", None)?;
             println!(
                 "scan started ({} binaries)",
                 v["total"].as_u64().unwrap_or(0)
             );
         }
         Cmd::Vms => {
-            for v in client.get("/vms")?.as_array().into_iter().flatten() {
+            let v = c.get("/vms")?;
+            if json {
+                return print_json(&v);
+            }
+            for v in v.as_array().into_iter().flatten() {
                 let reason = v["pause_reason"]
                     .as_str()
                     .map(|r| format!(" ({r})"))
                     .unwrap_or_default();
                 println!(
                     "{:<10} {:<24} {:<10} {}{}",
-                    v["id"].as_str().unwrap_or("?"),
-                    v["name"].as_str().unwrap_or("?"),
-                    v["arch"].as_str().unwrap_or("?"),
-                    v["state"].as_str().unwrap_or("?"),
+                    s(&v["id"]),
+                    s(&v["name"]),
+                    s(&v["arch"]),
+                    s(&v["state"]),
                     reason
                 );
             }
         }
+        Cmd::Vm { action } => vm_cmd(c, action, json)?,
         Cmd::Start { vm }
         | Cmd::Stop { vm }
         | Cmd::ForceStop { vm }
         | Cmd::Pause { vm }
-        | Cmd::Resume { vm } => {
+        | Cmd::Resume { vm }
+        | Cmd::Reset { vm } => {
             let action = match &cli.cmd {
                 Cmd::Start { .. } => "start",
                 Cmd::Stop { .. } => "stop",
                 Cmd::ForceStop { .. } => "force-stop",
                 Cmd::Pause { .. } => "pause",
+                Cmd::Reset { .. } => "reset",
                 _ => "resume",
             };
-            let id = client.vm_id(vm)?;
-            let v = client.post(&format!("/vms/{id}/actions/{action}"))?;
+            let id = c.vm_id(vm)?;
+            let v = c.post(&format!("/vms/{id}/actions/{action}"), None)?;
+            println!("{}: {}", v["name"].as_str().unwrap_or(vm), s(&v["state"]));
+        }
+        Cmd::Networks { action } => net_cmd(c, action.as_ref().unwrap_or(&NetAction::List), json)?,
+        Cmd::Snapshots { action } => snap_cmd(c, action, json)?,
+        Cmd::Pools => {
+            let v = c.get("/pools")?;
+            if json {
+                return print_json(&v);
+            }
+            for p in v.as_array().into_iter().flatten() {
+                println!(
+                    "{:<16} {:>8} MiB used  {}",
+                    s(&p["name"]),
+                    p["used_bytes"].as_u64().unwrap_or(0) >> 20,
+                    s(&p["path"])
+                );
+            }
+        }
+        Cmd::Jobs { action } => match action.as_ref().unwrap_or(&JobAction::List) {
+            JobAction::List => {
+                let v = c.get("/jobs")?;
+                if json {
+                    return print_json(&v);
+                }
+                for j in v.as_array().into_iter().flatten() {
+                    println!(
+                        "{:<12} {:<12} {:<10} {}",
+                        s(&j["id"]),
+                        s(&j["kind"]),
+                        s(&j["status"]),
+                        j["message"].as_str().unwrap_or("")
+                    );
+                }
+            }
+            JobAction::Cancel { id } => {
+                c.post(&format!("/jobs/{id}/cancel"), None)?;
+                println!("cancel requested for job {id}");
+            }
+        },
+        Cmd::Tokens { action } => {
+            token_cmd(c, action.as_ref().unwrap_or(&TokenAction::List), json)?
+        }
+        Cmd::Audit { limit } => {
+            let v = c.get(&format!("/audit?limit={limit}"))?;
+            if json {
+                return print_json(&v);
+            }
+            for e in v["entries"].as_array().into_iter().flatten() {
+                println!(
+                    "{:<11} {:<16} {:<28} {:<16} {}",
+                    e["time"].as_u64().unwrap_or(0),
+                    s(&e["actor"]),
+                    s(&e["action"]),
+                    e["target"].as_str().unwrap_or(""),
+                    e["outcome"].as_str().unwrap_or("")
+                );
+            }
+        }
+        Cmd::Export { output, toml } => {
+            let as_toml = *toml
+                || output
+                    .as_deref()
+                    .and_then(Path::extension)
+                    .is_some_and(|e| e == "toml");
+            let text = apply::export(c, as_toml)?;
+            match output {
+                Some(p) => {
+                    std::fs::write(p, text).with_context(|| format!("writing {}", p.display()))?;
+                    println!("wrote {}", p.display());
+                }
+                None => print!("{text}"),
+            }
+        }
+        Cmd::Apply {
+            file,
+            dry_run,
+            prune,
+        } => {
+            let m = apply::load(file)?;
+            let plan = apply::plan(c, &m, *prune)?;
+            if plan.is_empty() {
+                println!("no changes; the daemon already matches {}", file.display());
+                return Ok(());
+            }
+            if *dry_run {
+                for ch in &plan.changes {
+                    println!("{}", ch.describe());
+                }
+                println!(
+                    "{} change(s); run without --dry-run to apply",
+                    plan.changes.len()
+                );
+                return Ok(());
+            }
+            apply::execute(c, &plan)?;
+            println!("applied {} change(s)", plan.changes.len());
+        }
+    }
+    Ok(())
+}
+
+fn net_cmd(c: &Client, action: &NetAction, json: bool) -> Result<()> {
+    match action {
+        NetAction::List => {
+            let v = c.get("/networks")?;
+            if json {
+                return print_json(&v);
+            }
+            for n in v.as_array().into_iter().flatten() {
+                let users: Vec<&str> = n["used_by"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                println!(
+                    "{:<10} {:<20} {:<10} {}",
+                    s(&n["id"]),
+                    s(&n["name"]),
+                    s(&n["config"]["kind"]),
+                    users.join(",")
+                );
+            }
+        }
+        NetAction::Delete { network } => {
+            let id = c.network_id(network)?;
+            c.delete(&format!("/networks/{id}"))?;
+            println!("deleted network {network}");
+        }
+    }
+    Ok(())
+}
+
+fn token_cmd(c: &Client, action: &TokenAction, json: bool) -> Result<()> {
+    match action {
+        TokenAction::List => {
+            let v = c.get("/auth/tokens")?;
+            if json {
+                return print_json(&v);
+            }
+            for t in v.as_array().into_iter().flatten() {
+                println!("{:<12} {}", s(&t["id"]), s(&t["name"]));
+            }
+        }
+        TokenAction::Create { name } => {
+            let v = c.post("/auth/tokens", Some(&json!({ "name": name })))?;
+            if json {
+                return print_json(&v);
+            }
             println!(
-                "{}: {}",
-                v["name"].as_str().unwrap_or(vm),
-                v["state"].as_str().unwrap_or("?")
+                "token {} ({name}) created; it is shown only once:",
+                s(&v["id"])
             );
+            println!("{}", s(&v["token"]));
+        }
+        TokenAction::Revoke { id } => {
+            c.delete(&format!("/auth/tokens/{id}"))?;
+            println!("revoked token {id}");
+        }
+    }
+    Ok(())
+}
+
+fn read_json(path: &Path) -> Result<Value> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let v: Value =
+        serde_json::from_str(&text).with_context(|| format!("{} is not JSON", path.display()))?;
+    // Accept a bare spec, or `{ "spec": ... }` as `vm show --json` prints.
+    Ok(v.get("spec").cloned().unwrap_or(v))
+}
+
+fn vm_cmd(c: &Client, action: &VmAction, json: bool) -> Result<()> {
+    match action {
+        VmAction::Show { vm } => {
+            let id = c.vm_id(vm)?;
+            let v = c.get(&format!("/vms/{id}"))?;
+            if json {
+                return print_json(&v);
+            }
+            let sum = &v["summary"];
+            println!("{} ({id})  {}", s(&sum["name"]), s(&sum["state"]));
+            if let Some(e) = sum["last_error"].as_str() {
+                println!("last error: {e}");
+            }
+            print_json(&v["spec"])?;
+        }
+        VmAction::Create { file } => {
+            let spec = read_json(file)?;
+            let v = c.post("/vms", Some(&json!({ "spec": spec })))?;
+            println!("created {}", s(&v["summary"]["id"]));
+        }
+        VmAction::Update { vm, file } => {
+            let id = c.vm_id(vm)?;
+            let spec = read_json(file)?;
+            c.put(&format!("/vms/{id}"), &json!({ "spec": spec }))?;
+            println!("updated {vm}");
+        }
+        VmAction::Delete { vm } => {
+            let id = c.vm_id(vm)?;
+            c.delete(&format!("/vms/{id}"))?;
+            println!("deleted {vm}");
+        }
+        VmAction::Clone { vm, name, full } => {
+            let id = c.vm_id(vm)?;
+            let mode = if *full { "full" } else { "linked" };
+            let v = c.post(
+                &format!("/vms/{id}/clone"),
+                Some(&json!({"name": name, "mode": mode})),
+            )?;
+            if json {
+                return print_json(&v);
+            }
+            println!("cloning {vm} as {name} ({mode})");
+        }
+        VmAction::Argv { vm } => {
+            let id = c.vm_id(vm)?;
+            let d = c.get(&format!("/vms/{id}"))?;
+            let v = c.post(
+                "/vms/compile",
+                Some(&json!({"spec": d["spec"], "vm_id": id})),
+            )?;
+            if json {
+                return print_json(&v);
+            }
+            match v["command"].as_str() {
+                Some(cmd) => println!("{cmd}"),
+                None => print_json(&v)?,
+            }
+        }
+        VmAction::SerialLog { vm } => {
+            let id = c.vm_id(vm)?;
+            let v = c.get(&format!("/vms/{id}/serial-log"))?;
+            match v.as_str() {
+                Some(t) => print!("{t}"),
+                None => print_json(&v)?,
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A snapshot id by name or id.
+fn snapshot_id(list: &Value, snap: &str) -> Result<String> {
+    list["snapshots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|x| x["id"] == snap || x["name"] == snap)
+        .and_then(|x| x["id"].as_str().map(String::from))
+        .with_context(|| format!("no snapshot named '{snap}'"))
+}
+
+fn snap_cmd(c: &Client, action: &SnapAction, json: bool) -> Result<()> {
+    match action {
+        SnapAction::List { vm } => {
+            let id = c.vm_id(vm)?;
+            let v = c.get(&format!("/vms/{id}/snapshots"))?;
+            if json {
+                return print_json(&v);
+            }
+            let head = v["head"].as_str();
+            for x in v["snapshots"].as_array().into_iter().flatten() {
+                println!(
+                    "{} {:<10} {:<24} {:<9} {}",
+                    if x["id"].as_str() == head { "*" } else { " " },
+                    s(&x["id"]),
+                    s(&x["name"]),
+                    s(&x["kind"]),
+                    if x["with_memory"].as_bool() == Some(true) {
+                        "with memory"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            if let Some(r) = v["unsupported_reason"].as_str() {
+                println!("internal snapshots unavailable: {r}");
+            }
+        }
+        SnapAction::Take {
+            vm,
+            name,
+            memory,
+            external,
+        } => {
+            let id = c.vm_id(vm)?;
+            let v = c.post(
+                &format!("/vms/{id}/snapshots"),
+                Some(&json!({"name": name, "with_memory": memory, "external": external})),
+            )?;
+            println!("taking snapshot {name} (job {})", s(&v["id"]));
+        }
+        SnapAction::Revert {
+            vm,
+            snapshot,
+            no_safety,
+        } => {
+            let id = c.vm_id(vm)?;
+            let sid = snapshot_id(&c.get(&format!("/vms/{id}/snapshots"))?, snapshot)?;
+            let v = c.post(
+                &format!("/vms/{id}/snapshots/{sid}/revert"),
+                Some(&json!({"safety_snapshot": !no_safety})),
+            )?;
+            println!("reverting to {snapshot} (job {})", s(&v["id"]));
+        }
+        SnapAction::Delete { vm, snapshot } => {
+            let id = c.vm_id(vm)?;
+            let sid = snapshot_id(&c.get(&format!("/vms/{id}/snapshots"))?, snapshot)?;
+            c.delete(&format!("/vms/{id}/snapshots/{sid}"))?;
+            println!("deleted snapshot {snapshot}");
         }
     }
     Ok(())

@@ -17,6 +17,7 @@ import type { VmSpec } from "../api/generated/VmSpec";
 import { MacField, NicModelField, VirtioNetFields } from "./NicFields";
 import { Badge, Button, Card, Field, inputCls } from "./ui";
 import { HardwareCard } from "./HardwareTree";
+import { GuestCard } from "./GuestCard";
 import { LimitsCard } from "./LimitsCard";
 import { ChangedChips, FixButton, FixError, useFixes } from "./FixChips";
 import { kindLabel } from "../pages/NetworksPage";
@@ -345,6 +346,35 @@ export function VmEditor({
           </select>
           {firmware.length === 0 && <p className="mt-2 text-xs text-zinc-500">No installed firmware matches this machine.</p>}
           <Diags list={diagsFor("firmware")} />
+        </Card>
+
+        <Card title="TPM">
+          {(() => {
+            const tpmdev = bin?.backends.tpmdev;
+            const reason = !tpmdev
+              ? "This QEMU build has no TPM support (-tpmdev is not compiled in; the upstream Windows builds leave it out)."
+              : !tpmdev.includes("emulator")
+                ? "This QEMU build has no 'emulator' TPM backend."
+                : null;
+            return (
+              <>
+                <select
+                  className={inputCls}
+                  value={spec.tpm?.model ?? ""}
+                  disabled={!!reason && !spec.tpm}
+                  onChange={(e) => set({ tpm: e.target.value ? { model: e.target.value } : undefined })}
+                >
+                  <option value="">None</option>
+                  <option value="tpm-crb">TPM 2.0 (CRB, for UEFI guests)</option>
+                  <option value="tpm-tis">TPM 2.0 (TIS)</option>
+                </select>
+                <p className="mt-2 text-xs text-zinc-500">
+                  {reason ?? "An emulated TPM backed by swtpm on the host. Its state is kept with the VM."}
+                </p>
+                <Diags list={diagsFor("tpm")} />
+              </>
+            );
+          })()}
         </Card>
 
         <Card
@@ -680,6 +710,8 @@ export function VmEditor({
           diagsFor={(i) => diagsFor(`shares[${i}]`)}
           other={diagsFor("shares").filter((d) => d.field === "shares")}
         />
+
+        <GuestCard guest={spec.guest} onChange={(guest) => set({ guest })} diags={diagsFor("guest")} />
 
         <LimitsCard
           limits={spec.limits}

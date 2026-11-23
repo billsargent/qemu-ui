@@ -85,6 +85,8 @@ pub struct Supervisor {
     pub virtiofsd: Option<PathBuf>,
     /// `passt`, when installed (Linux): passt NAT networks need it (M3-03).
     pub passt: Option<PathBuf>,
+    /// `swtpm`, when installed: emulated TPMs need it (M7-07).
+    pub swtpm: Option<PathBuf>,
     data_dir: PathBuf,
     run_root: PathBuf,
     events: broadcast::Sender<VmEvent>,
@@ -192,6 +194,13 @@ impl Supervisor {
                 let p = crate::passt::find_passt();
                 if let Some(p) = &p {
                     tracing::info!("passt found at {}; passt networks available", p.display());
+                }
+                p
+            },
+            swtpm: {
+                let p = crate::swtpm::find_swtpm();
+                if let Some(p) = &p {
+                    tracing::info!("swtpm found at {}; emulated TPMs available", p.display());
                 }
                 p
             },
@@ -479,6 +488,7 @@ impl Supervisor {
             spec.machine.type_name = pinned;
         }
         self.assign_macs(&mut spec.nics);
+        hash_guest_password(&mut spec)?;
         Ok((spec, caps))
     }
 
@@ -883,6 +893,32 @@ impl Supervisor {
         } else {
             Some(crate::spice::lookup(&self.store, id).map_or(6900, |s| s.port))
         };
+        // cloud-init (M7-03): the seed is rebuilt at every start from the
+        // spec, next to the VM's other state; previews show where it goes.
+        let seed = match &spec.guest.cloud_init {
+            None => None,
+            Some(_) => {
+                // A dry lint really starts QEMU, so its scratch copy is
+                // written too.
+                let path = match scratch {
+                    Some(d) => d.join("seed.iso"),
+                    None => self.vm_dir(id).join("cloud-init.iso"),
+                };
+                if run || scratch.is_some() {
+                    let img = qemu_ui_core::guest::seed_image(spec, id).unwrap_or_default();
+                    std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))
+                        .and_then(|()| std::fs::write(&path, img))
+                        .map_err(|e| {
+                            fail(
+                                "guest.cloud_init",
+                                "guest.seed-write",
+                                format!("writing the cloud-init seed: {e}"),
+                            )
+                        })?;
+                }
+                Some(path_str(&path))
+            }
+        };
         let ctx = compile::Context {
             taps,
             switch_sockets: &switch_sockets,
@@ -898,6 +934,8 @@ impl Supervisor {
                 pidfile: s("qemu.pid"),
                 vnc: vnc_listen,
                 spice_port,
+                qga: s("ga.sock"),
+                seed,
             },
             images: &images,
             firmware,
@@ -973,6 +1011,7 @@ impl Supervisor {
     /// socket. Returned with their kind, for the `run_sidecar` table.
     async fn start_sidecars(
         &self,
+        id: &str,
         spec: &VmSpec,
         caps: &BinaryCaps,
         run_dir: &Path,
@@ -983,16 +1022,42 @@ impl Supervisor {
         let plans = crate::passt::plan(&spec.nics, &networks, &qmp);
         let passt = crate::passt::start(self.passt.as_deref(), &plans, logs, now()).await?;
         let mut all: Vec<(&'static str, ProcId)> = passt.iter().map(|p| ("passt", *p)).collect();
+        let stop = |all: &[(&'static str, ProcId)]| {
+            for (_, p) in all {
+                procs::terminate(*p, true);
+            }
+        };
+        if spec.tpm.is_some() {
+            let socket = compile::tpm_socket(&qmp);
+            let log = logs.join(format!("run-{}.swtpm.log", now()));
+            match crate::swtpm::start(
+                self.swtpm.as_deref(),
+                &self.vm_dir(id).join("tpm"),
+                &socket,
+                &log,
+            )
+            .await
+            {
+                Ok(p) => all.push(("swtpm", p)),
+                Err(e) => {
+                    stop(&all);
+                    return Err(e);
+                }
+            }
+        }
         match self.start_virtiofsd(spec, caps, run_dir, logs).await {
             Ok(v) => all.extend(v.into_iter().map(|p| ("virtiofsd", p))),
             Err(e) => {
-                for p in &passt {
-                    procs::terminate(*p, true);
-                }
+                stop(&all);
                 return Err(e);
             }
         }
         Ok(all)
+    }
+
+    /// Why a VM on `caps` cannot have a TPM on this host, if it cannot.
+    pub fn tpm_unavailable(&self, caps: &BinaryCaps) -> Option<String> {
+        crate::swtpm::unavailable_reason(caps, self.swtpm.as_deref())
     }
 
     /// Start one `virtiofsd` per virtiofs share and wait for its socket.
@@ -1278,7 +1343,7 @@ impl Supervisor {
         self.set_state(id, VmState::Starting, None, None);
         tracing::info!(vm = %row.name, "starting: {}", compile::display_command(&compiled.program, &compiled.args));
 
-        let sidecars = match self.start_sidecars(&spec, &caps, &run_dir, &logs).await {
+        let sidecars = match self.start_sidecars(id, &spec, &caps, &run_dir, &logs).await {
             Ok(s) => s,
             Err(e) => {
                 self.set_state(id, VmState::Crashed, None, Some(&format!("{e:#}")));
@@ -1838,15 +1903,33 @@ impl Supervisor {
         Ok(self.summary(&row))
     }
 
-    /// Ask the guest to power off (ACPI). Returns immediately.
+    /// Ask the guest to power off: through the guest agent when the VM has
+    /// one and it answers (M7-02), else ACPI. Returns immediately.
     pub async fn stop(&self, id: &str) -> OpResult<VmSummary> {
         let qmp = self.qmp_of(id)?;
         if let Some(l) = self.live.lock().unwrap().get_mut(id) {
             l.stop_requested = true;
         }
-        qmp.execute("system_powerdown", None)
-            .await
-            .map_err(|e| OpError::Failed(e.into()))?;
+        let via_agent = match crate::qga::socket(&qmp).await {
+            Some(sock) => match crate::qga::shutdown(&sock).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::debug!(vm = %id, "agent shutdown, using ACPI: {e:#}");
+                    false
+                }
+            },
+            None => false,
+        };
+        if !via_agent {
+            qmp.execute("system_powerdown", None)
+                .await
+                .map_err(|e| OpError::Failed(e.into()))?;
+        }
+        self.emit(
+            id,
+            "stop-requested",
+            json!({"via": if via_agent { "guest-agent" } else { "acpi" }}),
+        );
         self.set_state(id, VmState::Stopping, None, None);
         self.summary_of(id).await
     }
@@ -2783,5 +2866,61 @@ mod host_disks {
         });
         drop(rt);
         let _ = std::fs::remove_dir_all(&data);
+    }
+}
+
+/// A plain cloud-init password sent to the API is stored only as a
+/// SHA-512-crypt hash (M7-03); hashes are kept as they are.
+fn hash_guest_password(spec: &mut VmSpec) -> OpResult<()> {
+    use sha_crypt::{PasswordHasher, ShaCrypt};
+    let Some(ci) = spec.guest.cloud_init.as_mut() else {
+        return Ok(());
+    };
+    match ci.password.as_deref() {
+        None => {}
+        Some("") => ci.password = None,
+        Some(p) if qemu_ui_core::guest::is_password_hash(p) => {}
+        Some(p) => {
+            let salt: [u8; 12] = rand::random();
+            let hash = ShaCrypt::default()
+                .hash_password_with_salt(p.as_bytes(), &salt)
+                .map_err(|e| OpError::Failed(anyhow::anyhow!("hashing the password: {e}")))?;
+            ci.password = Some(hash.to_string());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod guest_password_tests {
+    use super::*;
+
+    #[test]
+    fn plain_passwords_are_hashed_and_hashes_kept() {
+        use sha_crypt::{PasswordVerifier, ShaCrypt};
+        let mut spec: VmSpec = serde_json::from_value(serde_json::json!({
+            "spec_version": 1, "name": "t", "arch": "x86_64",
+            "machine": {"type": "q35"}, "cpu": {"count": 1}, "memory": {"size_mib": 64},
+            "guest": {"cloud_init": {"password": "s3cret"}}
+        }))
+        .unwrap();
+        hash_guest_password(&mut spec).unwrap();
+        let h = spec
+            .guest
+            .cloud_init
+            .as_ref()
+            .unwrap()
+            .password
+            .clone()
+            .unwrap();
+        assert!(h.starts_with("$6$"), "{h}");
+        assert!(
+            ShaCrypt::default()
+                .verify_password(b"s3cret", h.as_str())
+                .is_ok()
+        );
+        let before = spec.clone();
+        hash_guest_password(&mut spec).unwrap();
+        assert_eq!(spec, before, "an existing hash is kept");
     }
 }

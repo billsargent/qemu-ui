@@ -268,6 +268,8 @@ pub fn default_spec_on(
     };
     let spec = VmSpec {
         limits: Default::default(),
+        guest: Default::default(),
+        tpm: None,
         spec_version: SPEC_VERSION,
         name: name.to_string(),
         arch: caps.arch.clone(),

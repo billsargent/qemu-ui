@@ -1,0 +1,19 @@
+# Template gallery (plan.md §16 M7-04): BSDs and anything else.
+
+[[template]]
+id = "freebsd"
+name = "FreeBSD"
+description = "FreeBSD with virtio disk and network (supported in the base system)."
+os = "bsd"
+memory_mib = 2048
+cpus = 2
+disk_gib = 20
+
+[[template]]
+id = "generic"
+name = "Blank VM"
+description = "The host's defaults for this architecture, for anything not listed."
+os = "other"
+memory_mib = 2048
+cpus = 2
+disk_gib = 20

@@ -136,12 +136,16 @@ fn run_paths(vnc: VncListen) -> RunPaths {
         pidfile: "/run/qui/vm1/qemu.pid".into(),
         vnc,
         spice_port: None,
+        qga: "/run/qui/vm/ga.sock".into(),
+        seed: Some("/var/lib/qui/vm/seed.iso".into()),
     }
 }
 
 fn base_spec() -> VmSpec {
     VmSpec {
         limits: Default::default(),
+        guest: Default::default(),
+        tpm: None,
         spec_version: SPEC_VERSION,
         name: "debian".into(),
         arch: "x86_64".into(),
@@ -321,6 +325,8 @@ fn windows_uefi_secure_boot_cdrom_with_comma() {
             pidfile: r"C:\qui\r\vm1\qemu.pid".into(),
             vnc: VncListen::Tcp { display: 7 },
             spice_port: None,
+            qga: String::new(),
+            seed: None,
         },
         images: &images,
         firmware: Some(ResolvedFirmware {
@@ -1557,4 +1563,114 @@ fn sandbox_on_linux_when_qemu_has_seccomp() {
         .expect("sandbox on Linux");
     assert_eq!(args[i + 1], SANDBOX);
     assert!(!compile_on(&caps, "windows").iter().any(|a| a == "-sandbox"));
+}
+
+/// M7-02/03: guest-agent channel and cloud-init seed CD-ROM.
+#[test]
+fn linux_guest_agent_and_cloud_init_seed() {
+    let caps = caps(true);
+    let images = images();
+    let ctx = Context {
+        taps: Default::default(),
+        networks: &[],
+        switch_sockets: &Default::default(),
+        shares: vec![],
+        caps: &caps,
+        os: "linux",
+        run: run_paths(VncListen::Unix("/run/qui/vm1/vnc.sock".into())),
+        images: &images,
+        firmware: None,
+        machine: None,
+    };
+    let mut spec = base_spec();
+    spec.guest.agent = true;
+    spec.guest.cloud_init = Some(qemu_ui_core::guest::CloudInit {
+        ssh_keys: vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample".into()],
+        ..Default::default()
+    });
+    let c = compile(&spec, &ctx).unwrap();
+    let argv = c.args.join(" ");
+    assert_eq!(argv.matches("virtio-serial-pci").count(), 1);
+    golden("linux-guest-agent-cloud-init", &c);
+
+    // With the display agent too, both ports share one virtio-serial bus.
+    spec.display.vdagent = true;
+    let mut caps2 = caps.clone();
+    caps2.backends.chardev = Some(vec!["socket".into(), "qemu-vdagent".into()]);
+    let ctx2 = Context {
+        caps: &caps2,
+        ..ctx
+    };
+    let argv = compile(&spec, &ctx2).unwrap().args.join(" ");
+    assert_eq!(argv.matches("virtio-serial-pci").count(), 1, "{argv}");
+    assert!(argv.contains("org.qemu.guest_agent.0") && argv.contains("com.redhat.spice.0"));
+}
+
+/// M7-07: a TPM is an swtpm-backed emulator TPM, and only where the probe
+/// found a TPM backend.
+#[test]
+fn tpm_compiles_to_an_swtpm_emulator_and_needs_a_backend() {
+    let mut s = base_spec();
+    s.tpm = Some(qemu_ui_core::spec::TpmSpec {
+        model: "tpm-crb".into(),
+    });
+    let images = images();
+    let run = run_paths(VncListen::Unix("/x".into()));
+    let qmp = run.qmp.clone();
+    let compile_on = |s: &VmSpec, caps: &BinaryCaps| {
+        let ctx = Context {
+            taps: Default::default(),
+            switch_sockets: &Default::default(),
+            networks: &[],
+            shares: vec![],
+            caps,
+            os: "linux",
+            run: run.clone(),
+            images: &images,
+            firmware: None,
+            machine: None,
+        };
+        compile(s, &ctx)
+    };
+
+    // The Windows builds: no -tpmdev at all.
+    let errs = compile_on(&s, &caps(true)).unwrap_err();
+    let e = errs.iter().find(|d| d.rule == "tpm.unsupported").unwrap();
+    assert_eq!(e.field, "tpm");
+    assert!(e.message.contains("Windows"), "{}", e.message);
+
+    let mut with_tpm = caps(true);
+    with_tpm.backends.tpmdev = Some(vec!["passthrough".into(), "emulator".into()]);
+    for m in ["tpm-crb", "tpm-tis"] {
+        with_tpm.devices.push(DeviceInfo {
+            name: m.into(),
+            category: String::new(),
+            bus: None,
+            alias: None,
+            description: None,
+            no_user: false,
+        });
+    }
+    let c = compile_on(&s, &with_tpm).unwrap();
+    let pos = |flag: &str, needle: &str| {
+        c.args
+            .windows(2)
+            .position(|w| w[0] == flag && w[1].contains(needle))
+            .unwrap_or_else(|| panic!("{flag} {needle} in {:?}", c.args))
+    };
+    let chardev = pos("-chardev", "id=qui-tpm,");
+    assert!(c.args[chardev + 1].ends_with(&qemu_ui_core::compile::tpm_socket(&qmp)));
+    pos("-tpmdev", "emulator,id=qui-tpm0,chardev=qui-tpm");
+    let dev = pos("-device", "\"tpmdev\":\"qui-tpm0\"");
+    assert!(c.args[dev + 1].contains("\"driver\":\"tpm-crb\""));
+
+    // Unknown models are refused.
+    s.tpm = Some(qemu_ui_core::spec::TpmSpec {
+        model: "tpm-spapr".into(),
+    });
+    let errs = compile_on(&s, &with_tpm).unwrap_err();
+    assert!(
+        errs.iter().any(|d| d.rule == "tpm.model-unknown"),
+        "{errs:?}"
+    );
 }

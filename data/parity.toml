@@ -123,3 +123,15 @@ id = "core"
 feature = "Lifecycle, blockdev disks, snapshots, VNC and serial consoles, all target architectures"
 linux = { status = "native", note = "" }
 windows = { status = "native", note = "" }
+
+[[row]]
+id = "guest-agent"
+feature = "QEMU guest agent (addresses, clean shutdown, quiesced live snapshots)"
+linux = { status = "native", note = "virtio-serial channel on a unix socket. Needs qemu-guest-agent in the guest." }
+windows = { status = "native", note = "virtio-serial channel on a unix socket. Needs qemu-guest-agent in the guest (virtio-win guest tools on Windows guests)." }
+
+[[row]]
+id = "cloud-init"
+feature = "cloud-init NoCloud seed"
+linux = { status = "native", note = "Seed ISO built in-process; no genisoimage needed." }
+windows = { status = "native", note = "Seed ISO built in-process; no genisoimage needed." }

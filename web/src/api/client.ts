@@ -11,6 +11,7 @@ import type { PortForward } from "./generated/PortForward";
 import type { LintResult } from "./generated/LintResult";
 import type { Diagnostic } from "./generated/Diagnostic";
 import type { CheckResult } from "./generated/CheckResult";
+import type { GuestInfo } from "./generated/GuestInfo";
 import type { GuestNetInfo } from "./generated/GuestNetInfo";
 import type { HostDisk } from "./generated/HostDisk";
 import type { ImageDetail } from "./generated/ImageDetail";
@@ -139,6 +140,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 import type { HardwareTree } from "./generated/HardwareTree";
+import type { TemplateInfo } from "./generated/TemplateInfo";
+import type { TemplatePlan } from "./generated/TemplatePlan";
+import type { FromTemplate } from "./generated/FromTemplate";
 import type { PaletteEntry } from "./generated/PaletteEntry";
 import type { PropField } from "./generated/PropField";
 
@@ -199,6 +203,10 @@ export const api = {
   vm: (id: string) => request<VmDetail>(`/vms/${id}`),
   vmEvents: (id: string) => request<VmEvent[]>(`/vms/${id}/events`),
   createVm: (spec: VmSpec) => post<VmDetail>("/vms", { spec }),
+  templates: () => request<TemplateInfo[]>("/templates"),
+  planTemplate: (id: string, arch: string, name: string, withDrivers: boolean) =>
+    post<TemplatePlan>(`/templates/${encodeURIComponent(id)}/plan`, { arch, name, with_drivers: withDrivers }),
+  createFromTemplate: (body: FromTemplate) => post<VmDetail>("/vms/from-template", body),
   /** Read a QEMU command line or libvirt XML into a spec to review (M4-07). */
   importVm: (format: ImportFormat, text: string) => post<ImportResult>("/vms/import", { format, text }),
   updateVm: (id: string, spec: VmSpec) =>
@@ -396,6 +404,7 @@ export const api = {
 
   /** Guest addresses per NIC, best source first (M3-08). */
   guestNet: (vmId: string) => request<GuestNetInfo>(`/vms/${vmId}/guest-net`),
+  guestInfo: (vmId: string) => request<GuestInfo>(`/vms/${vmId}/guest`),
 };
 
 export function wsUrl(path: string): string {

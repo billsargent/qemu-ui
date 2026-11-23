@@ -4,12 +4,14 @@ import type { DeviceSpec } from "./DeviceSpec";
 import type { DiskSpec } from "./DiskSpec";
 import type { DisplaySpec } from "./DisplaySpec";
 import type { FirmwareSpec } from "./FirmwareSpec";
+import type { GuestSpec } from "./GuestSpec";
 import type { InputSpec } from "./InputSpec";
 import type { MachineSpec } from "./MachineSpec";
 import type { MemorySpec } from "./MemorySpec";
 import type { NicSpec } from "./NicSpec";
 import type { ResourceLimits } from "./ResourceLimits";
 import type { ShareSpec } from "./ShareSpec";
+import type { TpmSpec } from "./TpmSpec";
 import type { UsbPassthrough } from "./UsbPassthrough";
 
 export type VmSpec = { spec_version: number, 
@@ -45,6 +47,15 @@ devices: Array<DeviceSpec>,
  * CPU, memory and disk IO limits (M6-07).
  */
 limits: ResourceLimits, 
+/**
+ * Guest agent channel and cloud-init seed (M7-02/03).
+ */
+guest: GuestSpec, 
+/**
+ * An emulated TPM 2.0 backed by an `swtpm` sidecar (M7-07). Only
+ * available where the probe finds a TPM backend.
+ */
+tpm?: TpmSpec | null, 
 /**
  * Raw argv tokens appended after generated options (§5.3).
  */
