@@ -329,6 +329,8 @@ pub struct VmRow {
     pub state: String,
     pub pause_reason: Option<String>,
     pub last_error: Option<String>,
+    /// Start with the daemon and restart after crashes (M7-08).
+    pub autostart: bool,
 }
 
 /// A run (one QEMU process) row.
@@ -372,10 +374,11 @@ fn vm_row(r: &rusqlite::Row) -> rusqlite::Result<VmRow> {
         state: r.get(3)?,
         pause_reason: r.get(4)?,
         last_error: r.get(5)?,
+        autostart: r.get::<_, i64>(6)? != 0,
     })
 }
 
-const VM_COLS: &str = "id, name, spec_json, state, pause_reason, last_error";
+const VM_COLS: &str = "id, name, spec_json, state, pause_reason, last_error, autostart";
 const RUN_COLS: &str = "id, vm_id, args_json, spec_json, accel, pid, proc_start, run_dir, \
                         vnc_json, log_path, started_at, ended_at";
 
@@ -536,6 +539,16 @@ impl Store {
             c.execute(
                 "UPDATE vm SET state = ?2, pause_reason = ?3, last_error = COALESCE(?4, last_error) WHERE id = ?1",
                 params![id, state, pause_reason, last_error],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn set_autostart(&self, id: &str, on: bool) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE vm SET autostart = ?2 WHERE id = ?1",
+                params![id, on as i64],
             )
             .map(|_| ())
         })

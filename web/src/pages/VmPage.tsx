@@ -3,7 +3,7 @@ import { DisksCard } from "../components/DisksCard";
 import { ForwardsCard } from "../components/ForwardsCard";
 import { GuestInfoCard } from "../components/GuestCard";
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../api/client";
 import type { VmDetail } from "../api/generated/VmDetail";
 import { SerialConsole } from "../components/SerialConsole";
@@ -26,7 +26,7 @@ export default function VmPage({ id, tab }: { id: string; tab: string }) {
   if (vm.isPending) return <p className="text-sm text-zinc-500">Loading…</p>;
   if (vm.isError) return <p className="text-sm text-rose-600">{vm.error.message}</p>;
   const d = vm.data;
-  const active = d.summary.state !== "stopped" && d.summary.state !== "crashed";
+  const active = !["stopped", "crashed", "suspended"].includes(d.summary.state);
   const current = (TABS as readonly string[]).includes(tab) ? tab : "overview";
 
   return (
@@ -88,6 +88,17 @@ function Overview({ d }: { d: VmDetail }) {
   const backingOf = (pool: string, name: string) => images.data?.find((i) => i.pool === pool && i.name === name)?.backing;
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      {s.state === "suspended" && (
+        <div className="lg:col-span-2">
+          <Card title="Suspended to disk">
+            <p className="text-sm">
+              Memory and device state are saved on disk. Resume continues where the VM left off. Until then its settings,
+              disks and snapshots can't be changed.
+            </p>
+            {s.last_error && <pre className="mt-2 text-xs whitespace-pre-wrap text-rose-600">{s.last_error}</pre>}
+          </Card>
+        </div>
+      )}
       {(s.state === "crashed" || (s.state === "paused" && s.pause_reason !== "user")) && (
         <div className="lg:col-span-2">
           <Card title={s.state === "crashed" ? "Last run failed" : "Paused"}>
@@ -99,6 +110,7 @@ function Overview({ d }: { d: VmDetail }) {
           </Card>
         </div>
       )}
+      <AutostartCard s={s} />
       <Card title="Hardware">
         <dl className="grid grid-cols-[8rem_1fr] gap-y-1 text-sm">
           <dt className="text-zinc-500">Architecture</dt>
@@ -163,6 +175,48 @@ function Overview({ d }: { d: VmDetail }) {
   );
 }
 
+function AutostartCard({ s }: { s: VmDetail["summary"] }) {
+  const qc = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+  const m = useMutation({
+    mutationFn: (on: boolean) => api.setAutostart(s.id, on),
+    onMutate: () => setError(null),
+    onError: (e: Error) => setError(e.message),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["vm", s.id] });
+      qc.invalidateQueries({ queryKey: ["vms"] });
+    },
+  });
+  return (
+    <div className="lg:col-span-2">
+      <Card title="Autostart">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={s.autostart}
+            disabled={m.isPending}
+            onChange={(e) => m.mutate(e.target.checked)}
+          />
+          Start with qemu-ui and restart after a crash
+        </label>
+        <p className="mt-1 text-xs text-zinc-500">
+          Restarts back off (2 s, 4 s, 8 s … up to 5 min). After 5 crashes within 10 minutes autostart gives up until
+          you start the VM yourself.
+        </p>
+        {s.restart_at && (
+          <p className="mt-2 text-sm text-blue-600">
+            Crashed; restarting at {new Date(s.restart_at * 1000).toLocaleTimeString()}.
+          </p>
+        )}
+        {s.crash_loop && (
+          <p className="mt-2 text-sm text-rose-600">Crash loop: autostart gave up. Start the VM to try again.</p>
+        )}
+        {error && <p className="mt-2 text-xs text-rose-600">{error}</p>}
+      </Card>
+    </div>
+  );
+}
+
 function Settings({ d }: { d: VmDetail }) {
   const qc = useQueryClient();
   const [saving, setSaving] = useState(false);
@@ -171,7 +225,12 @@ function Settings({ d }: { d: VmDetail }) {
   const stopped = d.summary.state === "stopped" || d.summary.state === "crashed";
   return (
     <div className="space-y-4">
-      {!stopped && (
+      {d.summary.state === "suspended" && (
+        <p className="text-sm text-zinc-600 dark:text-zinc-400">
+          The VM is suspended to disk: resume it or discard the saved state before changing its settings.
+        </p>
+      )}
+      {!stopped && d.summary.state !== "suspended" && (
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
           The VM is running. Saved changes apply the next time it starts.
         </p>

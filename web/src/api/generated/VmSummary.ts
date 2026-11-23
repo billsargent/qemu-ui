@@ -17,4 +17,18 @@ last_error: string | null,
 /**
  * The saved spec differs from what the running process was started with.
  */
-restart_pending: boolean, has_vnc: boolean, };
+restart_pending: boolean, has_vnc: boolean, 
+/**
+ * Started when the daemon starts, and restarted after a crash (M7-08).
+ */
+autostart: boolean, 
+/**
+ * When the next automatic restart after a crash is due (seconds since
+ * epoch), while one is scheduled.
+ */
+restart_at: number | null, 
+/**
+ * Autostart gave up: the VM crashed too often in a short time. A manual
+ * start clears it.
+ */
+crash_loop: boolean, };

@@ -3,4 +3,4 @@
 /**
  * Lifecycle state. `paused` always carries a reason (§7.1).
  */
-export type VmState = "stopped" | "starting" | "running" | "paused" | "stopping" | "crashed";
+export type VmState = "stopped" | "starting" | "running" | "paused" | "stopping" | "crashed" | "suspended";
