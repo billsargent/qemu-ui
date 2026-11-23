@@ -1535,6 +1535,7 @@ dependencies = [
  "rcgen",
  "rusqlite",
  "rustls",
+ "schemars",
  "serde",
  "serde_json",
  "sha-crypt",

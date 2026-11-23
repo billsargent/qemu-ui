@@ -27,6 +27,15 @@ cargo test --workspace          # also regenerates web/src/api/generated
 If `cargo test` changes files under `web/src/api/generated`, commit them; CI fails when
 they are stale.
 
+Golden files (`data/schema/*.json`, `data/openapi/openapi.json`) are checked by tests.
+Regenerate them with `UPDATE_GOLDEN=1 cargo test --workspace` and commit the result.
+
+A new HTTP route must be added to the table in `crates/qemu-ui-daemon/src/openapi.rs`;
+a test fails when the router and the OpenAPI document disagree.
+
+Docs live in `docs/`. Build the site with `(cd docs/site && npm ci && npm run build)`;
+the build fails on broken links between pages.
+
 Tests that need a real QEMU (`qemu-ui-qmp/tests/real_qemu.rs`, the probe smoke test) pass
 without running anything when no `qemu-system-x86_64` is found. CI always has one.
 
