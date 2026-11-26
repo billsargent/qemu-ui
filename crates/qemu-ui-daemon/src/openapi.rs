@@ -237,6 +237,22 @@ pub const OPS: &[Op] = &[
     ),
     op("post", "/vms/{id}/clone", "VMs", "Clone a VM"),
     op(
+        "post",
+        "/vms/{id}/export",
+        "Backups",
+        "Export a VM to a backup bundle (job)",
+    ),
+    op("get", "/backups", "Backups", "List backup bundles"),
+    op(
+        "post",
+        "/backups/import",
+        "Backups",
+        "Import a bundle as a new VM (job)",
+    ),
+    op("get", "/backups/{name}", "Backups", "Download a bundle"),
+    op("put", "/backups/{name}", "Backups", "Upload a bundle"),
+    op("delete", "/backups/{name}", "Backups", "Delete a bundle"),
+    op(
         "put",
         "/vms/{id}/autostart",
         "VMs",

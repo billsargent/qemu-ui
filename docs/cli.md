@@ -23,6 +23,7 @@ qemu-ui start|stop|force-stop|pause|resume|reset <vm>
 qemu-ui networks [list | delete <net>]
 qemu-ui snapshots list|take|revert|delete <vm> ...
 qemu-ui pools
+qemu-ui backups [list | export <vm> [--snapshots] | import <bundle> <name> [--pool P] | delete <bundle>]
 qemu-ui jobs [list | cancel <id>]
 qemu-ui tokens [list | create <name> | revoke <id>]
 qemu-ui audit [--limit N]
@@ -65,3 +66,17 @@ nics = [{ backend = { kind = "network", network = "lab" } }]
   `qemu-ui` against the storage API).
 - `--dry-run` prints the plan: `+` create, `~` change (with the fields), `-`
   delete. Without it, changes run in order and stop at the first failure.
+
+## Backup bundles
+
+`qemu-ui backups export <vm>` writes one file, `<vm>-<time>.qemu-ui.tar`, to the
+daemon's `backups/` directory. It holds the VM's configuration, a copy of every
+writable disk, its UEFI variables and its TPM state, with a SHA-256 for each.
+Running VMs can be exported: QEMU copies all disks from one point in time, and
+the guest's file systems are frozen for that moment when the guest agent
+answers. Read-only media (ISOs) are not included.
+
+`qemu-ui backups import <bundle> <name>` creates a new VM from a bundle, checking
+every checksum while unpacking. Bundles can be downloaded and uploaded through
+the web UI (Storage → Backups) or `GET`/`PUT /api/v1/backups/<name>` to move a
+VM between hosts.

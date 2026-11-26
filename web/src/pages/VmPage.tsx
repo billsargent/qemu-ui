@@ -14,6 +14,7 @@ import { VncConsole } from "../components/VncConsole";
 import { VmEditor } from "../components/VmEditor";
 import { Badge, Button, Card, Field, inputCls } from "../components/ui";
 import { ExportCard } from "../components/ImportExport";
+import { BackupCard } from "../components/Backups";
 import { DisplayCard } from "../components/Screens";
 import { QmpConsole } from "../components/QmpConsole";
 import { AccelBadge, StateBadge, VmActions, explainPause, useUptime } from "../components/vm";
@@ -263,6 +264,7 @@ function Settings({ d }: { d: VmDetail }) {
       />
       <CloneCard d={d} stopped={stopped} />
       <ExportCard id={d.summary.id} />
+      <BackupCard id={d.summary.id} active={!stopped} />
       <Card title="Danger zone">
         <div className="flex items-center gap-3">
           <Button
