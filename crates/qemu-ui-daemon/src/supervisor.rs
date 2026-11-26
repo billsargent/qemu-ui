@@ -1403,11 +1403,9 @@ impl Supervisor {
             log_path: &path_str(&log),
             started_at: now(),
         })?;
-        let _ = self.store.set_run_binary(
-            run_id,
-            &caps.binary.sha256,
-            &caps.qemu_version.to_string(),
-        );
+        let _ =
+            self.store
+                .set_run_binary(run_id, &caps.binary.sha256, &caps.qemu_version.to_string());
         self.live.lock().unwrap().insert(
             id.into(),
             Live {
@@ -2300,8 +2298,6 @@ impl Supervisor {
     }
 }
 
-/// Helpers shared by tests that need a real QEMU.
-
 /// A human message for a `BLOCK_IO_ERROR` event: which disk, and whether
 /// the host ran out of space.
 fn io_error_message(data: &Value, spec: Option<&VmSpec>) -> String {
@@ -2313,7 +2309,11 @@ fn io_error_message(data: &Value, spec: Option<&VmSpec>) -> String {
     let disk = data["device"]
         .as_str()
         .and_then(|d| index(d, "qui-dev"))
-        .or_else(|| data["node-name"].as_str().and_then(|n| index(n, "qui-disk")))
+        .or_else(|| {
+            data["node-name"]
+                .as_str()
+                .and_then(|n| index(n, "qui-disk"))
+        })
         .and_then(|i| spec?.disks.get(i))
         .map(|d| format!("disk {}/{}", d.image.pool, d.image.name))
         .unwrap_or_else(|| {
@@ -2332,6 +2332,7 @@ fn io_error_message(data: &Value, spec: Option<&VmSpec>) -> String {
     }
 }
 
+/// Helpers shared by tests that need a real QEMU.
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;

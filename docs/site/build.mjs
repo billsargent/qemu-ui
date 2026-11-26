@@ -31,6 +31,7 @@ const NAV = [
   ["api.md", "HTTP API"],
   ["rules/README.md", "Validation rules"],
   ["process-survival.md", "Process survival"],
+  ["operations.md", "Operations"],
   ["design/privileged-helper.md", "Privileged helper"],
 ];
 

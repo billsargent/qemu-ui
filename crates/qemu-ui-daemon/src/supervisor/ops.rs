@@ -220,7 +220,10 @@ mod tests {
         std::fs::write(&p, vec![b'z'; 150]).unwrap();
         assert!(truncate_rotate(&p, 100).unwrap());
         assert_eq!(std::fs::metadata(&p).unwrap().len(), 0);
-        assert_eq!(std::fs::read(d.join("serial.log.1")).unwrap(), vec![b'z'; 150]);
+        assert_eq!(
+            std::fs::read(d.join("serial.log.1")).unwrap(),
+            vec![b'z'; 150]
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -276,12 +279,18 @@ mod tests {
                     "action": "stop", "nospace": true, "reason": "No space left on device"}),
             Some(&spec),
         );
-        assert!(full.contains("default/root.qcow2") && full.contains("free space"), "{full}");
+        assert!(
+            full.contains("default/root.qcow2") && full.contains("free space"),
+            "{full}"
+        );
         let other = super::super::io_error_message(
             &json!({"device": "", "node-name": "qui-disk7", "operation": "read",
                     "action": "stop", "reason": "Input/output error"}),
             Some(&spec),
         );
-        assert!(other.contains("qui-disk7") && other.contains("Input/output error"), "{other}");
+        assert!(
+            other.contains("qui-disk7") && other.contains("Input/output error"),
+            "{other}"
+        );
     }
 }
