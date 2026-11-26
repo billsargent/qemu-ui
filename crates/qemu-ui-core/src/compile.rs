@@ -1355,12 +1355,22 @@ pub fn compile(spec: &VmSpec, ctx: &Context) -> Result<Compiled, Vec<Diagnostic>
         push(&mut a, "-object", o.to_string());
     }
     let mut next_port = 0;
+    // q35's AHCI controller has six ports of one unit each; QEMU's automatic
+    // placement puts every IDE device on the first port, so a second one
+    // (a SATA disk plus an installer CD-ROM) fails. Give each its own port.
+    // i440fx's two IDE buses of two units each place themselves fine.
+    let ahci = spec.machine.type_name.contains("q35");
+    let mut next_ide = 0;
     for (i, disk) in spec.disks.iter().enumerate() {
         let img = &ctx.images[&disk.image];
         let (file, mut format, mut dev) = disk_objects(disk.node_index(i), disk, img, ctx.os);
         if ports > 0 && is_pci_disk(disk.bus) {
             dev["bus"] = format!("qui-rp{next_port}").into();
             next_port += 1;
+        }
+        if ahci && disk.bus == DiskBus::Ide {
+            dev["bus"] = format!("ide.{next_ide}").into();
+            next_ide += 1;
         }
         push(&mut a, "-blockdev", file.to_string());
         if throttle.is_some() && disk.media == Media::Disk {
@@ -1712,6 +1722,12 @@ pub fn disk_objects(
     }
     if matches!(driver, "virtio-blk-pci" | "scsi-hd" | "ide-hd") {
         dev["write-cache"] = if write_cache { "on" } else { "off" }.into();
+        // A full host disk pauses the guest (`paused(io-error)`) instead of
+        // failing its writes; other errors are reported to the guest.
+        // These are QEMU's defaults today; spelled out so they cannot drift
+        // (plan.md §7.4).
+        dev["werror"] = "enospc".into();
+        dev["rerror"] = "report".into();
     }
     if let Some(b) = disk.boot_index {
         dev["bootindex"] = b.into();

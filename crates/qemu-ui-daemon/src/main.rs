@@ -203,6 +203,8 @@ async fn serve(
     supervisor.reattach_all().await;
     // Then start the autostart VMs that are not running (M7-08).
     tokio::spawn(supervisor.clone().autostart_all());
+    // Host sleep and log rotation (X-02).
+    tokio::spawn(supervisor.clone().housekeeping());
 
     let web_dir = args.web_dir.or_else(|| {
         let d = std::env::current_dir().ok()?.join("web").join("dist");

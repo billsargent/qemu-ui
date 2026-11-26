@@ -1,0 +1,1 @@
+{ "arch": "x86_64", "machine": "q35", "disk": "ide", "cdrom": "ide", "note": "q35 with SATA (AHCI) disk and CD-ROM, as Windows setup uses." }

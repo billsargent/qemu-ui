@@ -108,6 +108,11 @@ pub struct VmSummary {
     pub last_error: Option<String>,
     /// The saved spec differs from what the running process was started with.
     pub restart_pending: bool,
+    /// The QEMU binary this running VM uses was replaced since it started;
+    /// it keeps running on the old one and moves to this version on its next
+    /// start (plan.md §7.4).
+    #[serde(default)]
+    pub qemu_update: Option<String>,
     pub has_vnc: bool,
     /// Started when the daemon starts, and restarted after a crash (M7-08).
     #[serde(default)]

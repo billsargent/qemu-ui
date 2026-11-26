@@ -74,6 +74,11 @@ function Header({ d }: { d: VmDetail }) {
       {s.state !== "stopped" && <AccelBadge accel={s.accel} />}
       {uptime && <span className="text-xs text-zinc-500">up {uptime}</span>}
       {s.restart_pending && <Badge tone="blue">restart to apply changes</Badge>}
+      {s.qemu_update && (
+        <Badge tone="blue" title="QEMU was upgraded while this VM runs; it keeps the old build until it restarts.">
+          restarts on QEMU {s.qemu_update}
+        </Badge>
+      )}
       <div className="ml-auto">
         <VmActions vm={s} />
       </div>
@@ -103,7 +108,11 @@ function Overview({ d }: { d: VmDetail }) {
         <div className="lg:col-span-2">
           <Card title={s.state === "crashed" ? "Last run failed" : "Paused"}>
             {s.state === "paused" ? (
-              <p className="text-sm">{explainPause(s.pause_reason)}</p>
+              <>
+                <p className="text-sm">{explainPause(s.pause_reason)}</p>
+                {s.last_error && <p className="mt-1 text-sm text-amber-700 dark:text-amber-400">{s.last_error}</p>}
+                <p className="mt-1 text-xs text-zinc-500">Use Resume above once the cause is fixed.</p>
+              </>
             ) : (
               <pre className="text-xs whitespace-pre-wrap text-rose-600">{s.last_error}</pre>
             )}

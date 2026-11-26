@@ -1,0 +1,1 @@
+{ "arch": "x86_64", "machine": "q35", "disk": "nvme", "cdrom": "scsi", "note": "NVMe system disk and a virtio-scsi CD-ROM." }

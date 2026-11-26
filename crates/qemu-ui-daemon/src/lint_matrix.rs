@@ -5,6 +5,13 @@
 //!
 //! Binaries are found in `QEMU_UI_QEMU_DIR` when set, else on `PATH`.
 //! `QEMU_UI_LINT_MATRIX_ARCHS=x86_64,aarch64` limits the run.
+//!
+//! The golden spec corpus (X-01, `data/corpus/*.json`) runs in the same
+//! job: one hand-written spec per architecture and machine family, built on
+//! the editor's default for that binary, pinned to the named machine, with
+//! the listed disk and CD-ROM buses and an optional JSON merge patch. Every
+//! corpus spec whose binary is installed must pass dry lint, unless it
+//! carries a `known_failure` saying why not.
 
 #[cfg(test)]
 mod tests {
@@ -284,6 +291,233 @@ mod tests {
         assert!(
             failures.is_empty(),
             "unexpected lint failures:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// One corpus entry (`data/corpus/<name>.json`).
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CorpusEntry {
+        arch: String,
+        machine: String,
+        #[serde(default)]
+        disk: Option<DiskBus>,
+        #[serde(default)]
+        cdrom: Option<DiskBus>,
+        /// RFC 7386 merge patch over the built spec.
+        #[serde(default)]
+        patch: Option<serde_json::Value>,
+        #[serde(default)]
+        known_failure: Option<String>,
+        #[allow(dead_code)]
+        note: String,
+    }
+
+    fn corpus() -> Vec<(String, CorpusEntry)> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/corpus");
+        let mut out: Vec<(String, CorpusEntry)> = std::fs::read_dir(&dir)
+            .expect("data/corpus")
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .map(|p| {
+                let name = p.file_stem().unwrap().to_string_lossy().to_string();
+                let text = std::fs::read_to_string(&p).unwrap();
+                let e: CorpusEntry = serde_json::from_str(&text)
+                    .unwrap_or_else(|err| panic!("data/corpus/{name}.json: {err}"));
+                (name, e)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+        match (target, patch) {
+            (serde_json::Value::Object(t), serde_json::Value::Object(p)) => {
+                for (k, v) in p {
+                    if v.is_null() {
+                        t.remove(k);
+                    } else {
+                        merge_patch(t.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+                    }
+                }
+            }
+            (t, p) => *t = p.clone(),
+        }
+    }
+
+    fn disk(name: &str, bus: DiskBus, media: Media, boot: u32) -> DiskSpec {
+        DiskSpec {
+            image: ImageRef {
+                pool: "default".into(),
+                name: name.into(),
+            },
+            bus,
+            media,
+            readonly: media == Media::Cdrom,
+            boot_index: Some(boot),
+            cache: CacheMode::None,
+            aio: None,
+            discard: false,
+            slot: None,
+        }
+    }
+
+    /// Build a corpus entry's spec for this binary.
+    async fn corpus_spec(
+        sv: &crate::supervisor::Supervisor,
+        caps: &HostCaps,
+        e: &CorpusEntry,
+    ) -> Result<VmSpec, String> {
+        let bc = &caps.binaries[0];
+        let machine = qemu_ui_core::compile::pin_machine(&e.machine, bc)?;
+        let buses = sv.machine_buses(bc, &machine).await;
+        let (mut spec, _) = qemu_ui_core::vm::default_spec_on("corpus", bc, |_| buses);
+        spec.machine.type_name = machine;
+        spec.accel = "tcg".into();
+        if spec.cpu.model.as_deref() == Some("host") {
+            spec.cpu.model = None;
+        }
+        spec.memory.size_mib = 256;
+        if let Some(bus) = e.disk {
+            spec.disks.push(disk("corpus.qcow2", bus, Media::Disk, 1));
+        }
+        if let Some(bus) = e.cdrom {
+            spec.disks.push(disk("corpus.iso", bus, Media::Cdrom, 2));
+        }
+        if let Some(p) = &e.patch {
+            let mut v = serde_json::to_value(&spec).map_err(|e| e.to_string())?;
+            merge_patch(&mut v, p);
+            spec = serde_json::from_value(v).map_err(|e| format!("patch: {e}"))?;
+        }
+        Ok(spec)
+    }
+
+    /// The corpus files are well-formed (runs everywhere, no QEMU needed).
+    #[test]
+    fn corpus_files_parse() {
+        let c = corpus();
+        assert!(c.len() >= 8, "the corpus covers the main machine families");
+        for (name, e) in &c {
+            assert!(TARGETS.contains(&e.arch.as_str()), "{name}: unknown arch");
+            assert!(
+                name.starts_with(&format!("{}-", e.arch)),
+                "{name}: file names start with the arch"
+            );
+        }
+    }
+
+    type Row = (String, Result<(), String>);
+
+    #[test]
+    fn lint_matrix_golden_corpus() {
+        if std::env::var("QEMU_UI_LINT_MATRIX").as_deref() != Ok("1") {
+            eprintln!("skipping: set QEMU_UI_LINT_MATRIX=1 to run the golden corpus");
+            return;
+        }
+        let Some(img) = find("qemu-img") else {
+            panic!("the golden corpus needs qemu-img");
+        };
+        let bins = binaries();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut failures = Vec::new();
+        let mut table = Vec::new();
+        let entries = corpus();
+        let archs: std::collections::BTreeSet<String> =
+            entries.iter().map(|(_, e)| e.arch.clone()).collect();
+        for arch in archs {
+            let mine: Vec<&(String, CorpusEntry)> =
+                entries.iter().filter(|(_, e)| e.arch == arch).collect();
+            let Some((_, qemu)) = bins.iter().find(|(a, _)| *a == arch) else {
+                for (name, _) in mine {
+                    table.push(format!("{name:<28} skipped (no qemu-system-{arch})"));
+                }
+                continue;
+            };
+            let data = short_data_dir(&format!("gc{}", arch.len()));
+            let rows: Result<Vec<Row>, String> = rt.block_on(async {
+                let caps = caps_for(&arch, qemu, &img).await?;
+                let sv = make(&data, &caps).await;
+                for n in ["corpus.qcow2", "corpus.iso"] {
+                    let format = if n.ends_with(".iso") { "raw" } else { "qcow2" };
+                    sv.pools
+                        .create(
+                            &img,
+                            &ImageRef {
+                                pool: "default".into(),
+                                name: n.into(),
+                            },
+                            32 << 20,
+                            format,
+                        )
+                        .await
+                        .map_err(|e| format!("creating {n}: {e:#}"))?;
+                }
+                let mut rows = Vec::new();
+                for (name, e) in &mine {
+                    let r = match corpus_spec(&sv, &caps, e).await {
+                        Err(err) => Err(err),
+                        Ok(spec) => match tokio::time::timeout(
+                            std::time::Duration::from_secs(120),
+                            sv.lint(None, spec),
+                        )
+                        .await
+                        {
+                            Err(_) => Err("lint timed out".into()),
+                            Ok(Err(err)) => Err(format!("{err:?}")),
+                            Ok(Ok(r)) if r.ok => Ok(()),
+                            Ok(Ok(r)) => Err(r
+                                .diagnostics
+                                .iter()
+                                .find(|d| d.severity == qemu_ui_core::compile::Severity::Error)
+                                .map(|d| format!("{} ({}): {}", d.rule, d.field, d.message))
+                                .unwrap_or_else(|| "not ok".into())),
+                        },
+                    };
+                    rows.push((name.clone(), r));
+                }
+                Ok(rows)
+            });
+            let _ = std::fs::remove_dir_all(&data);
+            match rows {
+                Err(err) => {
+                    for (name, e) in mine {
+                        table.push(format!("{name:<28} FAIL {err}"));
+                        if e.known_failure.is_none() {
+                            failures.push(format!("{name}: {err}"));
+                        }
+                    }
+                }
+                Ok(rows) => {
+                    for (name, r) in rows {
+                        let known = mine
+                            .iter()
+                            .find(|(n, _)| *n == name)
+                            .and_then(|(_, e)| e.known_failure.as_ref());
+                        match (r, known) {
+                            (Ok(()), None) => table.push(format!("{name:<28} ok")),
+                            (Ok(()), Some(_)) => {
+                                table.push(format!("{name:<28} ok (marked known_failure)"));
+                                failures
+                                    .push(format!("{name}: passes now; remove its known_failure"));
+                            }
+                            (Err(err), Some(why)) => {
+                                table.push(format!("{name:<28} known failure: {why} ({err})"))
+                            }
+                            (Err(err), None) => {
+                                table.push(format!("{name:<28} FAIL {err}"));
+                                failures.push(format!("{name}: {err}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("golden corpus:\n{}", table.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "golden corpus failures:\n{}",
             failures.join("\n")
         );
     }

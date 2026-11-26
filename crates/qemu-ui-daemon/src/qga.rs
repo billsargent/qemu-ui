@@ -141,6 +141,23 @@ pub async fn shutdown(sock: &Path) -> Result<()> {
     .map(|_| ())
 }
 
+/// Set the guest clock to the host's (after the host slept, X-02).
+pub async fn set_time(sock: &Path) -> Result<()> {
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| anyhow!("host clock before 1970: {e}"))?
+        .as_nanos() as u64;
+    call(
+        sock,
+        "guest-set-time",
+        Some(json!({ "time": ns })),
+        true,
+        TIMEOUT,
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Freeze the guest's file systems; returns how many were frozen.
 pub async fn freeze(sock: &Path) -> Result<u64> {
     // Freezing waits for in-flight writes; allow more than a plain call.
