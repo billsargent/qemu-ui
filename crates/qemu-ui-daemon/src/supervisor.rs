@@ -2367,7 +2367,36 @@ pub(crate) mod test_support {
             sha256: String::new(),
             source: "path".into(),
         };
-        let caps = crate::probe::probe_binary(bin, &host).await.unwrap();
+        // Probe once per test process and share the result: parallel tests
+        // each probing a cold binary at once (several QEMUs starting together
+        // on a loaded host) hit the probe's own timeouts. The probe also
+        // retries, since a loaded host can still be slow the first time.
+        static PROBED: std::sync::OnceLock<
+            tokio::sync::Mutex<Option<(PathBuf, qemu_ui_core::caps::BinaryCaps)>>,
+        > = std::sync::OnceLock::new();
+        let mut slot = PROBED
+            .get_or_init(|| tokio::sync::Mutex::new(None))
+            .lock()
+            .await;
+        let caps = match slot.as_ref() {
+            Some((p, c)) if p == qemu => c.clone(),
+            _ => {
+                let mut tries = 0;
+                let c = loop {
+                    match crate::probe::probe_binary(bin.clone(), &host).await {
+                        Ok(c) => break c,
+                        Err(e) if tries < 2 => {
+                            tries += 1;
+                            eprintln!("probe failed ({e:#}), retrying");
+                        }
+                        Err(e) => panic!("probe failed: {e:#}"),
+                    }
+                };
+                *slot = Some((qemu.to_path_buf(), c.clone()));
+                c
+            }
+        };
+        drop(slot);
         HostCaps {
             host: HostInfo {
                 os: host.os,
@@ -2396,13 +2425,18 @@ pub(crate) mod test_support {
         Supervisor::new(store, scanner, data, data.join("r")).unwrap()
     }
 
+    /// Wait for a VM state, woken by the supervisor's events (with a
+    /// periodic re-check in case events lag). The deadline only bounds a
+    /// hung test; it is generous because QEMU exits slowly on a loaded host.
     pub async fn wait_state(sv: &Supervisor, id: &str, want: VmState) -> VmSummary {
-        for _ in 0..100 {
+        let mut events = sv.subscribe();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        while tokio::time::Instant::now() < deadline {
             let s = sv.detail(id).ok().unwrap().summary;
             if s.state == want {
                 return s;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = tokio::time::timeout(Duration::from_millis(500), events.recv()).await;
         }
         panic!(
             "VM never reached {want:?}: {:?}",

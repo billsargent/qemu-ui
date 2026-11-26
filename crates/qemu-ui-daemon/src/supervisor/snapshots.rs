@@ -741,9 +741,15 @@ mod real {
     /// Offline qemu-io on an image file; true when the command succeeded and
     /// (for reads) the pattern matched.
     fn qemu_io(file: &Path, cmd: &str) -> bool {
+        qemu_io_args(file, &[], cmd)
+    }
+
+    fn qemu_io_args(file: &Path, extra: &[&str], cmd: &str) -> bool {
         let qio = find("qemu-io").expect("qemu-io next to qemu-img");
         let out = std::process::Command::new(qio)
-            .args(["-f", "qcow2", "-c", cmd])
+            .args(["-f", "qcow2"])
+            .args(extra)
+            .args(["-c", cmd])
             .arg(file)
             .output()
             .unwrap();
@@ -755,18 +761,37 @@ mod real {
         out.status.success() && !text.contains("Pattern verification failed")
     }
 
-    /// qemu-io through the running VM's monitor.
-    async fn live_io(qmp: &Qmp, cmd: &str) -> bool {
+    /// qemu-io on the running VM's system disk through the monitor. The
+    /// device is addressed by its QOM path (virtio-blk-pci has no block
+    /// backend of its own). HMP qemu-io prints results on QEMU's stdout and
+    /// only errors on the monitor, so any monitor output is a failure.
+    async fn monitor_io(qmp: &Qmp, cmd: &str) {
         let r = qmp
             .execute(
                 "human-monitor-command",
-                Some(json!({"command-line": format!("qemu-io qui-dev0 \"{cmd}\"")})),
+                Some(json!({"command-line": format!(
+                    "qemu-io -d /machine/peripheral/qui-dev0/virtio-backend \"{cmd}\""
+                )})),
             )
             .await
             .unwrap();
-        !r.as_str()
-            .unwrap_or_default()
-            .contains("Pattern verification failed")
+        let out = r.as_str().unwrap_or_default();
+        assert!(out.trim().is_empty(), "qemu-io {cmd}: {out}");
+    }
+
+    /// Live I/O on the running VM's disk. Writes go through the VM; reads
+    /// flush the VM's view to the file and verify the pattern with a
+    /// read-only, force-shared qemu-io on the image, since a pattern mismatch
+    /// on the monitor is never reported back.
+    async fn live_io(qmp: &Qmp, disk: &Path, cmd: &str) -> bool {
+        if cmd.starts_with("read") {
+            monitor_io(qmp, "flush").await;
+            qemu_io_args(disk, &["-r", "-U"], cmd)
+        } else {
+            monitor_io(qmp, cmd).await;
+            monitor_io(qmp, "flush").await;
+            true
+        }
     }
 
     #[test]
@@ -861,7 +886,7 @@ mod real {
             // ---- live: memory snapshot, marker through the VM, revert
             sv.start(&id).await.map_err(|e| format!("{e:?}")).unwrap();
             let qmp = sv.qmp_of(&id).map_err(|e| format!("{e:?}")).unwrap();
-            assert!(live_io(&qmp, "write -P 0x00 0 4k").await);
+            assert!(live_io(&qmp, &disk, "write -P 0x00 0 4k").await);
             done(
                 &sv,
                 sv.take_snapshot(&id, "live", "with memory", true, false)
@@ -873,8 +898,8 @@ mod real {
                 VmState::Running,
                 "still running after save"
             );
-            assert!(live_io(&qmp, "write -P 0xcd 0 4k").await);
-            assert!(live_io(&qmp, "read -P 0xcd 0 4k").await);
+            assert!(live_io(&qmp, &disk, "write -P 0xcd 0 4k").await);
+            assert!(live_io(&qmp, &disk, "read -P 0xcd 0 4k").await);
             let live = sv
                 .list_snapshots(&id)
                 .await
@@ -889,7 +914,7 @@ mod real {
             assert!(live.with_memory);
             done(&sv, sv.revert_snapshot(&id, &live.id, true).await).await;
             assert!(
-                live_io(&qmp, "read -P 0x00 0 4k").await,
+                live_io(&qmp, &disk, "read -P 0x00 0 4k").await,
                 "disk state restored by snapshot-load"
             );
             wait_state(&sv, &id, VmState::Running).await;
