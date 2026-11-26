@@ -3,11 +3,17 @@
 /// Extract the target architecture from a QEMU system emulator file name.
 ///
 /// Accepts `qemu-system-x86_64`, `qemu-system-x86_64.exe`. Returns `None`
-/// for anything that is not a system emulator.
+/// for anything that is not a system emulator. Distribution aliases map to
+/// QEMU's target name: Debian/Ubuntu install `qemu-system-amd64`, with
+/// `qemu-system-x86_64` linking to it.
 pub fn target_from_filename(file_name: &str) -> Option<&str> {
     let stem = file_name.strip_suffix(".exe").unwrap_or(file_name);
     let arch = stem.strip_prefix("qemu-system-")?;
-    (!arch.is_empty()).then_some(arch)
+    match arch {
+        "" => None,
+        "amd64" => Some("x86_64"),
+        other => Some(other),
+    }
 }
 
 /// Normalise a host architecture name (as reported by `std::env::consts::ARCH`)
@@ -45,6 +51,7 @@ mod tests {
             Some("x86_64")
         );
         assert_eq!(target_from_filename("qemu-system-riscv64"), Some("riscv64"));
+        assert_eq!(target_from_filename("qemu-system-amd64"), Some("x86_64"));
         assert_eq!(target_from_filename("qemu-img.exe"), None);
         assert_eq!(target_from_filename("qemu-system-"), None);
     }

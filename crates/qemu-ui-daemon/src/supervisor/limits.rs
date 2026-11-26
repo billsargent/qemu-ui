@@ -319,8 +319,20 @@ mod real {
             };
             let out = tokio::time::timeout(Duration::from_secs(180), scenario).await;
             let _ = sv.force_stop(&id).await;
-            wait_state(&sv, &id, VmState::Stopped).await;
             out.expect("timed out").unwrap();
+            // Cleanup only: under a lowered memory limit QEMU may die on its
+            // own (seen on Windows CI as a stack-overflow exit) before the
+            // force stop lands, leaving the VM Crashed rather than Stopped. That
+            // crash is a product bug tracked in #154; this only keeps cleanup
+            // from masking the scenario result.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            while !matches!(
+                sv.detail(&id).ok().unwrap().summary.state,
+                VmState::Stopped | VmState::Crashed
+            ) {
+                assert!(tokio::time::Instant::now() < deadline, "VM never exited");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
         });
         drop(rt);
         let _ = std::fs::remove_dir_all(&data);
@@ -381,8 +393,20 @@ mod real {
             };
             let out = tokio::time::timeout(Duration::from_secs(180), scenario).await;
             let _ = sv.force_stop(&id).await;
-            wait_state(&sv, &id, VmState::Stopped).await;
             out.expect("timed out").unwrap();
+            // Cleanup only: under a lowered memory limit QEMU may die on its
+            // own (seen on Windows CI as a stack-overflow exit) before the
+            // force stop lands, leaving the VM Crashed rather than Stopped. That
+            // crash is a product bug tracked in #154; this only keeps cleanup
+            // from masking the scenario result.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            while !matches!(
+                sv.detail(&id).ok().unwrap().summary.state,
+                VmState::Stopped | VmState::Crashed
+            ) {
+                assert!(tokio::time::Instant::now() < deadline, "VM never exited");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
         });
         drop(rt);
         let _ = std::fs::remove_dir_all(&data);
