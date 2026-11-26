@@ -16,6 +16,7 @@ import type { GuestNetInfo } from "./generated/GuestNetInfo";
 import type { HostDisk } from "./generated/HostDisk";
 import type { ImageDetail } from "./generated/ImageDetail";
 import type { Job } from "./generated/Job";
+import type { BackupInfo } from "./generated/BackupInfo";
 import type { RecordingInfo } from "./generated/RecordingInfo";
 import type { RecordingsInfo } from "./generated/RecordingsInfo";
 import type { MeasureResult } from "./generated/MeasureResult";
@@ -341,6 +342,16 @@ export const api = {
     post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/flatten`),
   commitImage: (pool: string, name: string) =>
     post<Job>(`/pools/${encodeURIComponent(pool)}/images/${encodeURIComponent(name)}/commit`),
+  backups: () => request<BackupInfo[]>("/backups"),
+  exportVm: (id: string, snapshots: boolean) => post<{ job: Job }>(`/vms/${id}/export`, { snapshots }),
+  importBackup: (bundle: string, name: string, pool: string) => post<{ job: Job }>("/backups/import", { bundle, name, pool }),
+  deleteBackup: (name: string) => request<void>(`/backups/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  uploadBackup: (name: string, file: File) =>
+    request<void>(`/backups/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: file,
+      headers: { "content-type": "application/x-tar" },
+    }),
   cloneVm: (id: string, name: string, mode: "linked" | "full", pool: string) =>
     post<{ vm: VmDetail | null; job: Job | null }>(`/vms/${id}/clone`, { name, mode, pool }),
   hostUsb: () => request<HostUsb>("/host/usb"),

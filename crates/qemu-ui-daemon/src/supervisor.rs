@@ -35,6 +35,8 @@ use crate::scan::Scanner;
 use crate::store::{NewRun, RunRow, Store};
 
 mod autostart;
+mod backup;
+pub use backup::read_manifest;
 mod disks;
 mod forwards;
 mod hardware;

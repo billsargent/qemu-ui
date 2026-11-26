@@ -1,6 +1,7 @@
 //! qemu-uid: the qemu-ui daemon (plan.md §3).
 
 mod api;
+mod api_backups;
 mod api_disks;
 mod api_expert;
 mod api_fetch;

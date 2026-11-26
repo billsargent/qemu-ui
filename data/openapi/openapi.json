@@ -1291,6 +1291,152 @@
         ]
       }
     },
+    "/api/v1/backups": {
+      "get": {
+        "operationId": "get_backups",
+        "responses": {
+          "2XX": {
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "On failure, a JSON error"
+          }
+        },
+        "summary": "List backup bundles",
+        "tags": [
+          "Backups"
+        ]
+      }
+    },
+    "/api/v1/backups/import": {
+      "post": {
+        "operationId": "post_backups_import",
+        "responses": {
+          "2XX": {
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "On failure, a JSON error"
+          }
+        },
+        "summary": "Import a bundle as a new VM (job)",
+        "tags": [
+          "Backups"
+        ]
+      }
+    },
+    "/api/v1/backups/{name}": {
+      "delete": {
+        "operationId": "delete_backups_name",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "2XX": {
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "On failure, a JSON error"
+          }
+        },
+        "summary": "Delete a bundle",
+        "tags": [
+          "Backups"
+        ]
+      },
+      "get": {
+        "operationId": "get_backups_name",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "2XX": {
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "On failure, a JSON error"
+          }
+        },
+        "summary": "Download a bundle",
+        "tags": [
+          "Backups"
+        ]
+      },
+      "put": {
+        "operationId": "put_backups_name",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "2XX": {
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "On failure, a JSON error"
+          }
+        },
+        "summary": "Upload a bundle",
+        "tags": [
+          "Backups"
+        ]
+      }
+    },
     "/api/v1/events": {
       "get": {
         "operationId": "get_events",
@@ -3936,6 +4082,40 @@
         "summary": "Server-sent events for one VM",
         "tags": [
           "VMs"
+        ]
+      }
+    },
+    "/api/v1/vms/{id}/export": {
+      "post": {
+        "operationId": "post_vms_id_export",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "2XX": {
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "On failure, a JSON error"
+          }
+        },
+        "summary": "Export a VM to a backup bundle (job)",
+        "tags": [
+          "Backups"
         ]
       }
     },

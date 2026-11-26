@@ -78,6 +78,11 @@ enum Cmd {
     },
     /// Storage pools.
     Pools,
+    /// Backup bundles (a VM's configuration, disks, UEFI vars and TPM state).
+    Backups {
+        #[command(subcommand)]
+        action: Option<BackupAction>,
+    },
     /// Background jobs.
     Jobs {
         #[command(subcommand)]
@@ -176,6 +181,28 @@ enum SnapAction {
     },
     /// Delete a snapshot (by name or id).
     Delete { vm: String, snapshot: String },
+}
+
+#[derive(Subcommand)]
+enum BackupAction {
+    /// List bundles (default).
+    List,
+    /// Export a VM to a bundle (a job; running VMs too).
+    Export {
+        vm: String,
+        /// Keep qcow2 images' internal snapshots (stopped VMs).
+        #[arg(long)]
+        snapshots: bool,
+    },
+    /// Import a bundle as a new VM.
+    Import {
+        bundle: String,
+        name: String,
+        #[arg(long, default_value = "default")]
+        pool: String,
+    },
+    /// Delete a bundle.
+    Delete { bundle: String },
 }
 
 #[derive(Subcommand)]
@@ -366,6 +393,9 @@ fn run(cli: &Cli, c: &Client) -> Result<()> {
                     s(&p["path"])
                 );
             }
+        }
+        Cmd::Backups { action } => {
+            backup_cmd(c, action.as_ref().unwrap_or(&BackupAction::List), json)?
         }
         Cmd::Jobs { action } => match action.as_ref().unwrap_or(&JobAction::List) {
             JobAction::List => {
@@ -801,4 +831,51 @@ fn service_cmd(action: &ServiceAction) -> Result<()> {
             service::execute(&plan, a.dry_run)
         }
     }
+}
+
+fn backup_cmd(c: &Client, action: &BackupAction, json: bool) -> Result<()> {
+    match action {
+        BackupAction::List => {
+            let v = c.get("/backups")?;
+            if json {
+                return print_json(&v);
+            }
+            for b in v.as_array().into_iter().flatten() {
+                let m = &b["manifest"];
+                println!(
+                    "{:<44} {:>8} MiB  {}{}",
+                    s(&b["name"]),
+                    b["size"].as_u64().unwrap_or(0) >> 20,
+                    m["source_name"].as_str().unwrap_or("(unreadable)"),
+                    if m["live"] == true { "  live" } else { "" }
+                );
+            }
+        }
+        BackupAction::Export { vm, snapshots } => {
+            let id = c.vm_id(vm)?;
+            let v = c.post(
+                &format!("/vms/{id}/export"),
+                Some(&json!({"snapshots": snapshots})),
+            )?;
+            if json {
+                return print_json(&v);
+            }
+            println!("{} (job {})", s(&v["job"]["title"]), s(&v["job"]["id"]));
+        }
+        BackupAction::Import { bundle, name, pool } => {
+            let v = c.post(
+                "/backups/import",
+                Some(&json!({"bundle": bundle, "name": name, "pool": pool})),
+            )?;
+            if json {
+                return print_json(&v);
+            }
+            println!("{} (job {})", s(&v["job"]["title"]), s(&v["job"]["id"]));
+        }
+        BackupAction::Delete { bundle } => {
+            c.delete(&format!("/backups/{bundle}"))?;
+            println!("deleted {bundle}");
+        }
+    }
+    Ok(())
 }
