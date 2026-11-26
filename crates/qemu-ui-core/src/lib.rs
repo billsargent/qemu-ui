@@ -5,6 +5,7 @@
 //! the daemon does the I/O and feeds the results through these types.
 
 pub mod arch;
+pub mod backup;
 pub mod buses;
 pub mod caps;
 pub mod compile;

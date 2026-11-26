@@ -5,6 +5,7 @@ import type { PoolSummary } from "../api/generated/PoolSummary";
 import { Badge, Button, Card, Field, inputCls } from "../components/ui";
 import { navigate } from "../router";
 import { Uploader } from "../components/Uploader";
+import { BackupsPanel } from "../components/Backups";
 import { UrlFetch } from "../components/UrlFetch";
 import { ProgressBar } from "./JobsPage";
 
@@ -41,6 +42,7 @@ export default function StoragePage({ pool, image }: { pool?: string; image?: st
             <UrlFetch pool={current} />
             <CreateDisk pool={current} />
             <ShareRoots />
+            <BackupsPanel />
           </div>
         )}
       </div>
