@@ -1,0 +1,1 @@
+{ "arch": "arm", "machine": "virt", "disk": "virtio", "note": "32-bit Arm virt." }

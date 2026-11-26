@@ -42,6 +42,7 @@ mod forwards;
 mod hardware;
 mod limits;
 mod nics;
+mod ops;
 mod rules;
 mod snapshots;
 mod suspend;
@@ -413,7 +414,9 @@ impl Supervisor {
                 != serde_json::from_str::<Value>(&row.spec_json).ok()
         });
         let (restart_at, crash_loop) = self.restart_info(&row.id);
+        let qemu_update = active_run.and_then(|r| self.qemu_update(r.id, spec.as_ref()?));
         VmSummary {
+            qemu_update,
             autostart: row.autostart,
             restart_at,
             crash_loop,
@@ -428,6 +431,26 @@ impl Supervisor {
             restart_pending,
             has_vnc: active_run.is_some_and(|r| r.vnc_json.is_some()),
         }
+    }
+
+    /// The QEMU version a running VM will move to on its next start, when
+    /// the binary it runs was replaced (upgraded) since it started (X-02).
+    fn qemu_update(&self, run_id: i64, spec: &VmSpec) -> Option<String> {
+        let (sha, version) = self.store.run_binary(run_id).ok().flatten()?;
+        let caps = self.scanner.caps.try_read().ok()?;
+        let now = caps
+            .as_ref()?
+            .binaries
+            .iter()
+            .find(|b| b.arch == spec.arch)?;
+        (now.binary.sha256 != sha).then(|| {
+            let new = now.qemu_version.to_string();
+            if new == version {
+                format!("{new} (rebuilt)")
+            } else {
+                new
+            }
+        })
     }
 
     pub fn list(&self) -> Result<Vec<VmSummary>> {
@@ -1335,6 +1358,7 @@ impl Supervisor {
         std::fs::create_dir_all(&run_dir).map_err(|e| OpError::Failed(e.into()))?;
         let logs = self.vm_dir(id).join("logs");
         std::fs::create_dir_all(&logs).map_err(|e| OpError::Failed(e.into()))?;
+        self.rotate_logs(id);
         let log = logs.join(format!("run-{}.log", now()));
 
         // Hold the image locks until the run is recorded, so an image
@@ -1381,6 +1405,9 @@ impl Supervisor {
             log_path: &path_str(&log),
             started_at: now(),
         })?;
+        let _ =
+            self.store
+                .set_run_binary(run_id, &caps.binary.sha256, &caps.qemu_version.to_string());
         self.live.lock().unwrap().insert(
             id.into(),
             Live {
@@ -1594,7 +1621,7 @@ impl Supervisor {
             // A disk unplug the guest acknowledged late: free its nodes.
             self.disk_device_deleted(qmp, &data).await;
         }
-        self.emit(id, &kind, data);
+        self.emit(id, &kind, data.clone());
         match kind.as_str() {
             "SHUTDOWN" => {
                 if let Some(l) = self.live.lock().unwrap().get_mut(id) {
@@ -1602,8 +1629,27 @@ impl Supervisor {
                 }
                 self.set_state(id, VmState::Stopping, None, None);
             }
-            "STOP" | "RESUME" | "RESET" | "SUSPEND" | "WAKEUP" | "GUEST_PANICKED"
-            | "BLOCK_IO_ERROR" => {
+            "BLOCK_IO_ERROR" => {
+                self.refresh_status(id, qmp).await;
+                // Disks stop the guest on ENOSPC (`werror=enospc`): say which
+                // disk, so the user knows what to free and can resume (X-02).
+                if data["action"] == "stop" {
+                    let spec = self
+                        .store
+                        .last_run(id)
+                        .ok()
+                        .flatten()
+                        .and_then(|r| serde_json::from_str::<VmSpec>(&r.spec_json).ok());
+                    let msg = io_error_message(&data, spec.as_ref());
+                    self.set_state(id, VmState::Paused, Some("io-error"), Some(&msg));
+                }
+            }
+            "RESUME" => {
+                // Whatever stopped it (e.g. a full disk) is over.
+                let _ = self.store.clear_vm_error(id);
+                self.refresh_status(id, qmp).await;
+            }
+            "STOP" | "RESET" | "SUSPEND" | "WAKEUP" | "GUEST_PANICKED" => {
                 self.refresh_status(id, qmp).await;
             }
             _ => {}
@@ -2251,6 +2297,40 @@ impl Supervisor {
                 }
             }
         });
+    }
+}
+
+/// A human message for a `BLOCK_IO_ERROR` event: which disk, and whether
+/// the host ran out of space.
+fn io_error_message(data: &Value, spec: Option<&VmSpec>) -> String {
+    let index = |s: &str, prefix: &str| -> Option<usize> {
+        let rest = s.strip_prefix(prefix)?;
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    };
+    let disk = data["device"]
+        .as_str()
+        .and_then(|d| index(d, "qui-dev"))
+        .or_else(|| {
+            data["node-name"]
+                .as_str()
+                .and_then(|n| index(n, "qui-disk"))
+        })
+        .and_then(|i| spec?.disks.get(i))
+        .map(|d| format!("disk {}/{}", d.image.pool, d.image.name))
+        .unwrap_or_else(|| {
+            let d = data["device"].as_str().filter(|d| !d.is_empty());
+            let n = data["node-name"].as_str();
+            format!("disk {}", d.or(n).unwrap_or("?"))
+        });
+    let op = data["operation"].as_str().unwrap_or("I/O");
+    if data["nospace"].as_bool() == Some(true) {
+        format!(
+            "The host ran out of space writing {disk}. The guest is paused and              loses nothing: free space on the host disk, then resume."
+        )
+    } else {
+        let why = data["reason"].as_str().unwrap_or("I/O error");
+        format!("A {op} on {disk} failed ({why}); the guest is paused.")
     }
 }
 

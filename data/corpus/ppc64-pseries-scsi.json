@@ -1,0 +1,1 @@
+{ "arch": "ppc64", "machine": "pseries", "disk": "scsi", "cdrom": "scsi", "note": "POWER pseries with virtio-scsi." }

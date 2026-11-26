@@ -22,6 +22,7 @@ process. The web UI and the CLI (`qemu-ui`) talk to it over the same HTTP API.
 
 - [Validation rules](rules/README.md): every diagnostic id the editor shows.
 - [Process survival](process-survival.md): how VMs outlive the daemon.
+- [Operations](operations.md): QEMU upgrades, host sleep, full disks, log rotation.
 - [Privileged helper](design/privileged-helper.md): the small root/admin
   helper and its fixed request set.
 - [Spike: guacd](spikes/m0-15-guacd.md): why the guacd display engine is deferred.

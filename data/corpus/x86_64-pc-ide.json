@@ -1,0 +1,1 @@
+{ "arch": "x86_64", "machine": "pc", "disk": "ide", "cdrom": "ide", "patch": { "nics": [ { "backend": { "kind": "user", "forwards": [] }, "model": "e1000" } ] }, "note": "The legacy i440FX PC with IDE and e1000, for old guests." }

@@ -1,0 +1,1 @@
+{ "arch": "riscv64", "machine": "virt", "disk": "virtio", "note": "RISC-V virt." }

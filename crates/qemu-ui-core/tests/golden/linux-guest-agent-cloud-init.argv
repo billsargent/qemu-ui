@@ -22,7 +22,7 @@ host
 -blockdev
 {"cache":{"direct":true,"no-flush":false},"discard":"unmap","driver":"qcow2","file":"qui-disk0-file","node-name":"qui-disk0","read-only":false}
 -device
-{"bootindex":1,"drive":"qui-disk0","driver":"virtio-blk-pci","id":"qui-dev0","write-cache":"on"}
+{"bootindex":1,"drive":"qui-disk0","driver":"virtio-blk-pci","id":"qui-dev0","rerror":"report","werror":"enospc","write-cache":"on"}
 -netdev
 {"hostfwd":[{"str":"tcp:127.0.0.1:2222-:22"}],"id":"qui-net0","type":"user"}
 -device

@@ -1,0 +1,1 @@
+{ "arch": "aarch64", "machine": "virt", "disk": "virtio", "cdrom": "scsi", "note": "Arm64 virt with virtio disk and a SCSI CD-ROM." }

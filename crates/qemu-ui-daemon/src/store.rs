@@ -195,6 +195,12 @@ const MIGRATIONS: &[&str] = &[
         last_used  INTEGER
     );
     "#,
+    // 11: which QEMU build a run started with, so a QEMU upgrade under a
+    // running VM can be shown as "restarts on the new version" (X-02).
+    r#"
+    ALTER TABLE vm_run ADD COLUMN binary_sha TEXT;
+    ALTER TABLE vm_run ADD COLUMN qemu_version TEXT;
+    "#,
 ];
 
 /// The admin account row.
@@ -616,6 +622,33 @@ impl Store {
                 ],
             )?;
             Ok(c.last_insert_rowid())
+        })
+    }
+
+    /// Record the QEMU build a run started with.
+    pub fn set_run_binary(&self, run_id: i64, sha256: &str, version: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE vm_run SET binary_sha = ?2, qemu_version = ?3 WHERE id = ?1",
+                params![run_id, sha256, version],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The QEMU build a run started with: (sha256, version), when recorded.
+    pub fn run_binary(&self, run_id: i64) -> Result<Option<(String, String)>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT binary_sha, qemu_version FROM vm_run WHERE id = ?1",
+                [run_id],
+                |r| {
+                    Ok(r.get::<_, Option<String>>(0)?
+                        .zip(r.get::<_, Option<String>>(1)?))
+                },
+            )
+            .optional()
+            .map(Option::flatten)
         })
     }
 

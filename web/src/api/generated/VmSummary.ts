@@ -17,7 +17,13 @@ last_error: string | null,
 /**
  * The saved spec differs from what the running process was started with.
  */
-restart_pending: boolean, has_vnc: boolean, 
+restart_pending: boolean, 
+/**
+ * The QEMU binary this running VM uses was replaced since it started;
+ * it keeps running on the old one and moves to this version on its next
+ * start (plan.md §7.4).
+ */
+qemu_update: string | null, has_vnc: boolean, 
 /**
  * Started when the daemon starts, and restarted after a crash (M7-08).
  */
