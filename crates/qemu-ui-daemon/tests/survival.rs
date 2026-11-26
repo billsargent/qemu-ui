@@ -200,15 +200,9 @@ fn vms_survive_the_daemon_being_stopped_and_are_reattached() {
     let deadline = Instant::now() + Duration::from_secs(900);
     let arch = loop {
         let c = d.get("/host/capabilities");
-        // Debian/Ubuntu ship qemu-system-x86_64 as a link to
-        // qemu-system-amd64; the scan dedupes by hash and may keep either name.
-        let x86 = c["caps"]["binaries"].as_array().and_then(|b| {
-            b.iter()
-                .filter_map(|b| b["arch"].as_str())
-                .find(|a| *a == "x86_64" || *a == "amd64")
-                .map(str::to_string)
-        });
-        let has_x86 = x86.is_some();
+        let has_x86 = c["caps"]["binaries"]
+            .as_array()
+            .is_some_and(|b| b.iter().any(|b| b["arch"] == "x86_64"));
         if c["scan"]["running"] == false && c["caps"].is_object() {
             let probed: Vec<String> = c["caps"]["binaries"]
                 .as_array()
@@ -223,7 +217,7 @@ fn vms_survive_the_daemon_being_stopped_and_are_reattached() {
                 "scan finished without qemu-system-x86_64: probed {probed:?}; failed {}; scan {}",
                 c["caps"]["failed"], c["scan"]
             );
-            break x86.unwrap();
+            break "x86_64";
         }
         assert!(
             Instant::now() < deadline,

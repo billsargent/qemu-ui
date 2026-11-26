@@ -278,6 +278,24 @@ fn dropped(app: &crate::api::App, vm: &str, id: u64) -> u64 {
         .map_or(u64::MAX, |v| v.input_dropped)
 }
 
+/// Wait until viewer `id` has had exactly `want` input messages dropped.
+/// A screen update can arrive before the proxy has parsed the key events
+/// sent just before it, so the count is awaited, not read once.
+async fn expect_dropped(app: &crate::api::App, vm: &str, id: u64, want: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let got = dropped(app, vm, id);
+        if got == want {
+            return;
+        }
+        assert!(
+            got < want && tokio::time::Instant::now() < deadline,
+            "viewer {id}: {got} inputs dropped, want {want}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[test]
 fn only_the_controller_types_and_others_keep_watching() {
     let (Some(qemu), Some(img)) = (find("qemu-system-x86_64"), find("qemu-img")) else {
@@ -355,9 +373,9 @@ fn only_the_controller_types_and_others_keep_watching() {
             for v in [&mut a, &mut b, &mut c] {
                 v.expect_update().await;
             }
+            expect_dropped(&app, &id, b.id, 2).await;
+            expect_dropped(&app, &id, c.id, 2).await;
             assert_eq!(dropped(&app, &id, a.id), 0);
-            assert_eq!(dropped(&app, &id, b.id), 2);
-            assert_eq!(dropped(&app, &id, c.id), 2);
 
             // B takes control over the API; A's input is dropped from now on.
             let r = post_json(
@@ -371,7 +389,7 @@ fn only_the_controller_types_and_others_keep_watching() {
             b.key(true).await;
             a.expect_update().await;
             b.expect_update().await;
-            assert_eq!(dropped(&app, &id, a.id), 1);
+            expect_dropped(&app, &id, a.id, 1).await;
             assert_eq!(dropped(&app, &id, b.id), 2);
 
             // Watch-only viewers can't take control.
