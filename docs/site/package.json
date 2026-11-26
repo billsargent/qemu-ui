@@ -1,0 +1,14 @@
+{
+  "name": "qemu-ui-docs",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Builds the qemu-ui documentation site from docs/ into docs/site/dist.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "marked": "^18.2.1",
+    "smol-toml": "^1.9.1"
+  }
+}

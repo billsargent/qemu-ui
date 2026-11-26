@@ -31,6 +31,7 @@ mod jobs;
 mod lint_matrix;
 mod netswitch;
 mod networks;
+mod openapi;
 mod passt;
 mod probe;
 mod procs;

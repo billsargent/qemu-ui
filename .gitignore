@@ -7,6 +7,7 @@
 # Web
 node_modules/
 /web/dist/
+/docs/site/dist/
 
 # Runtime state created by a dev run
 /var/
